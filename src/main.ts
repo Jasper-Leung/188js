@@ -219,15 +219,28 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | v
 /**
  * 让浏览器有机会把上面这些画出来（启动屏的进度条是真的，不是假的）。
  *
- * **必须给 setTimeout 兜底。** 浏览器对后台标签页的 `requestAnimationFrame`
- * 是完全暂停的，而"玩家在另一个标签页点开这个链接、回头再切过来"是极常见的。
- * 纯 rAF 的写法在这种情形下会**永远停在 62%**——世界已经建好了、进度条卡在
- * 那一格，页面上什么也不发生，看起来像加载失败。
+ * 这个函数改过两次，每次都是被真实故障逼出来的：
  *
- * 所以这里让 rAF 和 20ms 定时器赛跑：前台时 rAF 几乎立刻赢（同一帧），
- * 后台时定时器兜住，启动照常走完。切回前台后画布会自己接上。
+ * 1. **纯 `requestAnimationFrame`**：后台标签页里 rAF **根本不触发**，
+ *    玩家在另一个标签页点开链接、回头再切过来，进度条永远停在 62%。
+ * 2. **改成 `setTimeout(20)` 兜底**：仍然会卡。后台标签页在隐藏 5 分钟后
+ *    进入 intensive throttling，定时器被限到**每分钟一次**——
+ *    于是"等 20ms"变成"等一分钟"，启动条肉眼可见地一格一格爬。
+ *    而爬到一半的那几格，玩家在另一个标签页，**根本没在看它**。
+ *
+ * 所以第三版先问一句"有没有人在看"：
+ *   · `document.hidden` 为真 → 直接放行。没有观众的一帧没有意义，
+ *     继续往下走才是对的；等它反而是唯一会把它卡住的东西。
+ *   · 否则 rAF 与一个 **MessageChannel** 的任务边界赛跑。
+ *     选它不选 `setTimeout` 是因为 MessageChannel 走任务队列、
+ *     **不受后台限流**，所以就算 `hidden` 判断在某些环境里失效，
+ *     这一路也不会被限到一分钟一次。
+ *
+ * 主循环 `GameLoop` 仍然只走 rAF——游戏不需要给没人在看的标签页渲染，
+ * 切回前台时 `focus` 监听会把它接上。
  */
 function nextFrame(): Promise<void> {
+  if (typeof document !== 'undefined' && document.hidden) return Promise.resolve();
   return new Promise((r) => {
     let done = false;
     const finish = () => {
@@ -236,7 +249,18 @@ function nextFrame(): Promise<void> {
       r();
     };
     requestAnimationFrame(finish);
-    setTimeout(finish, 20);
+    try {
+      const mc = new MessageChannel();
+      mc.port1.onmessage = () => {
+        finish();
+        mc.port1.close();
+      };
+      mc.port2.postMessage(0);
+    } catch {
+      // 极老的浏览器没有 MessageChannel。落到 20ms 定时器，
+      // 至少比"什么都不做"好。
+      setTimeout(finish, 20);
+    }
   });
 }
 
