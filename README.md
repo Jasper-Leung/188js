@@ -350,6 +350,38 @@ tools/       gd-parse extract-data compress-textures optimize-assets
 
 ---
 
+## 仓库
+
+源码在 `https://github.com/Jasper-Leung/188js`，分支 `main`。
+
+```bash
+npm install
+npm run dev        # 开发服务器
+npm run typecheck  # strict + noUnusedLocals + noUnusedParameters
+npm run build      # 产物进 dist/
+npm run verify     # 无头回归 16 条 / 142 断言
+```
+
+**一个不明显的坑**：`git push` 在这台机器上第一次报
+`Recv failure: Connection was reset`，而 `Invoke-WebRequest` 同一个地址是 200。
+原因是 git 自带的 HTTP/2 协商被中间设备重置了。本仓库已经设了
+
+```
+git config http.version HTTP/1.1
+```
+
+换台机器克隆后如果 push 报同样的错，先试这一条。
+
+**忽略规则的两条决定**：
+- `dist/` 与 `node_modules/` 忽略（能重建）。
+- **`public/` 不忽略**——那 8.8MB 是游戏本体（模型/字体/音频），
+  源项目里已压过一轮（22.3MB → 5MB）。忽略掉它，仓库就只剩代码，
+  clone 下来 build 出来是一片空地。
+- `*.import` 忽略：那是 Godot 的导入桩，对 web 构建毫无用处，
+  留着还会让"这个项目依赖 Godot 吗"这个问题变模糊。
+
+---
+
 ## 正式开发计划
 
 见 **[PLAN.md](PLAN.md)**。一句话结论：**剧情不是没有，是没送达**——
