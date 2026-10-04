@@ -12,9 +12,13 @@
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
 import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
 import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
+import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
 import { stickVector, keyToVec } from '../core/stick';
 import { groundOffsetFor } from '../world/vegetation';
+import { Stations } from '../world/stations';
+import { Terrain } from '../world/terrain';
+import { Road } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
 import { canRide, isInWorld } from '../game/phase';
 import { assertRide } from './ride';
@@ -878,6 +882,69 @@ check('verify_chapter', () => {
   return expect(
     probs.length === 0,
     probs.length ? probs.join('；') : '集齐→回家→第一章完成·解锁第二章，闩锁只放行一次',
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 建筑体检
+/**
+ * 16 座驿站的健康检查。**与调试面板跑的是同一个函数**（`auditBuildings`），
+ * 所以面板上写的「正常/不正常」和这里的结果永远一致——
+ * 这是这个检查有意义的前提：两处各判一次，早晚会有一处先改。
+ *
+ * 判据都对应一种"看起来不对"的具体读法：
+ *   · 没加载        → 那个位置空着
+ *   · 压路面        → 房子长在沥青里
+ *   · 地基不平      → 一头悬空一头埋土
+ *   · 悬空 / 埋土  → 底面离地 / 入地超过 1.5m
+ *   · 尺寸离谱      → 半宽超过 `STATION_FOOT_HALF`、或高到超过站名锚点
+ *
+ * 入参只列 `stations` / `terrain` / `road` 三样（`AuditContext`），
+ * 所以这里造的是**真的** Terrain / Road / Stations，不是一个假 World。
+ */
+check('verify_buildings', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const terrain = new Terrain();
+  const road = new Road(terrain);
+  const stations = new Stations(PRESETS[1], terrain);
+  const sum = auditSummary({ stations, terrain, road });
+
+  // 1. 16 座都在
+  asserts++;
+  if (sum.total !== 16) probs.push(`驿站 ${sum.total} 座，应为 16`);
+
+  // 2. 一座都不能有 err。
+  //    会红的做法：把某座驿站的 `worldPos.y` 抬高 3m（悬空），
+  //    或者把它的 `radius` 改成 20（压路肩）。
+  asserts++;
+  if (sum.errs > 0) probs.push(`建筑体检有 ${sum.errs} 个 err：\n${sum.text}`);
+
+  // 3. warn 也要清零。地基起伏是最容易被"看起来还行"掩盖的一类：
+  //    一座房子站在 6° 的坡上，骑行视角看不出问题，
+  //    走到它侧面才知道有一头悬空。
+  asserts++;
+  if (sum.warns > 0) probs.push(`建筑体检有 ${sum.warns} 个 warn：\n${sum.text}`);
+
+  // 4. 程序化地标必须真的建出几何体。
+  //    `loaded = true` 但 `object = null` 是"表看着正常、路上什么都没有"，
+  //    而上面三条判据里没有一条能抓到它——它们查的是位置，不是"有没有东西"。
+  asserts++;
+  const archStations = stations.list.filter((s) => archKindFor(s.modelIdx) !== null);
+  if (archStations.length === 0) {
+    probs.push('一站程序化地标都没有，ARCH_BY_MODEL_IDX 的映射全丢了');
+  } else {
+    for (const s of archStations) {
+      if (!s.object) {
+        probs.push(`#${s.index} ${s.placement.def.name} 是程序化地标却没有几何体`);
+        break;
+      }
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : `16 座全部正常（err 0 / warn 0）· 与 ?debug 面板同源`,
     asserts,
   );
 });

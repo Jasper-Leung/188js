@@ -1272,6 +1272,72 @@
 }
 
 /* =============================================================================
+   调试面板（?debug）
+   -----------------------------------------------------------------------------
+   贴左、可滚、**可全选复制**。可复制是硬要求：这份文本的用途就是
+   粘进对话/issue，而 `user-select: none` 会让"选中再复制"直接失效。
+   钉住时（is-pinned）不自动刷新——那是"停在某一点上边看边调"的意思。
+   ========================================================================== */
+
+.g-root .g-debug {
+  position: absolute;
+  left: 0.6rem;
+  top: 0.6rem;
+  bottom: 0.6rem;
+  width: min(46rem, 62%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4em;
+  padding: 0.5em 0.6em;
+  color: #e8f0e4;
+  background: rgba(14, 18, 14, 0.9);
+  border: 1px solid rgba(232, 240, 228, 0.22);
+  border-radius: var(--radius);
+  z-index: 96;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.g-root .g-debug-bar {
+  display: flex;
+  gap: 0.35em;
+  flex: 0 0 auto;
+  position: relative;
+}
+
+.g-root .g-debug-btn {
+  font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 0.25em 0.6em;
+  color: #e8f0e4;
+  background: rgba(232, 240, 228, 0.1);
+  border: 1px solid rgba(232, 240, 228, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.g-root .g-debug-btn:hover {
+  background: rgba(232, 240, 228, 0.2);
+}
+
+.g-root .g-debug-hint {
+  position: absolute;
+  right: 0;
+  top: 0.3em;
+  font: 11px/1.4 ui-monospace, monospace;
+  color: #b9d9a8;
+}
+
+.g-root .g-debug-text {
+  flex: 1 1 auto;
+  margin: 0;
+  overflow: auto;
+  font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* =============================================================================
    性能面板
    ========================================================================== */
 

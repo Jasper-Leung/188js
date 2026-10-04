@@ -37,6 +37,8 @@ import { perf } from './core/perf';
 import { getBasins } from './world/basins';
 import { installTouchDetection, touchEnabled, setTouchMode } from './core/touch';
 import { SceneDump } from './ui/sceneDump';
+import { DebugPanel } from './debug/panel';
+import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportBothSides, seededBackText, type EndingId } from './game/postcard';
 
 import { canRide as canRideNow, type Phase } from './game/phase';
@@ -249,6 +251,8 @@ class App {
   loop!: GameLoop;
   /** `?dump=1` 的场景自检面板。正式发行时不存在——它只在调试参数下挂上 */
   dump: SceneDump | null = null;
+  /** `?debug` 的场景探针面板。`F10` 开关，`P` 探针 / `B` 驿站表 */
+  debug: DebugPanel | null = null;
 
   private keys = new Set<string>();
   private touchMode = false;
@@ -384,14 +388,39 @@ class App {
       this.dump = new SceneDump(root, this.world);
     }
 
-    // `?arc=0.42` 把玩家放到中心线参数 0.42 处，`?yaw=90` 再指定朝向（度）。
+    // `?debug` 场景探针。按 F10 开关。
+    // 它与 `?dump` 的分工：dump 报「场景里有哪些渲染对象」（给 three 用），
+    // probe 报「我在哪、镜头什么状态、这里是什么地方、驿站健康吗」（给人与 AI 用）。
+    // 两个都要，因为它们的失败模式不同：dump 抓"多出来的东西"，
+    // probe 抓"该在那里的东西不在了"。
+    const q = new URLSearchParams(location.search);
+    if (q.has('debug') || q.has('probe') || q.has('buildings')) {
+      this.debug = new DebugPanel(root, this.world);
+      if (q.has('buildings')) this.debug.setMode('buildings');
+      // `?probe` 默认直接显示；`?debug` 只是把面板建起来等 F10
+      if (q.has('probe') || q.has('buildings')) this.debug.setShown(true);
+    }
+    // `?x=..&z=..` 直接探一个坐标，并把结果打到 console。
+    // 不带 x/z 时就是探玩家所在处——这是"别人报 bug"时最省事的入口：
+    // 对方只要把带坐标的链接发过来，接手的人看到的现场与对方完全一致。
+    if (q.has('x') || q.has('z') || q.has('probe')) {
+      const xs = q.get('x');
+      const zs = q.get('z');
+      const at = xs !== null && zs !== null ? { x: Number(xs), z: Number(zs) } : {};
+      const text = probeAt(this.world, at.x, at.z, { buildings: q.has('buildings'), radius: 40 });
+      console.log(text);
+      document.title = '188号礼物 · 探针';
+    }
+    // `?dump=1` 已经消费过 query，但探针还要读 `x`/`z`，所以复用同一个 q。
+    // 弧长定位入口：`?arc=` 见下。
+
+    // 弧长定位入口：`?arc=0.42` 把玩家放到中心线参数 0.42 处，`?yaw=90` 再指定朝向（度）。
     // 停在原地**不自动开**——演示会一直往前骑，而"同一个画面看两次"
     // 才是这类问题唯一能查的方式：8 字交叉口那种地方，
     // 错过一次就得再绕一整圈。
-    const qs = new URLSearchParams(location.search);
-    const arc = qs.get('arc');
+    const arc = q.get('arc');
     if (arc !== null) {
-      const yaw = qs.get('yaw');
+      const yaw = q.get('yaw');
       this.world.teleportToArc(Number(arc), yaw === null ? undefined : Number(yaw));
       this.enterWorld();
     }
@@ -423,6 +452,47 @@ class App {
       },
       configurable: true,
     });
+
+    /**
+     * 探针的编程入口。**这是"让 AI 助手知道现场"的那一条路**：
+     * 在控制台敲 `gift188.probe()` 得到当前位置与镜头的完整文本，
+     * `gift188.probe(-164, -137)` 探任意坐标，
+     * `gift188.probe(undefined, undefined, true)` 附上 16 座驿站体检表。
+     *
+     * 返回**字符串**而不是打印——这样它能被赋值、被复制、被贴进对话。
+     * 打印出来的那一份只存在于滚屏里，捞不回来。
+     */
+    Object.defineProperty(window, 'gift188', {
+      get: () => this.debugHandle(),
+      configurable: true,
+    });
+  }
+
+  /** `window.gift188` 的内容与 `probe()` 方法。拆出来是为了类型干净 */
+  private debugHandle(): Record<string, unknown> {
+    const w = this.world;
+    const p = w.ride.pos;
+    return {
+      route: { stations: STATIONS.length, points: CENTERLINE.length, length: TOTAL_ARCLENGTH },
+      bike: {
+        x: +p.x.toFixed(2),
+        y: +p.y.toFixed(2),
+        z: +p.z.toFixed(2),
+        speed: +w.ride.speedValue.toFixed(2),
+        onRoad: w.ride.onRoad(),
+        /** 到中心线的最近距离（米）。>8 就说明骑偏了 */
+        offCenterline: +minDistToCenterline(p.x, p.z).toFixed(2),
+        arc: +nearestArcParam(p.x, p.z).toFixed(4),
+      },
+      chapter: { n: game.chapter, oneDone: game.chapter1Done, objective: game.objective },
+      perf: { ...perf },
+      nearby: { ...w.nearby },
+      phase: this.phase,
+      /** 探针。返回文本，可直接贴进对话 */
+      probe: (x?: number, z?: number, buildings?: boolean) => probeAt(w, x, z, { buildings: !!buildings, radius: 40 }),
+      /** 16 座驿站的完整体检表（带上玩家位置，所以"该加载却没加载"会报出来） */
+      buildings: () => buildingTable({ stations: w.stations, terrain: w.terrain, road: w.road, playerX: p.x, playerZ: p.z }),
+    };
   }
 
   private backText = '';
@@ -466,6 +536,23 @@ class App {
           // 不值得为正式发行版本再背一个常驻面板。
           e.preventDefault();
           this.dump?.toggle();
+          break;
+        case 'F10':
+          e.preventDefault();
+          if (this.debug) {
+            this.debug.toggle();
+          } else {
+            // 没带 `?debug` 就现场建一个：排障时"先改 URL 再刷新"很烦，
+            // 而这个面板不加载任何资产，建它的代价只有几行 DOM。
+            this.debug = new DebugPanel(document.getElementById('ui-root') as HTMLElement, this.world);
+            this.debug.setShown(true);
+          }
+          break;
+        case 'KeyP':
+          if (this.debug?.isShown) this.debug.setMode('probe');
+          break;
+        case 'KeyB':
+          if (this.debug?.isShown) this.debug.setMode('buildings');
           break;
         default:
           break;
@@ -765,6 +852,7 @@ class App {
     if (this.mg.isRunning) this.mg.render();
     this.ui.update(dt);
     this.dump?.update(dt);
+    this.debug?.update(dt);
     if (this.demoActive) this.demoT += dt;
     this.syncPerf();
   }
