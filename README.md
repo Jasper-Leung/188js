@@ -415,7 +415,7 @@ tools/       gd-parse extract-data compress-textures optimize-assets
 
 **为什么不拿「半宽 ≤ `STATION_FOOT_HALF`」当判据**：半宽是从世界 AABB 量出来的，
 而矩形绕 Y 转过之后 AABB 必然变大（15.4m 的驿楼转 30°，AABB 就到 17.2m）——
-那个数里混着「朝向」。真�真正要守的是**建筑边缘离沥青还有多远**。
+那个数里混着「朝向」。真正要守的是**建筑边缘离沥青还有多远**。
 
 ### 证明这套判据会红
 
