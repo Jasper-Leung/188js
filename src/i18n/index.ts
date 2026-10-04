@@ -74,10 +74,21 @@ export function t(key: string, vars?: Record<string, string | number>): string {
 
   // 命名参数 {name}
   s = s.replace(/\{(\w+)\}/g, (m, name: string) => (name in vars ? String(vars[name]) : m));
-  // 位置参数 %s %d %f —— 按出现顺序消费
+  // 位置参数 %s %d %f（含 %.1f / %.0f 精度）与 %% 转义 —— 按出现顺序消费。
+  // `%%` 必须写在分支最前面：`%d%%` 这类串里，先吃到 `%d` 剩下的 `%%`
+  // 才能被认成转义符，而不是被当成"一个 % 加一个残缺占位符"原样留在界面上。
+  // 少了精度分支，茶的 `%.1f` 和琴的 `%.0f` 会一字不差地显示成 "%.1f"。
   let i = 0;
   const ordered = Object.values(vars);
-  s = s.replace(/%[sdf]/g, () => (i < ordered.length ? String(ordered[i++]) : ''));
+  s = s.replace(/%%|%(\.\d+)?[sdf]/g, (m, prec: string | undefined) => {
+    if (m === '%%') return '%';
+    const v = i < ordered.length ? ordered[i++] : undefined;
+    if (v === undefined) return '';
+    if (!prec) return String(v);
+    const n = typeof v === 'number' ? v : Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return n.toFixed(Number(prec.slice(1)));
+  });
   return s;
 }
 

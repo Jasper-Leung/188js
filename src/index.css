@@ -235,3 +235,89 @@ body {
   color: rgba(43, 36, 27, 0.6);
   min-height: 12px;
 }
+
+/* ---------------------------------------------------------------- 黑底文字卡
+ *
+ * 路边读到的字。**pointer-events: none 是硬要求**——
+ * 它是背景上浮出来的一层字，压在它下面的路必须照样能点、照样能转。
+ * 锁操作意味着玩家在过弯时被锁住，那是最容易招骂的一种打断。
+ */
+.g-cards {
+  position: absolute;
+  left: 50%;
+  top: 22%;
+  transform: translateX(-50%);
+  width: min(78vw, 620px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  pointer-events: none;
+  z-index: 8;
+}
+.g-card-line {
+  width: 100%;
+  padding: 14px 20px;
+  text-align: center;
+  /* 深底浅字 = 刻在石头上；半透明白卡 = 游戏弹了个提示。
+   * 这是玩家分辨「这是世界里的东西」最快的办法。 */
+  background: rgba(18, 16, 14, 0.88);
+  border: 1px solid rgba(232, 224, 205, 0.16);
+  border-radius: 3px;
+  opacity: 0;
+  animation: g-card-in 220ms ease-out forwards;
+}
+.g-card-line.is-interrupt {
+  background: rgba(10, 9, 8, 0.95);
+  border-color: rgba(180, 96, 48, 0.5);
+}
+.g-card-t {
+  font-size: 12px;
+  letter-spacing: 0.28em;
+  color: rgba(214, 196, 160, 0.72);
+  margin-bottom: 8px;
+}
+.g-card-b {
+  font-size: 17px;
+  line-height: 1.75;
+  color: #efe7d6;
+  white-space: pre-wrap;
+}
+@keyframes g-card-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ---------------------------------------------------------------- 结算屏
+ *
+ * 「打成了」只有一条 toast 飘过去是不够的：这是玩家唯一确认
+ * 自己做到什么的地方，而 toast 长得很像「又一条提示」。
+ * 一句大字 + 这件乐事的名字，是这件事应有的分量。
+ */
+.g-result {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 9;
+}
+.g-result-box { text-align: center; }
+.g-result-big {
+  font-size: 46px;
+  letter-spacing: 0.3em;
+  text-indent: 0.3em;
+  color: rgba(240, 230, 210, 0.55);
+}
+.g-result.is-win .g-result-big {
+  color: #f2e3bd;
+  text-shadow: 0 0 26px rgba(180, 140, 70, 0.5);
+}
+.g-result-sub {
+  margin-top: 10px;
+  font-size: 15px;
+  letter-spacing: 0.5em;
+  text-indent: 0.5em;
+  color: rgba(214, 196, 160, 0.8);
+}

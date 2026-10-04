@@ -119,6 +119,10 @@ export class MiniGameHost {
   /** 定步长。宿主在暂停时不要调。 */
   fixedUpdate(dt: number) {
     if (!this.running || !this.game) return;
+    // 游戏自己的状态机在这里往前走。`step()` 没有第二个调用方——
+    // 漏掉这一句，茶的注水不走、竹的引子不放、琴的示范不响、禽的倒计时不动，
+    // 五件乐事全停在开场那一帧。
+    this.game.step(dt);
     this.elapsed += dt;
     // 超时兜底：云与茶没有内建计时，靠这道
     if (this.resultT < 0 && this.elapsed > TIMEOUT_SEC) {
@@ -204,16 +208,6 @@ export class MiniGameHost {
     };
     this.canvas.addEventListener('pointerup', up);
     this.canvas.addEventListener('pointercancel', up);
-  }
-
-  /**
-   * 小游戏是否吃掉了这次按键。宿主在处理「打卡」之前要问一句，
-   * 否则云和茶按住的空格会顺手把打卡也触发一次。
-   */
-  consumesKey(code: string): boolean {
-    if (!this.running || !this.game) return false;
-    if (code === 'Escape') return true;
-    return this.game.onKeyDown(code, false);
   }
 
   get isRunning() {

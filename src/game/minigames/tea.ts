@@ -35,6 +35,8 @@ import {
 } from './chrome';
 import type { MiniGame, MiniGameContext, MiniGameResult } from './types';
 
+/** 收尾动画时长（秒）。见 drawCurtain。 */
+const SETTLE_SEC = 0.9;
 const HOLD_DURATION = 3.0;
 
 /** 壶的几何。原来 rx/ry/壶心三个各写一份在 `_draw()` 里，回归就只能自己再抄一份
@@ -121,6 +123,10 @@ class TeaGame implements MiniGame {
   private readonly c: MiniGameContext;
   private readonly sh: Shell;
   private finished = false;
+  /** 收尾动画走了多少秒。0 = 还在玩；>0 = 落幕中 */
+  private settleT = 0;
+  /** 收尾期间记着结果，等动画走完再交出去 */
+  private pending: MiniGameResult | null = null;
   private holdTime = 0;
   private holding = false;
   private t = 0;
@@ -148,10 +154,36 @@ class TeaGame implements MiniGame {
     return Math.min(Math.max(this.holdTime / Math.max(HOLD_DURATION, 0.001), 0), 1);
   }
 
+  /**
+   * 结束，但**不是立刻结束**。
+   *
+   * 原来 `finish()` 一被调用就 `onDone()`，宿主立刻把结算屏盖上来——
+   * 于是"按满 3 秒"的最后一帧从来没被看见过，玩家得到的是
+   * "我按了，然后什么也没发生"。
+   *
+   * 这一件本来就是**过场**而不是玩法，过场需要落幕。
+   * 所以结果先记下，`step()` 里把收尾动画走完再真的交出去。
+   * 期间**输入全部失效**（`setHolding` 与按键都先看 `finished`），
+   * 所以那 0.9 秒里按什么都没用——这是对的：赢了之后还想接着按是误操作。
+   *
+   * 不加失败分支：这一屏本来就没有 `lose`。
+   */
   private finish(r: MiniGameResult): void {
     if (this.finished) return;
     this.finished = true;
+    this.settleT = 0;
+    this.pending = r;
+    this.holding = false;
     this.c.audio.duckAmbient(false);
+  }
+
+  /** 收尾动画走完就真的交出去。 */
+  private flushSettle(dt: number): void {
+    if (!this.finished || !this.pending) return;
+    this.settleT += dt;
+    if (this.settleT < SETTLE_SEC) return;
+    const r = this.pending;
+    this.pending = null;
     this.c.onDone(r);
   }
 
@@ -210,6 +242,10 @@ class TeaGame implements MiniGame {
 
   step(dt: number): void {
     this.t += dt;
+    // 收尾动画自己也要时间往前走，否则它永远停在第 0 帧。
+    // **必须在 `finished` 的早退之前**：早退是给"没在玩的时候"用的，
+    // 而收尾期间恰恰是 `finished === true`。
+    this.flushSettle(dt);
     if (this.finished) return;
     if (this.holding) {
       this.holdTime += dt;
@@ -223,6 +259,7 @@ class TeaGame implements MiniGame {
 
   dispose(): void {
     this.finished = true;
+    this.settleT = 0;
     this.c.audio.duckAmbient(false);
   }
 
@@ -313,6 +350,40 @@ class TeaGame implements MiniGame {
     drawTextCentered(g, hint, w, h * 0.88, 22, 'rgb(255,217,153)');
 
     drawCancel(g, this.cancelBtn, tf(this.sh, 'mg_cancel'));
+
+    // **落幕**。
+    //
+    // 这一屏本来是「按满 3 秒 → 立刻 `onDone('win')`」，于是它
+    // **在最后一帧和第 0 帧长得一模一样**：进度条满着，水汽还在飘，
+    // 而屏幕已经被结算盖住了。玩家看到的是"我按了，然后什么也没发生"。
+    //
+    // 过场需要落幕——尤其是这一件，它本来就是过场而不是玩法。
+    // 所以让 `finish()` 之后再多跑一会儿，把水汽散尽、进度条回落、
+    // 最后浮出「成了」。**不加失败分支**：它本来就没有失败。
+    this.drawCurtain(g, w, h, sc);
+  }
+
+  /** 收尾那一下。见 draw() 末尾的说明。 */
+  private drawCurtain(g: CanvasRenderingContext2D, w: number, h: number, sc: number): void {
+    const p = Math.min(this.settleT / SETTLE_SEC, 1);
+    if (p <= 0) return;
+
+    // 水汽散尽
+    const fade = 1 - p;
+    for (let i = 0; i < STEAM_COUNT; i++) {
+      steamPuff(i, this.t + p * 3, sc, this.puff);
+      circle(g, w * 0.5 + this.puff[0], h * POT_CY + this.puff[1], this.puff[2] * (1 + p * 0.6),
+        `rgba(255,255,255,${this.puff[3] * fade})`);
+    }
+
+    // 「成了」：从 0.6 倍缩放 + 透明，长成正常大小
+    const ease = 1 - Math.pow(1 - p, 3);
+    g.save();
+    g.globalAlpha = Math.min(ease * 1.6, 1);
+    g.translate(w * 0.5, h * 0.5);
+    g.scale(0.6 + ease * 0.4, 0.6 + ease * 0.4);
+    drawTextCentered(g, tf(this.sh, 'mg_success'), 0, 0, 64 * (w / 960 + 0.4), this.sh.paper);
+    g.restore();
   }
 }
 

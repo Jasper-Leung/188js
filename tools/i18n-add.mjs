@@ -50,6 +50,8 @@ const ADD = {
 
     // ---- 载具（E 切换）----
     key_vehicle: 'E',
+    stele_title: '188 号碑',
+    villain_cue_title: '对讲机',
     veh_foot: '徒步',
     veh_bike: '自行车',
     veh_skate: '滑板',
@@ -77,7 +79,6 @@ const ADD = {
 
     // ---- Camera (V) ----
     key_camera: 'V',
-    key_camera_desc: 'Cycle camera (forward / chase / rider)',
     cam_forward: 'Forward',
     cam_chase: 'Chase',
     cam_first: 'Rider',
@@ -95,7 +96,8 @@ const ADD = {
 
     // ---- Vehicle (E) ----
     key_vehicle: 'E',
-    key_vehicle_desc: 'On foot / bicycle / skateboard',
+    stele_title: 'Stele No.188',
+    villain_cue_title: 'Radio',
     veh_foot: 'On foot',
     veh_bike: 'Bicycle',
     veh_skate: 'Skateboard',

@@ -397,7 +397,10 @@ class App {
 
     // 世界事件
     this.world.on((e) => this.onWorldEvent(e));
-    this.world.onRoadsideLine = (text) => this.ui.showToast(text, 2600);
+    // 路边碑文：黑底文字卡，不是 toast。
+    // 差别不是好不好看，是**toast 要求玩家注意到它，而字应该"顺路读到"**——
+    // 玩家在过弯，不该为了一块石头停下来。
+    this.world.onRoadsideLine = (text) => this.ui.showStoryCard(text, t('stele_title'));
     this.world.onBgmMood = (slot) => audio.setBgmMood(slot);
     game.on('state', () => this.ui.syncFromState());
     game.on('lvbi', () => this.ui.syncFromState());
@@ -651,6 +654,19 @@ class App {
     this.phase = 'roaming';
     this.ui.enterWorld();
     this.ui.syncFromState();
+    // **序章**：只在第一次进世界时播。
+    //
+    // 这是整个游戏里最该被送达而一直没送达的三句——
+    // 律师函、母亲、还有"代价是没有人记得你"。它决定玩家知不知道
+    // 自己这一趟在替谁跑。不锁操作、自动推进、按 `E` 跳过，
+    // 所以正在过弯的玩家什么都不用做，骑过去也会读完。
+    if (!game.prologueDone) {
+      game.markPrologueDone();
+      this.ui.showStoryCard(
+        `${t('prologue_1')}\n\n${t('prologue_2')}\n\n${t('prologue_3')}`,
+        t('prologue_speaker'),
+      );
+    }
   }
 
   private toRoaming() {
@@ -780,6 +796,9 @@ class App {
     const visit = game.getStationCount(stationIdx); // 打卡前的次数
     const id = MiniGameHost.idFor(st.slot, visit);
     this.phase = 'minigame';
+    // 告诉世界「现在在小游戏里」：反派的对白要等，
+    // 但引子（手机响了）照样会压暗一下——它不结束任何东西。
+    this.world.setBusyForMinigame(true);
 
     // 演示模式**不玩小游戏**。90 秒的预算（`DEMO_BUDGET_SEC`）里塞不进一局，
     // 而 `DEMO_END_AT_SEC = 62` 之后本来就该开始收尾。
@@ -787,7 +806,10 @@ class App {
     // 顺带这一句也用掉了 `DEMO_END_AT_SEC`——否则它是数据表里两个没人读的数之一。
     if (this.demoActive && this.demoT > ECON.DEMO_END_AT_SEC) {
       game.checkIn(stationIdx);
-      this.ui.showToast(t('mg_failed'), 1200);
+      // **不给「失败」**。演示里没有人按键，这一局必然是跳过去的，
+      // 而屏幕上弹出「失败」是在告诉评审"这个游戏做不出来"。
+      // 中性的一句：它在被跳过，不是在被判负。
+      this.ui.showResult(false, st.slot);
       this.ui.syncFromState();
       this.toRoaming();
       return;
@@ -797,14 +819,25 @@ class App {
     // 玩家重打一遍不会因为随机数换了一串而拿到另一道题。
     const handle = await this.mg.run(id, seedFor(stationIdx, visit));
     const win = handle.result === 'win';
+    // 乐事结束了，被压着的反派对白现在可以交付
+    this.world.setBusyForMinigame(false);
 
     // 打卡与经济
     game.checkIn(stationIdx);
     game.onMiniGame(stationIdx, win);
     if (win) audio.sfx('collect');
 
-    this.ui.showToast(win ? t('mg_success_hint') : t('mg_failed'), 1600);
+    // **结算屏**。之前只有一条 toast 飘过去——这是玩家唯一确认
+    // 自己做到什么的地方，而 toast 长得很像"又一条提示"。
+    // 一句大字 + 这件乐事的名字，是这件事应有的分量。
+    this.ui.showResult(win, st.slot, () => this.afterMiniGame(stationIdx, win));
     this.ui.syncFromState();
+  }
+
+  /** 结算屏落幕之后才继续流程——否则面板和下一步会同时在屏幕上。 */
+  private afterMiniGame(stationIdx: number, _win: boolean) {
+    void stationIdx;
+    void _win;
 
     // 集齐五件之后**不结算**。原来这里是直接弹合成面板，
     // 于是"这一趟结束了"是游戏替玩家做的决定，中间没有任何过渡。
@@ -868,6 +901,15 @@ class App {
         this.world.narrativeBusy = false;
         this.world.retryVillain();
       });
+    } else if (e.type === 'storyLine') {
+      // 顺路读到的字：黑底、不锁、不吃点击。
+      // 玩家在过弯也照样读完，不需要停下、也不需要按任何键。
+      this.ui.showStoryCard(e.text, e.title);
+    } else if (e.type === 'villainCue') {
+      // **引子不吃点击、不锁操作**，只压暗一下。
+      // 它唯一的作用是让玩家在郑铎开口之前先觉得有什么不对——
+      // 而"手机响了"这句话本身不该把人按在路上，更不该顶掉一局茶。
+      this.ui.showInterruptCard(e.text, t('villain_cue_title'), 1200);
     } else if (e.type === 'duskBegan') {
       this.ui.showToast(t('dusk_toast'), 3200);
     } else if (e.type === 'loaded') {

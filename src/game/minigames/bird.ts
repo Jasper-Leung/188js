@@ -182,18 +182,22 @@ class BirdGame implements MiniGame {
     this.layout(ctx.width, ctx.height);
   }
 
-  /** 4 个选项、1 个正确，然后打乱。Fisher-Yates，不建临时数组。 */
+  /**
+   * 4 个选项、1 个正确，然后打乱。Fisher-Yates，不建临时数组。
+   *
+   * 选项就是四种鸟的一个**排列**：先按序填满，再就地打乱。
+   *
+   * 这里原来写的是"逐个抽一个没抽过的值"，靠 `this.options.indexOf(r) >= 0`
+   * 判重。但 `options` 是 `Int32Array`，没填的槽位是 **0** 而不是空洞——
+   * 于是只要 0 号鸟还没排上号，`indexOf(0)` 就永远命中某个空槽，把 0 号鸟
+   * 当成"已经有了"反复拒绝。guard 抽 64 次也排不进去，最后把最后一个候选值
+   * **重复写一遍**。三种鸟占四个格子，正确项照样点得中（所以不会卡死），
+   * 但屏上四张卡有两张一模一样，四分之三的局都长这样。
+   * 直接做排列，重复这件事在构造上就不可能发生。
+   */
   private buildOptions(rng: () => number): void {
-    this.options[0] = this.seenBird;
-    for (let i = 1; i < CHOICE_COUNT; i++) {
-      let r = Math.floor(rng() * BIRD_COUNT) % BIRD_COUNT;
-      let guard = 0;
-      while (this.options.indexOf(r) >= 0 && guard++ < 64) {
-        r = Math.floor(rng() * BIRD_COUNT) % BIRD_COUNT;
-      }
-      this.options[i] = r;
-    }
-    for (let i = CHOICE_COUNT - 1; i > 0; i--) {
+    for (let i = 0; i < BIRD_COUNT; i++) this.options[i] = i;
+    for (let i = BIRD_COUNT - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1)) % (i + 1);
       const tmp = this.options[i];
       this.options[i] = this.options[j];

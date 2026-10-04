@@ -74,7 +74,9 @@
     "veh_skate": "滑板",
     "veh_switched": "载具 · %s",
     "veh_locked": "还没有滑板",
-    "veh_foot": "徒步"
+    "veh_foot": "徒步",
+    "stele_title": "188 号碑",
+    "villain_cue_title": "对讲机"
   },
   "en": {
     "mg_success": "Done",
@@ -150,6 +152,8 @@
     "veh_skate": "Skateboard",
     "veh_switched": "Vehicle · %s",
     "veh_locked": "No skateboard yet",
-    "veh_foot": "On foot"
+    "veh_foot": "On foot",
+    "stele_title": "Stele No.188",
+    "villain_cue_title": "Radio"
   }
 }

@@ -11,6 +11,12 @@
  */
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
 import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD, WATER } from '../data/raw';
+import {
+  createMiniGame,
+  MINI_GAME_IDS,
+  type MiniGameContext,
+  type MiniGameResult,
+} from '../game/minigames';
 import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
 import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
@@ -1315,6 +1321,130 @@ check('verify_controls', () => {
   const summary =
     `模式 ${RIDE_MODES.join('/')}（默认 ${RIDE_MODES[0]}）· 机位 ${CAM_MODES.join('/')}（默认 ${CAM_MODES[0]}）· ` +
     `自行车 ${bt.maxSpeed}m/s 保持源项目 · 滑板 ${st.maxSpeed}m/s`;
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+// ---------------------------------------------------------------- 小游戏能玩
+/**
+ * **五件乐事真的能跑起来**。
+ *
+ * ## 为什么必须单独一条
+ *
+ * 原来的 `verify_mini_game` 只验**排布表**：哪一趟该出哪一件、
+ * 15 局里每件各出现 3 次。那张表是对的，五件乐事也确实都在文件里。
+ *
+ * 但"排布对"和"能玩"是两回事，而这个项目整整一轮都栽在这中间：
+ * 小游戏在浏览器里起不来，而 19 条回归没有一条会红——
+ * 因为它们量的是**表**，不是**行为**。
+ *
+ * ## 这里怎么验
+ *
+ * 真造一个游戏，喂一个**假 canvas ctx**，然后按各种输入跑它：
+ * 定时推进、按方向键、点/放指针、Esc。
+ * 判据是「跑完这些不抛异常」+「至少能走到一个终局」。
+ *
+ * canvas ctx 是假的，但**游戏逻辑是真的**——
+ * 状态机、计时、命中判定、随机种子全都在 JS 里，不碰 GPU。
+ */
+check('verify_minigame_playable', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 假 ctx：只要记录调用、不真的画。游戏不会去读像素。
+  const ctx = new Proxy({} as Record<string, unknown>, {
+    get(_t, k: string) {
+      if (k === 'canvas') return { width: 960, height: 540 };
+      if (k === 'measureText') return () => ({ width: 10 });
+      if (k === 'createLinearGradient' || k === 'createRadialGradient') {
+        return () => ({ addColorStop() {} });
+      }
+      if (k === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
+      return () => undefined; // 所有绘制指令都是 no-op
+    },
+    set() {
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+
+  const W = 960;
+  const H = 540;
+  for (const id of MINI_GAME_IDS) {
+    asserts++;
+    let result: MiniGameResult | null = null;
+    let steps = 0;
+    // 有没有真的给过输入。用于区分「自己判赢」与「玩家按对了」
+    let gaveInput = false;
+    try {
+      const g = createMiniGame(id, {
+        ctx,
+        width: W,
+        height: H,
+        lang: 'zh',
+        palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+        audio: { sfx() {}, note() {}, duckAmbient() {} },
+        t: (k: string) => k,
+        seed: 12345,
+        onDone: (r: MiniGameResult) => {
+          result = r;
+        },
+      } as unknown as MiniGameContext);
+      g.resize(W, H);
+
+      // 1. 纯定时推进 30 秒——超时兜底必须能把游戏收掉，
+      //    否则玩家卡在一局出不来。
+      for (let i = 0; i < 1800 && !result; i++) {
+        g.step(1 / 60);
+        if (i % 7 === 0) g.draw();
+        steps++;
+      }
+      // 2. 一堆键与指针：打进去的东西不该让它抛异常。
+      //    **必须"按住"而不是"点一下"**——茶要求持续按住 3 秒，
+      //    而点一下只推进一帧。第一版这里写成 down→step→up，
+      //    于是茶被判成"卡死"，而它其实好好的：
+      //    **测不出来和坏了，在这一刻长得一模一样。**
+      if (result === null) {
+        gaveInput = true;
+        for (const key of ['ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown']) {
+          g.onKeyDown(key, false);
+          for (let i = 0; i < 20; i++) g.step(1 / 60);
+          g.onKeyUp(key);
+        }
+      }
+      if (!result) {
+        // 真的按住空格与指针，走满 5 秒
+        g.onKeyDown('Space', false);
+        for (let i = 0; i < 300 && !result; i++) {
+          g.step(1 / 60);
+          if (i % 7 === 0) g.draw();
+        }
+        g.onKeyUp('Space');
+      }
+      if (result === null) {
+        gaveInput = true;
+        g.onPointerDown(W * 0.5, H * 0.5);
+        for (let i = 0; i < 300 && !result; i++) {
+          g.onPointerMove(W * 0.5 + i * 0.2, H * 0.5);
+          g.step(1 / 60);
+          if (i % 7 === 0) g.draw();
+        }
+        g.onPointerUp(W * 0.5 + 300, H * 0.5);
+      }
+      // 3. 还收不掉就 Esc——玩家至少有路可走
+      if (!result) g.onKeyDown('Escape', false);
+    } catch (e) {
+      probs.push(`${id}: 跑起来抛异常 —— ${String((e as Error)?.message ?? e).split('\n')[0]}`);
+      continue;
+    }
+    asserts++;
+    if (!result) probs.push(`${id}: 30 秒 + 满键盘 + 满指针之后仍然收不到任何终局（卡死）`);
+    // 「自己判赢」只在**一个字都没按**的时候才是问题。
+    // 茶是按住 3 秒就成——测试真的按住了键，赢是**正确**的结果。
+    // 第一版这里不区分，于是刚把测试改成"按住"就立刻反咬一口。
+    asserts++;
+    if (result === 'win' && gaveInput === false) probs.push(`${id}: 一个键都没按却自己判赢——玩家什么都不做就通关了`);
+  }
+
+  const summary = MINI_GAME_IDS.join('/') + ' 五件都能跑到终局';
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 

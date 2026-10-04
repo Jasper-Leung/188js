@@ -53,6 +53,7 @@ import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
 import { Toast } from './toast';
 import { ItemBar } from './itemBar';
+import { StoryCards, ResultCard } from './storyCard';
 import { MoodMask } from './moodMask';
 import { PerfPanel } from './perfPanel';
 
@@ -220,6 +221,8 @@ export class UI {
   private touchCtl: TouchControls;
   private toast: Toast;
   private itemBar!: ItemBar;
+  private storyCards!: StoryCards;
+  private resultCard!: ResultCard;
   private mood: MoodMask;
   private perf: PerfPanel;
 
@@ -250,6 +253,8 @@ export class UI {
     this.mood = new MoodMask(this.root, this.game);
     this.toast = new Toast(this.root);
     this.itemBar = new ItemBar(this.root);
+    this.storyCards = new StoryCards(this.root);
+    this.resultCard = new ResultCard(this.root);
     this.dialogue = new Dialogue(this.root);
     this.hud = new Hud(this.root, {
       world: this.world,
@@ -330,6 +335,32 @@ export class UI {
   /** 数字键 1~4 选道具。返回 false 表示那一格还没买到。 */
   selectItemSlot(num: string): boolean {
     return this.itemBar.select(num);
+  }
+
+  /**
+   * 浮一条黑底文字卡（路边碑文 / 靠近时的那几句）。
+   *
+   * **不吃点击、不锁操作、自动推进** —— 三条都是硬要求，
+   * 理由见 `storyCard.ts` 的文件头。要锁操作的只有反派那几场，
+   * 走 `showInterruptCard()`。
+   */
+  showStoryCard(text: string, title?: string): void {
+    this.storyCards.show(text, { title });
+  }
+
+  /** 强制打断：压暗 + 锁操作。只给"有人在你耳边说话"那几场用。 */
+  showInterruptCard(text: string, title?: string, ms?: number): void {
+    this.storyCards.show(text, { title, interrupt: true, ms });
+  }
+
+  /** 小游戏结算屏。一句大字 + 这件乐事的名字。 */
+  showResult(win: boolean, slot: number, onDone?: () => void): void {
+    this.resultCard.show(win, slot, win ? 2100 : 1300, onDone);
+  }
+
+  /** 结算屏还在的时候宿主要让出控制权（否则玩家在过场里按了空格）。 */
+  get resultShowing(): boolean {
+    return this.resultCard.showing;
   }
 
   /** 道具栏，用来在打卡/购买之后刷新已拥有状态 */
@@ -416,6 +447,8 @@ export class UI {
     this.hud.update(dt);
     this.dialogue.update(dt);
     this.toast.update(dt);
+    this.storyCards.update(dt);
+    this.resultCard.update(dt);
     this.mood.update(dt);
     this.perf.update(dt);
     // 触屏控件的可用态跟着脚下那一圈走，宿主有没有开触屏模式都一样算——

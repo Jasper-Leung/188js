@@ -30,6 +30,10 @@ export type WorldEvent =
   | { type: 'stationPassed'; index: number }
   | { type: 'dialogue'; speaker: string; lines: string[] }
   | { type: 'villain'; sceneIndex: number }
+  /** 顺路读到的一句话（驿站/石碑）。**不锁操作、不吃点击** */
+  | { type: 'storyLine'; stationIndex: number; title: string; text: string }
+  /** 反派引子：压暗 1 秒，不锁操作、不结束任何东西 */
+  | { type: 'villainCue'; sceneIndex: number; text: string }
   | { type: 'duskBegan' }
   | { type: 'loaded'; what: string };
 
@@ -289,10 +293,19 @@ export class World {
       game.onStationPass(best);
       this.emit({ type: 'stationPassed', index: best });
       if (!game.isCollected(best) && st.placement.def.text) {
+        // **不是 dialogue**。`dialogue` 会锁操作（`narrativeBusy`）且要按一下才走，
+        // 而"骑过一座驿站，它跟你讲一句话"是**顺路读到**的东西——
+        // 做成必须停下、必须按键的过场，就把一句该顺路读到的话
+        // 变成了玩家必须停下来的理由，而过弯时被打断是最招骂的那种。
+        //
+        // 所以走 `storyLine`：黑底文字卡，不吃点击、不锁、自动推进。
+        // 郑铎那几场仍然是 `dialogue`——那是"有人拦住你说话"，
+        // 性质不同，值得打断。
         this.emit({
-          type: 'dialogue',
-          speaker: st.placement.def.name,
-          lines: [isEnglish() ? st.placement.def.text_en : st.placement.def.text],
+          type: 'storyLine',
+          stationIndex: best,
+          title: st.placement.def.name,
+          text: isEnglish() ? st.placement.def.text_en : st.placement.def.text,
         });
       }
     } else if (!inside && bestD > WORLD.STATION_PASS_RADIUS + 6) {
@@ -465,6 +478,41 @@ export class World {
     if (!scene) return;
     if (seen < scene.seen) return;
     if (!game.claimVillainScene(next)) return;
+
+    // **引子先走，而且不锁操作。**
+    //
+    // `villain_cue_*` 是"手机响了。"这种一句——它的全部作用是
+    // 让玩家在郑铎开口**之前**先觉得有什么不对。
+    // 把它做成对白框的开场白有两个问题：
+    //   · 对白框会锁操作（`narrativeBusy`），于是"手机响了"这句话
+    //     本身把人按在路上；
+    //   · 它会在小游戏进行中把乐事**顶掉** ——一局打了一半的茶没了。
+    //
+    // 所以引子走**压暗 1 秒的黑底卡**：不吃点击、不锁、不结束任何东西。
+    // 而正戏（郑铎那几句）是真正的打断，仍然走对白框。
+    this.emit({ type: 'villainCue', sceneIndex: next, text: t(`villain_cue_${next}`) });
+    this.pendingVillain = next;
+    this.deliverVillain();
+  }
+
+  /** 压暗不显示对白——宿主要告诉界面"现在在小游戏里，先别插队"。 */
+  setBusyForMinigame(busy: boolean): void {
+    this.inMinigame = busy;
+    if (!busy) this.deliverVillain();
+  }
+
+  /**
+   * 交付被压着的正戏。
+   *
+   * 只有**既没有对白、也不在小游戏里**才放行——
+   * 前者防的是两场反派戏叠在一起，后者防的是"手机响了"把一局茶顶掉。
+   */
+  private deliverVillain() {
+    if (!this.pendingVillain || this.narrativeBusy || this.inMinigame) return;
+    const next = this.pendingVillain;
+    this.pendingVillain = 0;
+    const scene = WORLD.VILLAIN_SCENES[next - 1];
+    if (!scene) return;
     const lines: string[] = [];
     for (const part of scene.parts) {
       for (const key of part.lines) {
@@ -475,6 +523,9 @@ export class World {
     this.emit({ type: 'villain', sceneIndex: next });
     this.emit({ type: 'dialogue', speaker: t('villain_speaker'), lines });
   }
+
+  private pendingVillain = 0;
+  private inMinigame = false;
 
   /** 强制推进一次剧情检查（对话结束后调，否则对话期间 seen 涨了不会触发） */
   retryVillain() {
