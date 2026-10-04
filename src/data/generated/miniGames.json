@@ -1,0 +1,38 @@
+{
+  "gameFor": "function game_for(slot, visit) { return (slot + Math.max(visit, 0)) % 5; }",
+  "schedule": [
+    [
+      0,
+      1,
+      2
+    ],
+    [
+      1,
+      2,
+      3
+    ],
+    [
+      2,
+      3,
+      4
+    ],
+    [
+      3,
+      4,
+      0
+    ],
+    [
+      4,
+      0,
+      1
+    ]
+  ],
+  "order": [
+    "MiniGameCloud",
+    "MiniGameTea",
+    "MiniGameZither",
+    "MiniGameBamboo",
+    "MiniGameBird"
+  ],
+  "_source": 1678
+}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <!--
+      禁止 MIME 嗅探。这一条是给装了 IDM 之类下载管理器的机器准备的：
+      没有它时，浏览器（以及挂在浏览器上的下载器）可能把 .glb / .ogg
+      当成"未知类型 → 下载"，于是每条资源都弹一次下载框。
+      资源本身都已经是 fetch/XHR 拿的、不是导航，声明清楚类型就没人会来抢。
+    -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta name="theme-color" content="#e8e0cd" />
+    <meta name="description" content="188号礼物 — 一段 3D 骑行旅程。把十五个片刻合成一张可以写字、可以导出的明信片。" />
+    <title>188号礼物</title>
+
+    <!--
+      字体。24MB 的全量字库被子集成了两份：
+        ui          181KB，只含游戏里真正出现过的字符，首屏加载
+        handwriting 404KB，常用 3500 字，只在打开明信片背面手写时加载
+
+      两份都是 woff2，而且是子集化之后再 woff2 化的，所以体积是原文件的
+      0.7%。低配玩家往往也是慢网络玩家——一个光等字体的启动屏，
+      在 3G 上是二十秒起步。
+    -->
+    <link rel="preload" href="fonts/ui.woff2" as="font" type="font/woff2" crossorigin />
+    <!--
+      骨架与 @font-face 走这条**渲染阻塞**的样式表，而不是由 JS import。
+      差别在首屏：JS 加载完之前，启动屏必须已经是深色的、有字、有进度条；
+      走 JS 的话那半秒多是一屏白，而白屏在慢网络上是"这游戏卡死了"的第一印象。
+    -->
+    <link rel="stylesheet" href="/src/index.css" />
+  </head>
+  <body>
+    <!-- 3D 画布。尺寸由 Renderer 按 renderScale 决定 -->
+    <canvas id="stage" aria-label="3D 世界"></canvas>
+
+    <!-- UI 根节点：标题、HUD、对白、面板、触屏、遮罩全挂在这里 -->
+    <div id="ui-root"></div>
+
+    <!--
+      启动屏。
+      它不是装饰：地形高程场、路面三角形索引、植被块这些都要在
+      第一个可交互画面之前算好（合起来约 300~600ms），这段时间里
+      屏幕上得有东西可看，而不是白屏。
+    -->
+    <div id="boot" role="status" aria-live="polite">
+      <div class="boot-inner">
+        <div class="boot-title">188<span class="boot-num">号</span>礼物</div>
+        <div class="boot-sub" id="boot-sub">正在铺路…</div>
+        <div class="boot-bar"><i id="boot-fill"></i></div>
+        <div class="boot-pct" id="boot-pct">0%</div>
+      </div>
+    </div>
+
+    <noscript>
+      <div class="noscript">这个游戏需要 JavaScript 与 WebGL 2。</div>
+    </noscript>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

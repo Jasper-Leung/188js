@@ -1,0 +1,29 @@
+{
+  "BASIN_ROAD_CLEAR": 16,
+  "WATER_LEVEL": -3.4,
+  "WATER_DEPTH": 1.1,
+  "SITE_SEARCH_REACH": 150,
+  "SITE_SEARCH_STEP": 6,
+  "SITE_STATION_PENALTY": 0.006,
+  "SITE_SEPARATION": 24,
+  "BASIN_SHAPES": [
+    {
+      "station": 2,
+      "radius": 22,
+      "squash": 3.2,
+      "depth": 0.7
+    },
+    {
+      "station": 4,
+      "radius": 30,
+      "squash": 1.25,
+      "depth": 1.3
+    },
+    {
+      "station": 6,
+      "radius": 26,
+      "squash": 1.5,
+      "depth": 1
+    }
+  ]
+}

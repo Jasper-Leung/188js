@@ -1,0 +1,1425 @@
+/* =============================================================================
+   188号礼物 · DOM UI 层
+   -----------------------------------------------------------------------------
+   ## 作用域：整份文件只在 `.g-root` 内部生效
+
+   `index.css` 归宿主（启动屏、画布、body 的基础样式）。为了不和它抢
+   `html` / `body` 的声明，这份文件里**没有一条裸选择器**——根字号也挂在
+   `.g-root` 上而不是 `:root` 上。两份 CSS 合并之后谁生效不该靠加载顺序决定，
+   而这一条是这个工程里最容易在并行开发中出事的地方。
+
+   ## 字号：只用 rem / em，不用 vw
+
+   根字号 `clamp(14px, 12.6px + 0.22vw, 16.5px)`，全程只占 **18%** 的跨度。
+   之所以允许它跟着视口动一点点：720p 和 1080p 上同样的 16px 观感确实不同，
+   而完全不调会在 4K 上显得小。之所以**不许**任何一条规则直接写 vw 字号：
+   那样字会随视口**线性**放大，1080p 到 4K 之间差 2 倍，
+   而这一层 UI 的信息密度是照 720p 排的。
+
+   于是分工是：**文字**用 em（跟着根字号走），**盒子**用 rem（跟着宿主的
+   :root 走，两边一致）。这是一个刻意的选择，不是偷懒。
+
+   ## 零图片
+
+   全文件没有一张 url()。纸的纹理、蜡的红、按钮的边、摇杆的圈——
+   全部是渐变 / 边框 / 阴影画出来的。理由见 theme.ts：
+   每多一个资源请求，首屏在 3G 上就多一次往返，而目标机器往往也是慢网络机器。
+
+   ## 动效：只有一种
+
+   `.g-fade` 的 opacity 150ms。这是唯一被允许的动画（theme.ts 里的 FADE_MS）。
+   opacity 由合成器处理，不触发重绘。面板不做位移、不做缩放、不做转场。
+   唯一的例外是脚下提示圈那圈虚线（`g-ring`）的缓慢旋转——
+   它是一个 transform，同样是合成器上的，而且**没有它那圈会被当成路面上的一个水渍**。
+
+   ## 暗色（黄昏）
+
+   `--dusk` 由 index.ts 每 0.25s 写一次（0..1），下面所有纸色都由它算出来。
+   不压暗的后果很具体：黄昏时世界整个沉下去，一块原色纸面板浮在上面
+   会亮得刺眼，而**面板与背景的对比度反而比日间更高**——
+   那是把「这里最重要」这个信号反着发。
+   ========================================================================== */
+
+/* =============================================================================
+   字体：本文件**不**声明 @font-face
+   -----------------------------------------------------------------------------
+   `188UI`（public/fonts/ui.woff2）与 `GiftHand`（handwriting.woff2）都由
+   `index.css` 声明 —— 那是宿主的文件，字体是全应用共用的，声明放在那儿
+   才有一份。`index.ts` 的 `ensureUiFont()` 是兜底：宿主没声明时它自己
+   用 FontFace API 注册一份（`document.baseURI` 拼地址，子路径部署也安全）。
+
+   为什么不在这份 CSS 里再写一遍：写相对路径 `./fonts/ui.woff2` 的话，
+   Vite 会按 CSS 所在目录去 `src/ui/fonts/ui.woff2` 找，那个文件不存在，
+   `vite build` 直接失败（实测过）。写绝对路径则和 index.css 里的那份
+   重复，两处一旦有一处改了家族名，界面会有一半文字掉回系统字体。
+
+   家族名 `188UI` 三处共用：`chrome.ts` 的 FONT_STACK 首项、下面每一条
+   font-family、main.ts 的 `document.fonts.load('16px "188UI"')`。
+   ============================================================================= */
+
+/* =============================================================================
+   根
+   ========================================================================== */
+
+.g-root {
+  /* 根字号：整份 UI 的 em 都相对它。见文件头。 */
+  font-size: clamp(14px, 12.6px + 0.22vw, 16.5px);
+  font-family: '188UI', 'LXGW WenKai', system-ui, 'Segoe UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  line-height: 1.8;
+  letter-spacing: 0.02em;
+  color: #2b241b;
+
+  /* 表单控件（背面那个 textarea）在浏览器深色模式下会被自动反色。
+     显式声明 light 是为了让它和纸面一个色——那张卡是米白的。 */
+  color-scheme: light;
+
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  /* 整层不接收指针：只有具体控件自己开 pointer-events:auto。
+     不这样的话，一层铺满全屏的透明 div 会把 3D 场景的点击全吃掉。 */
+  pointer-events: none;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+
+  /* ---- 黄昏推进度（0..1，由 index.ts 写）---- */
+  --dusk: 0;
+  --pw: calc(236 - var(--dusk) * 78);
+  --pg: calc(227 - var(--dusk) * 81);
+  --pb: calc(206 - var(--dusk) * 82);
+  --paper: rgb(var(--pw) var(--pg) var(--pb));
+  --paper-2: rgb(calc(var(--pw) - 8) calc(var(--pg) - 9) calc(var(--pb) - 10));
+  --paper-3: rgb(calc(var(--pw) - 16) calc(var(--pg) - 18) calc(var(--pb) - 20));
+
+  --ink: #2b241b;
+  --ink-soft: #6b5f4c;
+  --ink-faint: #9a8d76;
+  --accent: #9d3a2f;
+  --gold: #c9a26b;
+  --line: rgba(43, 36, 27, 0.18);
+  --line-soft: rgba(43, 36, 27, 0.1);
+  --radius: 0.2rem;
+  --fade: 150ms;
+
+  /* 半透明纸。**不要**在这里再抄一份 236/227/206：
+     抄一份的那一处不会跟着 --dusk 变，黄昏时它会比周围的纸亮一档，
+     而玩家看不出为什么这一块没暗下去。 */
+  --paper-85: rgb(var(--pw) var(--pg) var(--pb) / 0.85);
+  --paper-72: rgb(var(--pw) var(--pg) var(--pb) / 0.72);
+  --paper-90: rgb(var(--pw) var(--pg) var(--pb) / 0.9);
+  /* 纸上的渐隐（顶栏那一带）：透明度自己随黄昏降，
+     因为暗背景上不需要那么多纸来压住字。 */
+  --paper-fade-a: calc(0.86 - var(--dusk) * 0.3);
+}
+
+/* =============================================================================
+   基础件
+   ========================================================================== */
+
+.g-root .g-hidden {
+  display: none !important;
+}
+
+.g-root .g-fade {
+  animation: gFade var(--fade) ease-out both;
+}
+
+@keyframes gFade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 焦点圈。这是硬要求，不是可选项——原作正因为「取消按钮键盘点不到」
+   把键盘玩家困住了。outline 不用 none，用 ink 而不是 accent：
+   accent 已经被「碎片 / 下一处」占着，焦点圈再用同一支红，
+   玩家分不清「这里能按」和「这里是目标」。 */
+.g-root :focus-visible {
+  outline: 2px solid #2b241b;
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* 老浏览器没有 :focus-visible，退回 :focus（代价是鼠标点击也会画一圈，
+   可以接受，而"焦点看不见"不能接受）。 */
+@supports not selector(:focus-visible) {
+  .g-root :focus {
+    outline: 2px solid #2b241b;
+    outline-offset: 2px;
+  }
+}
+
+/* ---- 按钮 ---- */
+.g-root .g-btn {
+  pointer-events: auto;
+  font: inherit;
+  letter-spacing: inherit;
+  line-height: 1.4;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.4em 1em;
+  cursor: pointer;
+  transition: background var(--fade) ease-out, border-color var(--fade) ease-out;
+}
+
+.g-root .g-btn:hover:not([disabled]) {
+  background: var(--paper-3);
+  border-color: var(--ink-soft);
+}
+
+.g-root .g-btn:active:not([disabled]) {
+  background: var(--paper-2);
+}
+
+.g-root .g-btn[disabled] {
+  cursor: default;
+  color: var(--ink-faint);
+  border-color: var(--line-soft);
+  border-style: dashed;
+}
+
+.g-root .g-btn-major {
+  border-color: var(--ink-soft);
+  background: var(--paper-2);
+}
+
+.g-root .g-btn-wide {
+  display: block;
+  width: 100%;
+  margin-top: 0.4em;
+}
+
+.g-root .g-btn-quiet {
+  border-color: transparent;
+  color: var(--ink-soft);
+  padding: 0.3em 0.7em;
+}
+
+.g-root .g-btn-quiet:hover {
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.g-root .g-btn-toggle.is-on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---- 屏幕（标题 / 引导 / 暂停 / 铺子 / 合成 / 结算）---- */
+.g-root .g-screen {
+  pointer-events: auto;
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  /* 背景只压到 0.42：再深就看不出底下是那条 8 字环线了，
+     而"暂停时世界还在那儿"是本作想让人记住的事。 */
+  background: rgba(20, 17, 12, 0.42);
+  overflow-y: auto;
+}
+
+.g-root .g-card {
+  pointer-events: auto;
+  width: min(34rem, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.6rem 1.7rem;
+  box-shadow: 0 0.4rem 1.6rem rgba(20, 17, 12, 0.28);
+  animation: gFade var(--fade) ease-out both;
+}
+
+/* ---- 行 / 组 / 分隔 ---- */
+.g-root .g-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+}
+
+.g-root .g-row {
+  display: flex;
+  gap: 0.8em;
+  align-items: baseline;
+  font-size: 0.9em;
+}
+
+.g-root .g-row-k {
+  color: var(--ink-soft);
+  min-width: 5.5em;
+}
+
+.g-root .g-row-v {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-group {
+  margin: 0.9em 0 0;
+}
+
+.g-root .g-group-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+  font-size: 0.92em;
+  color: var(--ink-soft);
+  margin: 0.5em 0 0.35em;
+}
+
+.g-root .g-rule {
+  height: 1px;
+  background: var(--line);
+  margin: 1em 0;
+}
+
+.g-root .g-note {
+  font-size: 0.84em;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  margin-top: 0.5em;
+}
+
+.g-root .g-note-dim {
+  color: var(--ink-faint);
+}
+
+.g-root .g-note-why {
+  color: var(--accent);
+  font-size: 0.86em;
+}
+
+/* 声明放最下面，字号 0.72em——它是免责声明，不该和游戏正文抢注意力 */
+.g-root .g-note-dis {
+  color: var(--ink-faint);
+  font-size: 0.72em;
+  line-height: 1.7;
+  margin-top: 1.2em;
+  padding-top: 0.8em;
+  border-top: 1px solid var(--line-soft);
+  white-space: pre-line;
+}
+
+.g-root .g-h2 {
+  margin: 0 0 0.2em;
+  font-size: 1.5em;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+
+/* ---- 按钮排 ---- */
+.g-root .g-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+  margin-top: 1em;
+}
+
+.g-root .g-acts .g-btn {
+  flex: 1 1 8rem;
+}
+
+.g-root .g-tools {
+  display: flex;
+  gap: 0.4em;
+  margin-top: 0.7em;
+}
+
+/* ---- 分段选择（画质三档 / 静音三颗 / 目标帧率）---- */
+.g-root .g-seg {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.g-root .g-seg .g-seg-b {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  border-left: 1px solid var(--line-soft);
+  background: transparent;
+  padding: 0.35em 0.2em;
+}
+
+.g-root .g-seg .g-seg-b:first-child {
+  border-left: 0;
+}
+
+/* 「on」= 静音那颗灯是亮的 = 声音开着。这条反向的约定在
+   原作里就存在（bgm_mute / on / off 三条文案摆在那儿），
+   所以这里用一种看得出来的状态：亮 = 有声音。 */
+.g-root .g-seg .g-seg-b.is-on {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.g-root .g-seg-sm .g-seg-b {
+  font-size: 0.88em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 帮助浮层 ---- */
+.g-root .g-help {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 17, 12, 0.5);
+  padding: 1.5rem;
+  animation: gFade var(--fade) ease-out both;
+}
+
+.g-root .g-card-help {
+  width: min(30rem, 100%);
+}
+
+.g-root .g-help-body {
+  font: inherit;
+  white-space: pre-wrap;
+  margin: 0.6em 0 0.8em;
+  line-height: 2;
+  color: var(--ink);
+}
+
+/* =============================================================================
+   标题页
+   ========================================================================== */
+
+.g-root .g-card-title {
+  text-align: center;
+  padding: 2rem 1.8rem 1.4rem;
+}
+
+.g-root .g-title-head {
+  margin-bottom: 1.4em;
+}
+
+.g-root .g-title-mark {
+  font-size: 3.4em;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-title-h1 {
+  margin: 0.1em 0 0.3em;
+  font-size: 1.9em;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-indent: 0.22em;
+}
+
+.g-root .g-title-sub {
+  font-size: 1.02em;
+  color: var(--ink-soft);
+  letter-spacing: 0.08em;
+}
+
+.g-root .g-title-guide {
+  margin-top: 0.5em;
+  font-size: 0.86em;
+  color: var(--ink-faint);
+}
+
+.g-root .g-title .g-acts {
+  justify-content: center;
+}
+
+.g-root .g-title .g-tools {
+  justify-content: center;
+}
+
+.g-root .g-title .g-group-h {
+  justify-content: center;
+}
+
+/* =============================================================================
+   引导页
+   ========================================================================== */
+
+.g-root .g-card-onb {
+  width: min(36rem, 100%);
+}
+
+.g-root .g-onb-sub {
+  color: var(--ink-soft);
+  font-size: 0.95em;
+  text-align: center;
+  margin-bottom: 0.4em;
+}
+
+/* 四个词：2×2。不是一行四个——一行四个时每个只有 ~7em 宽，
+   「收一块碎片低一格，雾会变浓」要折三行，而这三行比那四个字重要得多。 */
+.g-root .g-gloss {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7em 1.2em;
+  margin: 0.4em 0 0.8em;
+}
+
+.g-root .g-gloss-w {
+  font-size: 1.15em;
+  letter-spacing: 0.16em;
+  text-indent: 0.16em;
+}
+
+.g-root .g-gloss-d {
+  font-size: 0.84em;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+.g-root .g-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+  margin: 0.3em 0 0.8em;
+}
+
+.g-root .g-key {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9em;
+  font-size: 0.9em;
+}
+
+.g-root .g-key-g {
+  flex: 0 0 6.5em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  /* 键位是拉丁/符号，不该用中文字体去排——回退到系统栈的第一项 */
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.g-root .g-key-d b {
+  font-weight: 500;
+}
+
+.g-root .g-key-d i {
+  font-style: normal;
+  color: var(--ink-soft);
+}
+
+.g-root .g-onb-hint {
+  text-align: center;
+  font-size: 0.86em;
+  color: var(--ink-faint);
+  margin: 0.6em 0;
+}
+
+.g-root .g-onb .g-acts {
+  justify-content: center;
+}
+
+/* =============================================================================
+   HUD
+   ========================================================================== */
+
+.g-root .g-hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* ---- 顶栏 ---- */
+.g-root .g-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 1em;
+  padding: 0.45em 0.9em;
+  background: linear-gradient(to bottom, var(--paper-85), rgb(var(--pw) var(--pg) var(--pb) / 0));
+}
+
+.g-root .g-top-l {
+  display: flex;
+  gap: 1.1em;
+  font-size: 0.92em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「下一处」永远靠右：长句短句都不在后面留一条死区 */
+.g-root .g-top-r {
+  margin-left: auto;
+  min-width: 0;
+}
+
+.g-root .g-next {
+  font-size: 0.94em;
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22em;
+}
+
+/* 五座都走满的那一档：换一行颜色，让它读成「收尾」而不是「目标」 */
+.g-root .g-next.is-done {
+  color: var(--gold);
+}
+
+/* ---- 碎片栏 ---- */
+.g-root .g-frags {
+  position: absolute;
+  top: 2.6em;
+  left: 0.9em;
+  padding: 0.35em 0.5em 0.4em;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--paper-72);
+}
+
+.g-root .g-frags-h {
+  display: flex;
+  gap: 0.6em;
+  align-items: baseline;
+  font-size: 0.78em;
+  color: var(--ink-faint);
+  letter-spacing: 0.12em;
+}
+
+.g-root .g-frags-n {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.g-root .g-frags-row {
+  display: flex;
+  gap: 0.35em;
+  margin-top: 0.2em;
+}
+
+.g-root .g-frag {
+  position: relative;
+  min-width: 3.1em;
+  padding: 0.25em 0.3em 0.3em;
+  text-align: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  opacity: 0.5;
+  transition: opacity var(--fade) ease-out, border-color var(--fade) ease-out;
+}
+
+.g-root .g-frag.is-got {
+  opacity: 1;
+  border-color: var(--line);
+}
+
+/* 走满了三次：整格换成墨色边框，和"收过一次"区分开 */
+.g-root .g-frag.is-full {
+  border-color: var(--ink-soft);
+}
+
+.g-root .g-frag-sw {
+  display: block;
+  width: 100%;
+  height: 0.32em;
+  border-radius: 0.06em;
+  background: var(--sw, var(--ink-faint));
+}
+
+.g-root .g-frag-n {
+  display: block;
+  font-size: 1em;
+  line-height: 1.3;
+  letter-spacing: 0.08em;
+}
+
+.g-root .g-frag-c {
+  display: block;
+  font-size: 0.7em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 三个小点 = 三次到访。收过的驿站顶栏那一句「还差 2 次」说的就是它们 */
+.g-root .g-pips {
+  display: flex;
+  gap: 0.18em;
+  justify-content: center;
+  margin-top: 0.15em;
+}
+
+.g-root .g-pip {
+  width: 0.32em;
+  height: 0.32em;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+}
+
+.g-root .g-pip.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* ---- 小地图 ---- */
+.g-root .g-minimap {
+  position: absolute;
+  right: 0.9em;
+  bottom: 0.9em;
+  padding: 0.3em;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper);
+  box-shadow: 0 0.2rem 0.7rem rgba(20, 17, 12, 0.22);
+}
+
+.g-root .g-minimap-c {
+  display: block;
+}
+
+/* ---- 脚下提示圈 ---- */
+.g-root .g-ring-hold {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 圈与文字分开两个元素：圈跟着距离缩放，文字不能跟着缩放 */
+.g-root .g-ring-btn {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 9rem;
+  height: 9rem;
+  margin: -4.5rem 0 0 -4.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 50%;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.g-root .g-ring {
+  position: absolute;
+  inset: 0;
+  border: 2px dashed var(--accent);
+  border-radius: 50%;
+  opacity: 0.85;
+  /* 唯一一处非 opacity 的动效：转的是 transform，合成器直接做。
+     没有它这圈会被读成路面上的一块水渍，而不是「这里可以打卡」。 */
+  animation: gSpin 9s linear infinite;
+}
+
+@keyframes gSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.g-root .g-ring-btn:hover .g-ring {
+  opacity: 1;
+  border-style: solid;
+}
+
+.g-root .g-ring-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 14rem;
+  margin: 5.2rem 0 0 -7rem;
+  text-align: center;
+  font-size: 0.88em;
+  color: var(--paper);
+  text-shadow: 0 1px 2px rgba(20, 17, 12, 0.85);
+  pointer-events: none;
+}
+
+/* =============================================================================
+   对白框
+   ========================================================================== */
+
+.g-root .g-dlg {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1rem 1rem 1.2rem;
+  display: flex;
+  justify-content: center;
+  pointer-events: auto;
+  background: linear-gradient(to top, rgba(20, 17, 12, 0.55), rgba(20, 17, 12, 0));
+}
+
+.g-root .g-dlg-box {
+  width: min(40rem, 100%);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.9rem 1.1rem 0.7rem;
+  box-shadow: 0 0.3rem 1rem rgba(20, 17, 12, 0.3);
+  animation: gFade var(--fade) ease-out both;
+}
+
+.g-root .g-dlg-who {
+  font-size: 0.9em;
+  letter-spacing: 0.16em;
+  text-indent: 0.16em;
+  color: var(--accent);
+  margin-bottom: 0.35em;
+}
+
+.g-root .g-dlg-who:empty {
+  display: none;
+}
+
+/* 中文排版是这里的第一优先级：行高 1.8、字距略宽、两端对齐。
+   最后一行仍然左对齐（justify 的默认行为），所以短句不会拉成一条横线。 */
+.g-root .g-dlg-text {
+  line-height: 1.8;
+  letter-spacing: 0.03em;
+  text-align: justify;
+  min-height: 3.6em;
+  white-space: pre-wrap;
+  color: var(--ink);
+}
+
+.g-root .g-dlg-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4em;
+  margin-top: 0.5em;
+}
+
+.g-root .g-dlg-bar .g-btn {
+  font-size: 0.84em;
+  padding: 0.25em 0.7em;
+}
+
+.g-root .g-dlg-skip {
+  color: var(--ink-faint);
+}
+
+/* =============================================================================
+   toast
+   ========================================================================== */
+
+.g-root .g-toasts {
+  position: absolute;
+  left: 50%;
+  bottom: 5.5rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35em;
+  pointer-events: none;
+  width: max-content;
+  max-width: 90vw;
+}
+
+.g-root .g-toast {
+  padding: 0.35em 0.9em;
+  font-size: 0.88em;
+  color: var(--paper);
+  background: rgba(24, 20, 15, 0.88);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+/* =============================================================================
+   心神遮罩
+   ========================================================================== */
+
+.g-root .g-mood {
+  position: absolute;
+  inset: 0;
+  /* 用墨色而不是纯黑：纯黑会把黄昏的暖调一起吃掉，
+     而这一层压的是"心神"，不是"天黑了"。 */
+  background: rgb(26 22 17);
+  opacity: 0;
+  pointer-events: none;
+  /* 不加 transition：opacity 每 0.25s 被 index.ts 量化写一次，
+     加了 transition 反而会让它追不上写入节奏（永远到不了目标值）。 */
+}
+
+/* =============================================================================
+   铺子
+   ========================================================================== */
+
+.g-root .g-card-shop {
+  width: min(38rem, 100%);
+}
+
+.g-root .g-shop-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1em;
+}
+
+.g-root .g-shop-bal {
+  font-size: 0.9em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-shop-lock {
+  margin: 0.4em 0 0.8em;
+  padding: 0.6em 0.8em;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-soft);
+  font-size: 0.9em;
+  text-align: center;
+}
+
+.g-root .g-goods {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.5em;
+}
+
+.g-root .g-good {
+  padding: 0.5em 0.7em 0.6em;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+}
+
+.g-root .g-good-h {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6em;
+}
+
+.g-root .g-good-n {
+  font-size: 1.05em;
+  letter-spacing: 0.06em;
+}
+
+.g-root .g-good-p {
+  font-size: 0.84em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.g-root .g-good-d {
+  font-size: 0.82em;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  margin: 0.15em 0 0.4em;
+}
+
+.g-root .g-good-b {
+  width: 100%;
+  font-size: 0.86em;
+  padding: 0.25em 0.5em;
+}
+
+/* 买不了时按钮上写的是**原因**，不是「买」。所以它变虚线框：
+   虚线读作"这条路现在走不通"，实线读作"按下去会发生什么"。 */
+.g-root .g-good-b.is-blocked {
+  border-style: dashed;
+  color: var(--ink-soft);
+  background: transparent;
+}
+
+/* 无价那五块：压暗一档，让它们读作"陈列"而不是"可买" */
+.g-root .g-good.is-nfs {
+  opacity: 0.62;
+  border-style: dashed;
+}
+
+/* =============================================================================
+   合成面板
+   ========================================================================== */
+
+.g-root .g-card-synth {
+  width: min(30rem, 100%);
+  text-align: center;
+}
+
+.g-root .g-synth-title {
+  font-size: 1.25em;
+  letter-spacing: 0.1em;
+  line-height: 1.7;
+}
+
+.g-root .g-synth-strip {
+  display: flex;
+  justify-content: center;
+  gap: 0.5em;
+  margin: 1.2em 0;
+}
+
+.g-root .g-synth-cell {
+  width: 3.4em;
+}
+
+.g-root .g-synth-sw {
+  display: block;
+  width: 100%;
+  height: 0.5em;
+  border-radius: 0.06em;
+  background: var(--sw, var(--ink-faint));
+}
+
+.g-root .g-synth-w {
+  display: block;
+  font-size: 0.9em;
+  letter-spacing: 0.08em;
+  color: var(--ink-soft);
+  margin-top: 0.2em;
+}
+
+/* =============================================================================
+   结算页
+   ========================================================================== */
+
+.g-root .g-end {
+  gap: 1.4rem;
+  align-items: flex-start;
+  padding-top: 2rem;
+}
+
+.g-root .g-end-l {
+  flex: 1 1 30rem;
+  min-width: 0;
+  position: sticky;
+  top: 0;
+}
+
+.g-root .g-card-stage {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: #f4f2ea;
+  box-shadow: 0 0.3rem 1.2rem rgba(20, 17, 12, 0.28);
+}
+
+.g-root .g-card-cv {
+  display: block;
+  width: 100%;
+  height: auto;
+  /* 卡片是米白纸，不跟黄昏：它是这一趟唯一被带走的物件 */
+}
+
+.g-root .g-tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 0.5em;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.g-root .g-tab {
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  border-left: 1px solid var(--line-soft);
+  background: transparent;
+  font: inherit;
+  padding: 0.35em;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+
+.g-root .g-tab:first-child {
+  border-left: 0;
+}
+
+.g-root .g-tab.is-on {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.g-root .g-end-cap {
+  margin-top: 0.4em;
+  font-size: 0.8em;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.g-root .g-end-r {
+  flex: 0 1 21rem;
+  min-width: 0;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.1rem 1.2rem;
+  max-height: 100%;
+  overflow-y: auto;
+}
+
+.g-root .g-end-paper {
+  min-height: 1.4em;
+  text-align: right;
+  color: var(--gold);
+  font-size: 0.95em;
+  letter-spacing: 0.1em;
+}
+
+.g-root .g-joys {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+}
+
+.g-root .g-joy {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7em;
+  font-size: 0.9em;
+}
+
+.g-root .g-joy-w {
+  flex: 0 0 1.6em;
+  letter-spacing: 0.08em;
+}
+
+.g-root .g-joy-n {
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 一次都没去的那一件：压暗 + 虚线边。它是"还欠一次"而不是"没有"，
+   所以框还在，只是虚的——实线会被读成"这一格是确定的"。 */
+.g-root .g-joy.is-empty {
+  color: var(--ink-faint);
+  border-left: 2px dashed var(--line);
+  padding-left: 0.5em;
+}
+
+.g-root .g-editor {
+  margin-top: 0.7em;
+  padding: 0.7em 0.8em;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--paper-2);
+}
+
+.g-root .g-ta {
+  display: block;
+  width: 100%;
+  min-height: 6em;
+  margin: 0.3em 0;
+  padding: 0.5em 0.6em;
+  font-size: 1.1em;
+  /* font-family 由 endCard.ts 用 FONT_HANDWRITE 写进来 */
+  line-height: 1.9;
+  color: var(--ink);
+  background: #fbf8f0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  resize: vertical;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.g-root .g-editor-count {
+  text-align: right;
+  font-size: 0.76em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-recap {
+  margin-top: 0.9em;
+}
+
+.g-root .g-recap-l {
+  font-size: 0.82em;
+  line-height: 1.8;
+  color: var(--ink-soft);
+}
+
+/* =============================================================================
+   触屏控件
+   -----------------------------------------------------------------------------
+   ## 为什么要留出手势安全区
+
+   浏览器和操作系统都在屏幕边缘留了**自己的**手势带，而它们比页面先拿到事件：
+
+   · iOS Safari —— 左边缘右滑 = 后退（约 20px 宽）
+   · 安卓 Chrome / Edge —— 左右边缘滑动 = 后退/前进
+   · macOS —— 三指横滑 = 后退/前进（触控板，与触点无关）
+   · 各类浏览器 —— 下拉 = 刷新（overscroll）
+
+   摇杆原来在 `left: 1.2rem`（≈19px），**整块圆盘的最左缘正好压在后退手势带上**：
+   玩家用大拇指去够摇杆左侧时，手势被浏览器吃掉，表现为
+   "推摇杆没反应，偶尔还会退回上一页"——而界面上没有任何线索说发生了什么。
+
+   `touch-action: none` 挡不住这个：边缘导航是浏览器在**把事件交给页面前**
+   就决定的，页面拿不到 `touchstart`，也就无从 `preventDefault`。
+
+   能做的只有两件，都做了：
+   1. **把控件整体内缩**，离开边缘带（`--g-safe-x`）；
+   2. **`overscroll-behavior: none`**，去掉下拉刷新那条竖向手势。
+   ========================================================================== */
+
+.g-root {
+  /* 边缘手势安全区。26px 是实测各浏览器手势带宽度的上界；
+     再叠加真机刘海屏的 safe-area-inset，取两者的较大值。 */
+  --g-safe-x: max(26px, env(safe-area-inset-left, 0px), env(safe-area-inset-right, 0px));
+  --g-safe-b: max(1.2rem, env(safe-area-inset-bottom, 0px));
+  /* 去掉下拉刷新与橡皮筋。少了它，玩家在路肩往上一滑会整页刷新，
+     进度全丢——而这在骑行中是很自然的一个动作。 */
+  overscroll-behavior: none;
+  touch-action: manipulation;
+}
+
+.g-root .g-touch {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.g-root .g-stick {
+  position: absolute;
+  left: var(--g-safe-x);
+  bottom: var(--g-safe-b);
+  width: 9.5rem;
+  height: 9.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.g-root .g-stick-base {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1px solid rgba(236, 227, 206, 0.5);
+  background: rgba(24, 20, 15, 0.22);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.g-root .g-stick-knob {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 3.6rem;
+  height: 3.6rem;
+  margin: -1.8rem 0 0 -1.8rem;
+  border-radius: 50%;
+  background: rgba(236, 227, 206, 0.82);
+  box-shadow: 0 0.1rem 0.4rem rgba(20, 17, 12, 0.4);
+}
+
+.g-root .g-touch-r {
+  position: absolute;
+  right: var(--g-safe-x);
+  bottom: calc(var(--g-safe-b) + 1rem);
+}
+
+.g-root .g-touch-check {
+  pointer-events: auto;
+  width: 5.6rem;
+  height: 5.6rem;
+  border-radius: 50%;
+  padding: 0;
+  font-size: 0.92em;
+  line-height: 1.3;
+  color: var(--paper);
+  background: rgba(24, 20, 15, 0.45);
+  border: 1px solid rgba(236, 227, 206, 0.5);
+}
+
+/* 够得着了：实心 + 印泥红边。没到范围时它是半透明的一颗灰圆，
+   玩家扫一眼就知道"现在按下去没反应"，而不必去按一次验证。 */
+.g-root .g-touch-check.is-live {
+  background: rgba(157, 58, 47, 0.82);
+  border-color: rgba(236, 227, 206, 0.9);
+  color: #fff6ee;
+}
+
+.g-root .g-touch-t {
+  position: absolute;
+  right: var(--g-safe-x);
+  top: 3.6rem;
+  display: flex;
+  gap: 0.4em;
+}
+
+.g-root .g-touch-sq {
+  pointer-events: auto;
+  width: 2.6rem;
+  height: 2.6rem;
+  padding: 0;
+  font-size: 0.8em;
+  line-height: 1.2;
+  color: var(--paper);
+  background: rgba(24, 20, 15, 0.45);
+  border-color: rgba(236, 227, 206, 0.45);
+}
+
+/* =============================================================================
+   性能面板
+   ========================================================================== */
+
+.g-root .g-perf {
+  position: absolute;
+  right: 0.9rem;
+  top: 8.4rem;
+  min-width: 9.5rem;
+  padding: 0.4em 0.6em;
+  font-size: 0.76em;
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--paper-90);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-perf-h {
+  color: var(--ink-soft);
+  letter-spacing: 0.1em;
+  margin-bottom: 0.2em;
+}
+
+.g-root .g-perf-r {
+  display: flex;
+  justify-content: space-between;
+  gap: 1em;
+}
+
+.g-root .g-perf-k {
+  color: var(--ink-soft);
+}
+
+/* =============================================================================
+   场景自检（?dump=1 后按 F9）
+   -----------------------------------------------------------------------------
+   贴在左上角而不是右下角：右下角是虚拟摇杆，按键提示在那儿，
+   自检面板压上去会让"我在触屏上"这件事也看不出来。
+   背景压到 0.72 不透明 + 右侧渐隐——它必须能盖住半个画面，
+   但不能让人完全看不见自己正在看的东西。
+   ========================================================================== */
+
+.g-root .g-dump {
+  position: absolute;
+  left: 0.6rem;
+  top: 0.6rem;
+  max-width: 58%;
+  max-height: 78%;
+  overflow: hidden;
+  margin: 0;
+  padding: 0.45em 0.65em;
+  font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #e8f0e4;
+  background: rgba(16, 20, 16, 0.72);
+  border: 1px solid rgba(232, 240, 228, 0.2);
+  border-radius: var(--radius);
+  white-space: pre;
+  pointer-events: none;
+  z-index: 95;
+}
+
+/* =============================================================================
+   窄屏（手机竖屏）
+   -----------------------------------------------------------------------------
+   只在真的窄时才切。不做「视口变窄就把所有东西缩小」那种自适应布局：
+   那样 720p 的笔记本上反而会命中这一段。
+   ========================================================================== */
+
+@media (max-width: 44rem) {
+  .g-root .g-end {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .g-root .g-end-l {
+    position: static;
+  }
+
+  .g-root .g-end-r {
+    flex: 1 1 auto;
+    max-height: none;
+  }
+
+  .g-root .g-gloss {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .g-root .g-goods {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* 小地图在手机上会和摇杆/打卡键抢右下角：缩一半，挪到左上角下面 */
+  .g-root .g-minimap {
+    right: auto;
+    left: 0.9rem;
+    bottom: 11.5rem;
+    transform: scale(0.72);
+    transform-origin: bottom left;
+  }
+
+  .g-root .g-toasts {
+    bottom: 12rem;
+  }
+
+  .g-root .g-frags {
+    top: 2.4em;
+    transform: scale(0.9);
+    transform-origin: top left;
+  }
+}
+
+/* 极窄（<=30rem）：顶栏两行，否则「下一处」会被压到只剩省略号 */
+@media (max-width: 30rem) {
+  .g-root .g-top {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1em;
+  }
+
+  .g-root .g-top-r {
+    margin-left: 0;
+  }
+
+  .g-root .g-next {
+    text-align: left;
+    max-width: 100%;
+  }
+}
+
+/* =============================================================================
+   尊重系统的减少动效设置
+   -----------------------------------------------------------------------------
+   `.g-ring` 是唯一一处常驻动画，但它转的是"这里可以打卡"这个提示。
+   系统说不要动效时它改成静态实线：提示还在，只是不转了。
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  .g-root .g-fade {
+    animation: none;
+  }
+
+  .g-root .g-ring {
+    animation: none;
+    border-style: solid;
+  }
+
+  .g-root .g-btn {
+    transition: none;
+  }
+}

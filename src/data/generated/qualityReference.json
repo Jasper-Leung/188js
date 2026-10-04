@@ -1,0 +1,31 @@
+{
+  "QUALITY_LOW": 0,
+  "QUALITY_MEDIUM": 1,
+  "QUALITY_HIGH": 2,
+  "TIER_COUNT": 3,
+  "PARAMS": [
+    {
+      "shadows": false,
+      "shadow_max_distance": 0,
+      "grass_radius": 70,
+      "tree_radius": 70
+    },
+    {
+      "shadows": true,
+      "shadow_max_distance": 90,
+      "grass_radius": 110,
+      "tree_radius": 90
+    },
+    {
+      "shadows": true,
+      "shadow_max_distance": 0,
+      "grass_radius": -1,
+      "tree_radius": -1
+    }
+  ],
+  "TIER_NAME_KEYS": [
+    "quality_low",
+    "quality_medium",
+    "quality_high"
+  ]
+}

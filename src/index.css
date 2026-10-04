@@ -1,0 +1,161 @@
+/* 全局骨架样式。UI 自己的样式在 src/ui/styles.css 里，这里只管"画布之上"的东西。 */
+
+@font-face {
+  font-family: '188UI';
+  src: url('/fonts/ui.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  /* 子集化只保留了游戏里出现过的字符。声明这个 latin 子集范围是为了让
+     浏览器对没被覆盖的字符回退到系统字体，而不是显示豆腐块。 */
+  unicode-range: U+0020-007E, U+00A0-00FF, U+2000-206F, U+3000-303F, U+4E00-9FFF, U+FF00-FFEF;
+}
+
+/* 手写体：只在明信片背面手写时由 JS 懒加载 */
+@font-face {
+  font-family: 'GiftHand';
+  src: url('/fonts/handwriting.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0020-007E, U+00A0-00FF, U+2000-206F, U+3000-303F, U+4E00-9FFF, U+FF00-FFEF;
+}
+
+:root {
+  --paper: #e8e0cd;
+  --paper-warm: #efe8d8;
+  --ink: #2a2622;
+  --ink-soft: #5c5347;
+  --ink-dim: #8a8071;
+  --seal: #b4552f;
+  --seal-soft: #d08663;
+  --rule: rgba(42, 38, 34, 0.16);
+  --rule-strong: rgba(42, 38, 34, 0.34);
+  /* 心神遮罩由 UI 改这个值。用 CSS 变量而不是逐帧改 style.opacity，
+     是为了让浏览器能把它合成在 DOM 层上（GPU 开销 0），
+     而不是走一个全屏后处理 pass。 */
+  --mood-alpha: 0;
+  --dusk-tint: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #10131a;
+  color: var(--ink);
+  font-family: '188UI', 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 触屏上禁掉双击缩放与长按选择，但**保留**文本选择——
+     玩家要在明信片背面写字，不给选就没法复制自己的字。 */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+#stage {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  /* 画布不吃指针事件，UI 层是全屏的；只有触屏画布自己会打开 pointer events */
+  touch-action: none;
+}
+
+#ui-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+#ui-root > * {
+  pointer-events: auto;
+}
+
+/* ---------------------------------------------------------------- 启动屏 */
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(120% 90% at 50% 30%, #2a3040 0%, #14171f 70%, #0c0e13 100%);
+  color: #d8cfb8;
+  transition: opacity 420ms ease;
+}
+
+#boot.done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.boot-inner {
+  text-align: center;
+  width: min(86vw, 420px);
+}
+
+.boot-title {
+  font-size: clamp(28px, 6vw, 44px);
+  letter-spacing: 0.24em;
+  margin-bottom: 18px;
+  font-weight: 400;
+}
+
+.boot-num {
+  color: var(--seal-soft);
+}
+
+.boot-sub {
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  color: #9a917f;
+  margin-bottom: 20px;
+  min-height: 1.4em;
+}
+
+.boot-bar {
+  height: 2px;
+  background: rgba(216, 207, 184, 0.16);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.boot-bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--seal), var(--seal-soft));
+  transition: width 260ms ease;
+}
+
+.boot-pct {
+  margin-top: 10px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: #6f6858;
+  font-variant-numeric: tabular-nums;
+}
+
+.noscript {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 16px;
+  z-index: 200;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

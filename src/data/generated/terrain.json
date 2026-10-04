@@ -1,0 +1,13 @@
+{
+  "TERRAIN_SIZE": 800,
+  "TERRAIN_RES": 128,
+  "MAX_HEIGHT": 25,
+  "BASE_COLOR": {
+    "__color": [
+      0.36,
+      0.55,
+      0.24,
+      1
+    ]
+  }
+}

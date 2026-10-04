@@ -1,0 +1,165 @@
+{
+  "SHOPS": {
+    "驿铺": {
+      "name_en": "Station Shop",
+      "station_idx": 0,
+      "seen_unlock": 0
+    },
+    "茶铺": {
+      "name_en": "Tea Shop",
+      "station_idx": 2,
+      "seen_unlock": 0
+    },
+    "灯铺": {
+      "name_en": "Lantern Shop",
+      "station_idx": 8,
+      "seen_unlock": 6
+    }
+  },
+  "KIT_PLAIN": 1,
+  "KIT_FINE": 2,
+  "KIT_RARE": 3,
+  "GOODS": [
+    {
+      "id": "kit_plain",
+      "name": "素笺",
+      "name_en": "Plain Sheet",
+      "price": 0,
+      "sell_at": "驿铺",
+      "requires_fragments": 0,
+      "grant": "postcard_tier",
+      "tier_rank": 1,
+      "desc": "最普通的纸。能写字，这就够了。",
+      "desc_en": "Plainest paper. It holds ink, which is enough."
+    },
+    {
+      "id": "kit_fine",
+      "name": "上笺",
+      "name_en": "Fine Sheet",
+      "price": 180,
+      "sell_at": "驿铺",
+      "requires_fragments": 0,
+      "grant": "postcard_tier",
+      "tier_rank": 2,
+      "desc": "帘纹细密，压得住墨。",
+      "desc_en": "Fine laid, it holds ink without bleeding."
+    },
+    {
+      "id": "kit_rare",
+      "name": "珍藏笺",
+      "name_en": "Rare Sheet",
+      "price": 460,
+      "sell_at": "驿铺",
+      "requires_fragments": 5,
+      "grant": "postcard_tier",
+      "tier_rank": 3,
+      "desc": "需要五块碎片齐了才肯卖给你。",
+      "desc_en": "Only sold once all five fragments are in hand."
+    },
+    {
+      "id": "paper",
+      "name": "宣纸",
+      "name_en": "Rice Paper",
+      "price": 60,
+      "sell_at": "驿铺",
+      "requires_fragments": 0,
+      "grant": "paper_up",
+      "max_own": 1,
+      "desc": "换一张更好的纸面。",
+      "desc_en": "Upgrades the paper face."
+    },
+    {
+      "id": "ink",
+      "name": "松烟墨",
+      "name_en": "Pine Ink",
+      "price": 50,
+      "sell_at": "驿铺",
+      "requires_fragments": 0,
+      "grant": "ink_up",
+      "max_own": 1,
+      "desc": "松烟磨的墨，沉而不发黑。",
+      "desc_en": "Pine-soot ink; deep without going black."
+    },
+    {
+      "id": "env",
+      "name": "信封",
+      "name_en": "Envelope",
+      "price": 40,
+      "sell_at": "驿铺",
+      "requires_fragments": 0,
+      "grant": "has_envelope",
+      "max_own": 1,
+      "desc": "装起来，才算一封寄不出去的信。",
+      "desc_en": "Only once folded can it be called an unsent letter."
+    },
+    {
+      "id": "seal",
+      "name": "蜡封",
+      "name_en": "Wax Seal",
+      "price": 45,
+      "sell_at": "灯铺",
+      "requires_fragments": 0,
+      "grant": "has_seal",
+      "max_own": 1,
+      "desc": "封口的蜡，盖一个驿的印。",
+      "desc_en": "Wax to seal, stamped with the post's mark."
+    },
+    {
+      "id": "lamp",
+      "name": "灯笼",
+      "name_en": "Lantern",
+      "price": 90,
+      "sell_at": "灯铺",
+      "requires_fragments": 0,
+      "grant": "vision_up",
+      "max_own": 2,
+      "cap": 0.5,
+      "desc": "一件 +25% 视野，两件封顶 +50%。",
+      "desc_en": "Each lantern restores 25% sight; two cap at 50%."
+    },
+    {
+      "id": "sachet",
+      "name": "香囊",
+      "name_en": "Sachet",
+      "price": 55,
+      "sell_at": "茶铺",
+      "requires_fragments": 0,
+      "grant": "vision_half_penalty",
+      "max_own": 1,
+      "desc": "心神每失一分，代价只算一半。",
+      "desc_en": "Halves whatever the next lapse of mind costs you."
+    },
+    {
+      "id": "tea_clear",
+      "name": "清心茶",
+      "name_en": "Clear Heart Tea",
+      "price": 40,
+      "sell_at": "茶铺",
+      "requires_fragments": 0,
+      "grant": "mood_up",
+      "mood_up": 1,
+      "max_own": 3,
+      "desc": "心神回一格。收一块碎片低一格，所以这是条来回的路。",
+      "desc_en": "Composure back by one. Each fragment costs one; this is the way back."
+    }
+  ],
+  "NOT_FOR_SALE": [
+    "云",
+    "茶",
+    "琴",
+    "竹",
+    "禽"
+  ],
+  "NOT_FOR_SALE_EN": {
+    "云": "Cloud",
+    "茶": "Tea",
+    "琴": "Music",
+    "竹": "Bamboo",
+    "禽": "Bird"
+  },
+  "SHOP_AT_STATION": {
+    "0": "驿铺",
+    "2": "茶铺",
+    "8": "灯铺"
+  }
+}

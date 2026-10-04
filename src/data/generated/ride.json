@@ -1,0 +1,12 @@
+{
+  "MAX_SPEED": 15,
+  "ACCEL": 8,
+  "DECEL": 12,
+  "REVERSE_SPEED": 5,
+  "TURN_SPEED": 1.8,
+  "CAM_BACK": 3.2,
+  "CAM_UP": 2.3,
+  "CAM_SIDE": 2.4,
+  "CAM_LOOK_AHEAD": 2.2,
+  "CAM_LOOK_UP": 1.1
+}

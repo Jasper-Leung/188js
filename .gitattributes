@@ -1,0 +1,27 @@
+# =============================================================================
+# 换行与二进制
+# =============================================================================
+# 为什么要显式写：Windows 的 `core.autocrlf` 默认是 true，
+# 于是同一份文件在这台机器上是 CRLF、在 CI 或同事那里是 LF，
+# `git status` 整片飘红，而实际内容一个字没变。
+#
+# 这里统一：**仓库里一律 LF**，检出时也一律 LF。
+# 选 LF 而不是 CRLF 的理由很简单——这是个 web 项目，
+# 没有任何环节需要 CRLF，而 CRLF 只会在 diff 里制造噪声。
+* text=auto eol=lf
+
+# 资产是二进制，明确标出来。
+# `text=auto` 的自动探测在压缩文件上有误判的可能，
+# 而一次误判的后果是整个 GLB 被当成文本重新编码——仓库当场膨胀数倍。
+*.glb   binary
+*.ogg   binary
+*.wav   binary
+*.woff2 binary
+*.woff  binary
+*.jpg   binary
+*.jpeg  binary
+*.png   binary
+*.webp  binary
+
+# 锁文件不参与任何合并，行尾差异也毫无意义
+package-lock.json -diff

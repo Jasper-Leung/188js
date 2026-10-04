@@ -1,0 +1,901 @@
+{
+  "SCALE": 0.5,
+  "CX": 400,
+  "CY": 714,
+  "LEMNISCATE_LOCAL": [
+    {
+      "__v2": [
+        0,
+        0
+      ]
+    },
+    {
+      "__v2": [
+        0.1305,
+        0.1682
+      ]
+    },
+    {
+      "__v2": [
+        0.2588,
+        0.325
+      ]
+    },
+    {
+      "__v2": [
+        0.3827,
+        0.4596
+      ]
+    },
+    {
+      "__v2": [
+        0.5,
+        0.5629
+      ]
+    },
+    {
+      "__v2": [
+        0.6088,
+        0.6279
+      ]
+    },
+    {
+      "__v2": [
+        0.7071,
+        0.65
+      ]
+    },
+    {
+      "__v2": [
+        0.7934,
+        0.6279
+      ]
+    },
+    {
+      "__v2": [
+        0.866,
+        0.5629
+      ]
+    },
+    {
+      "__v2": [
+        0.9239,
+        0.4596
+      ]
+    },
+    {
+      "__v2": [
+        0.9659,
+        0.325
+      ]
+    },
+    {
+      "__v2": [
+        0.9914,
+        0.1682
+      ]
+    },
+    {
+      "__v2": [
+        1,
+        0
+      ]
+    },
+    {
+      "__v2": [
+        0.9914,
+        -0.1682
+      ]
+    },
+    {
+      "__v2": [
+        0.9659,
+        -0.325
+      ]
+    },
+    {
+      "__v2": [
+        0.9239,
+        -0.4596
+      ]
+    },
+    {
+      "__v2": [
+        0.866,
+        -0.5629
+      ]
+    },
+    {
+      "__v2": [
+        0.7934,
+        -0.6279
+      ]
+    },
+    {
+      "__v2": [
+        0.7071,
+        -0.65
+      ]
+    },
+    {
+      "__v2": [
+        0.6088,
+        -0.6279
+      ]
+    },
+    {
+      "__v2": [
+        0.5,
+        -0.5629
+      ]
+    },
+    {
+      "__v2": [
+        0.3827,
+        -0.4596
+      ]
+    },
+    {
+      "__v2": [
+        0.2588,
+        -0.325
+      ]
+    },
+    {
+      "__v2": [
+        0.1305,
+        -0.1682
+      ]
+    },
+    {
+      "__v2": [
+        0,
+        0
+      ]
+    },
+    {
+      "__v2": [
+        -0.1305,
+        0.1682
+      ]
+    },
+    {
+      "__v2": [
+        -0.2588,
+        0.325
+      ]
+    },
+    {
+      "__v2": [
+        -0.3827,
+        0.4596
+      ]
+    },
+    {
+      "__v2": [
+        -0.5,
+        0.5629
+      ]
+    },
+    {
+      "__v2": [
+        -0.6088,
+        0.6279
+      ]
+    },
+    {
+      "__v2": [
+        -0.7071,
+        0.65
+      ]
+    },
+    {
+      "__v2": [
+        -0.7934,
+        0.6279
+      ]
+    },
+    {
+      "__v2": [
+        -0.866,
+        0.5629
+      ]
+    },
+    {
+      "__v2": [
+        -0.9239,
+        0.4596
+      ]
+    },
+    {
+      "__v2": [
+        -0.9659,
+        0.325
+      ]
+    },
+    {
+      "__v2": [
+        -0.9914,
+        0.1682
+      ]
+    },
+    {
+      "__v2": [
+        -1,
+        0
+      ]
+    },
+    {
+      "__v2": [
+        -0.9914,
+        -0.1682
+      ]
+    },
+    {
+      "__v2": [
+        -0.9659,
+        -0.325
+      ]
+    },
+    {
+      "__v2": [
+        -0.9239,
+        -0.4596
+      ]
+    },
+    {
+      "__v2": [
+        -0.866,
+        -0.5629
+      ]
+    },
+    {
+      "__v2": [
+        -0.7934,
+        -0.6279
+      ]
+    },
+    {
+      "__v2": [
+        -0.7071,
+        -0.65
+      ]
+    },
+    {
+      "__v2": [
+        -0.6088,
+        -0.6279
+      ]
+    },
+    {
+      "__v2": [
+        -0.5,
+        -0.5629
+      ]
+    },
+    {
+      "__v2": [
+        -0.3827,
+        -0.4596
+      ]
+    },
+    {
+      "__v2": [
+        -0.2588,
+        -0.325
+      ]
+    },
+    {
+      "__v2": [
+        -0.1305,
+        -0.1682
+      ]
+    },
+    {
+      "__v2": [
+        0,
+        0
+      ]
+    }
+  ],
+  "ROT_DEG": 60,
+  "LEMNISCATE_SCALE": 350,
+  "LEMNISCATE_CX": 400,
+  "LEMNISCATE_CY": 800,
+  "STATION_LEMNISCATE_IDX": [
+    1,
+    4,
+    6,
+    9,
+    11,
+    12,
+    15,
+    18,
+    24,
+    27,
+    36,
+    39,
+    30,
+    42,
+    45,
+    47
+  ],
+  "STATION_OFFSET": 18,
+  "STATION_FOOT_HALF": 8,
+  "PLAZA_CENTER": {
+    "__v2": [
+      0,
+      43
+    ]
+  },
+  "PLAZA_RADIUS": 12,
+  "PLAZA_STATION_MARGIN": 4,
+  "_DIR_STEPS": 16,
+  "_INTERP_PER_SEG": 20,
+  "FRAGMENT_SLOT_STATION_IDX": [
+    7,
+    10,
+    13,
+    14,
+    4
+  ],
+  "FRAGMENT_STATION_TO_SLOT": {
+    "4": 4,
+    "7": 0,
+    "10": 1,
+    "13": 2,
+    "14": 3
+  },
+  "FRAGMENT_COUNT": 5,
+  "stations": [
+    {
+      "name": "起程驿楼",
+      "name_en": "Trailhead Pavilion",
+      "event": "启程",
+      "event_en": "Depart",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.55,
+          0.35,
+          0.25,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "shop": "驿铺",
+      "text": "出门时天还早,风把名字叫得轻。",
+      "text_en": "It is still early on departure day; the wind calls your name lightly.",
+      "model_idx": 6
+    },
+    {
+      "name": "东岭驿楼",
+      "name_en": "East Ridge Pavilion",
+      "event": "歇脚",
+      "event_en": "Rest",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.72,
+          0.42,
+          0.22,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "歇脚的地方不赶人,坐多久都算数。",
+      "text_en": "A place of rest never hurries anyone; however long you sit still counts.",
+      "model_idx": 6
+    },
+    {
+      "name": "南溪茶寮",
+      "name_en": "South Creek Tea Pavilion",
+      "event": "临水",
+      "event_en": "Water",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.25,
+          0.6,
+          0.75,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "shop": "茶铺",
+      "text": "溪水不回答任何问题,只是把你的倒影还给你。",
+      "text_en": "The creek answers nothing; it only returns your reflection.",
+      "model_idx": 7
+    },
+    {
+      "name": "右岭岭台",
+      "name_en": "Right Ridge Lookout",
+      "event": "眺山",
+      "event_en": "Ridge View",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.45,
+          0.65,
+          0.4,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "站在岭台上,山把自己让给你看。",
+      "text_en": "From the ridge, the mountains give themselves to be looked at.",
+      "model_idx": 8
+    },
+    {
+      "name": "花房·禽语湖湾",
+      "name_en": "Birdsong Cove Flower House",
+      "event": "一只鸟替湖回答",
+      "event_en": "A bird answers for the lake",
+      "fragment": "禽",
+      "fragment_en": "Bird",
+      "color": {
+        "__color": [
+          0.3,
+          0.6,
+          0.8,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "湖没有说话,一只鸟掠过水面,像替它回答了。",
+      "text_en": "The lake says nothing; a bird skims the surface as if answering for it.",
+      "dialogue": [
+        "湖没有说话，一只鸟掠过水面，像替它回答了。",
+        "你听见那声音时，风刚好也停了。",
+        "她最后一次来，是坐着听的。听完就往南边去了。"
+      ],
+      "dialogue_en": [
+        "The lake says nothing; a bird skims the surface as if answering for it.",
+        "By the time you hear it, the wind has just stopped.",
+        "The last time she came, she sat and listened. Afterwards she went south."
+      ],
+      "model_idx": 4
+    },
+    {
+      "name": "岭口凉亭",
+      "name_en": "Ridge Gate Pavilion",
+      "event": "歇脚",
+      "event_en": "Rest",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.6,
+          0.7,
+          0.35,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "凉亭的柱子凉一阵,人就坐得久一阵。",
+      "text_en": "The pavilion's pillars stay cool a while, and so does whoever sits in them.",
+      "model_idx": 10
+    },
+    {
+      "name": "西湾神苑",
+      "name_en": "West Cove Shrine",
+      "event": "临水",
+      "event_en": "Water",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.62,
+          0.3,
+          0.55,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "西湾的水上浮着一层薄雾,像神还没起床。",
+      "text_en": "A thin mist floats on the west cove, as if the old gods have not woken yet.",
+      "model_idx": 9
+    },
+    {
+      "name": "云影台",
+      "name_en": "Cloudshadow Terrace",
+      "event": "雨后台阶看云",
+      "event_en": "Watching clouds after rain",
+      "fragment": "云",
+      "fragment_en": "Cloud",
+      "color": {
+        "__color": [
+          0.5,
+          0.8,
+          0.9,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "雨刚停,云影落在台阶上,像一封没有署名的信。",
+      "text_en": "After the rain, cloud shadows rest on the steps like an unsigned letter.",
+      "dialogue": [
+        "雨刚停，云影落在台阶上，像一封没有署名的信。",
+        "在这封信里，你找到了自己的影子。",
+        "你母亲也在这片云影里站过。她没留名，只留下一道比影子还浅的印。"
+      ],
+      "dialogue_en": [
+        "After the rain, cloud shadows rest on the steps like an unsigned letter.",
+        "Within it, you find your own reflection.",
+        "Your mother stood in this same cloud-shadow. She left no name, only a mark fainter than a shadow."
+      ],
+      "model_idx": 0
+    },
+    {
+      "name": "灯影亭",
+      "name_en": "Lantern Pavilion",
+      "event": "过灯",
+      "event_en": "Lantern",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.9,
+          0.55,
+          0.2,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "shop": "灯铺",
+      "text": "过灯。灯不认人,只认走夜路的人。",
+      "text_en": "Past the lanterns. They know no one, only those who walk the night road.",
+      "model_idx": 12
+    },
+    {
+      "name": "北岭凉亭",
+      "name_en": "North Ridge Pavilion",
+      "event": "歇脚",
+      "event_en": "Rest",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.55,
+          0.6,
+          0.7,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "北岭的风很直,在这里说话要慢一点。",
+      "text_en": "The north wind blows straight; whoever speaks here must speak slowly.",
+      "model_idx": 10
+    },
+    {
+      "name": "茶烟小筑",
+      "name_en": "Tea Smoke Cottage",
+      "event": "朋友来了先煮茶",
+      "event_en": "Tea for an arriving friend",
+      "fragment": "茶",
+      "fragment_en": "Tea",
+      "color": {
+        "__color": [
+          0.5,
+          0.7,
+          0.3,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "朋友来了,先煮一壶茶。水汽升起来,话就慢了。",
+      "text_en": "When a friend arrives, brew tea first. As steam rises, conversation slows down.",
+      "dialogue": [
+        "朋友来了，先煮一壶茶。水汽升起来，话就慢了。",
+        "等茶香散尽，有些东西已经说清楚了。",
+        "她也在这里坐过一壶茶，没等谁开口，就先走了。"
+      ],
+      "dialogue_en": [
+        "When a friend arrives, brew tea first. As steam rises, conversation slows down.",
+        "When the tea fragrance fades, some things have already been understood.",
+        "She sat over a pot of tea here too, and left before anyone had to say anything."
+      ],
+      "model_idx": 1
+    },
+    {
+      "name": "左弯廊",
+      "name_en": "Left Bend Corridor",
+      "event": "歇脚",
+      "event_en": "Rest",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.45,
+          0.35,
+          0.5,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "廊子很长,影子也跟着很长。",
+      "text_en": "The corridor is long, and so are the shadows in it.",
+      "model_idx": 11
+    },
+    {
+      "name": "西谷岭台",
+      "name_en": "West Valley Lookout",
+      "event": "眺山",
+      "event_en": "Ridge View",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.5,
+          0.6,
+          0.35,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "从西谷望出去,路都通向同一种云。",
+      "text_en": "From the west valley, all the roads lead to the same clouds.",
+      "model_idx": 8
+    },
+    {
+      "name": "琴音林",
+      "name_en": "Zither Grove",
+      "event": "把风声听成琴音",
+      "event_en": "Hearing wind as zither music",
+      "fragment": "琴",
+      "fragment_en": "Music",
+      "color": {
+        "__color": [
+          0.2,
+          0.4,
+          0.2,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "林子里没有舞台,风一经过,树影就开始合奏。",
+      "text_en": "There is no stage in the grove; when wind passes, the tree shadows begin to play together.",
+      "dialogue": [
+        "林子里没有舞台，风一经过，树影就开始合奏。",
+        "你坐下来，它们就停了下来——等你的节拍。",
+        "她把这片林子当成练习曲的地方。风停的时候，她也不出声。"
+      ],
+      "dialogue_en": [
+        "There is no stage in the grove; when wind passes, the tree shadows begin to play together.",
+        "You sit down and they pause — waiting for your beat.",
+        "She used this grove for practice. When the wind stopped, she went quiet as well."
+      ],
+      "model_idx": 2
+    },
+    {
+      "name": "竹雨庭",
+      "name_en": "Bamboo Rain Courtyard",
+      "event": "夜雨敲竹",
+      "event_en": "Night rain on bamboo",
+      "fragment": "竹",
+      "fragment_en": "Bamboo",
+      "color": {
+        "__color": [
+          0.3,
+          0.5,
+          0.3,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "夜雨敲竹,窗内的人把一盏灯守到天明。",
+      "text_en": "Night rain taps the bamboo while someone keeps a lamp burning until morning.",
+      "dialogue": [
+        "夜雨敲竹，窗内的人把一盏灯守到天明。",
+        "第二天早上，雨停了，竹叶上还留着水珠。",
+        "这盏灯她也守过一整夜。第二天早上，她没有来关灯。"
+      ],
+      "dialogue_en": [
+        "Night rain taps the bamboo while someone keeps a lamp burning until morning.",
+        "By morning the rain has stopped, and water droplets still cling to the bamboo leaves.",
+        "She kept this same lamp burning for one whole night. In the morning she did not come to put it out."
+      ],
+      "model_idx": 3
+    },
+    {
+      "name": "榕树下",
+      "name_en": "Banyan Tree",
+      "event": "老树",
+      "event_en": "Old tree",
+      "fragment": "",
+      "fragment_en": "",
+      "color": {
+        "__color": [
+          0.25,
+          0.45,
+          0.25,
+          1
+        ]
+      },
+      "canvas": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "off": {
+        "__v2": [
+          0,
+          0
+        ]
+      },
+      "text": "榕树的气根落成帘子,坐在下面,听见自己的呼吸。",
+      "text_en": "The banyan's aerial roots form a curtain; sitting beneath, you hear your own breath.",
+      "model_idx": 5
+    }
+  ]
+}

@@ -1,0 +1,181 @@
+{
+  "INTERACT_COOLDOWN_SEC": 1,
+  "RECHECK_IN_MIN_DIST": 8,
+  "BIKE_SCALE": 0.012,
+  "WHEEL_RADIUS": 0.34,
+  "FRONT_Z": -0.55,
+  "REAR_Z": 0.55,
+  "FA_X": 0.4,
+  "RA_X": -0.5,
+  "WY": 0.34,
+  "STATION_PASS_RADIUS": 15,
+  "STELE_PASS_RADIUS": 11,
+  "STATION_LOAD_DISTANCE": 300,
+  "STATION_GLB_CONFIG": [
+    {
+      "path": "res://assets/models/station_0.glb",
+      "scale": 10,
+      "label_y": 12,
+      "glow_y": 8,
+      "glow_range": 12
+    },
+    {
+      "path": "res://assets/models/station_1.glb",
+      "scale": 10,
+      "label_y": 10,
+      "glow_y": 7,
+      "glow_range": 10
+    },
+    {
+      "path": "res://assets/models/station_2.glb",
+      "scale": 10,
+      "label_y": 14,
+      "glow_y": 10,
+      "glow_range": 15,
+      "rot_y": 180
+    },
+    {
+      "path": "res://assets/models/station_3.glb",
+      "scale": 10,
+      "label_y": 10,
+      "glow_y": 7,
+      "glow_range": 10,
+      "rot_y": 180
+    },
+    {
+      "path": "res://assets/models/station_4.glb",
+      "scale": 10,
+      "label_y": 11,
+      "glow_y": 8,
+      "glow_range": 12,
+      "rot_y": -120
+    },
+    {
+      "path": "res://assets/models/tree.glb",
+      "scale": 8,
+      "label_y": 14,
+      "glow_y": 10,
+      "glow_range": 12,
+      "rot_y": 0
+    },
+    {
+      "path": "res://assets/models/station_驿楼.glb",
+      "scale": 10,
+      "label_y": 11,
+      "glow_y": 7,
+      "glow_range": 14
+    },
+    {
+      "path": "res://assets/models/station_茶寮.glb",
+      "scale": 10,
+      "label_y": 10,
+      "glow_y": 7,
+      "glow_range": 12
+    },
+    {
+      "path": "res://assets/models/station_岭台.glb",
+      "scale": 10,
+      "label_y": 12,
+      "glow_y": 8,
+      "glow_range": 14
+    },
+    {
+      "path": "res://assets/models/station_神苑.glb",
+      "scale": 10,
+      "label_y": 9,
+      "glow_y": 6,
+      "glow_range": 10
+    },
+    {
+      "path": "res://assets/models/station_凉亭.glb",
+      "scale": 12,
+      "label_y": 8,
+      "glow_y": 5,
+      "glow_range": 10
+    },
+    {
+      "path": "res://assets/models/station_廊.glb",
+      "scale": 10,
+      "label_y": 8,
+      "glow_y": 5,
+      "glow_range": 10
+    },
+    {
+      "path": "res://assets/models/station_亭灯.glb",
+      "scale": 14,
+      "label_y": 10,
+      "glow_y": 6,
+      "glow_range": 10
+    }
+  ],
+  "STATION_ROOF_TINT": {
+    "roof": {
+      "__color": [
+        0.175,
+        0.15,
+        0.115,
+        1
+      ]
+    },
+    "roof_2": {
+      "__color": [
+        0.245,
+        0.215,
+        0.17,
+        1
+      ]
+    }
+  },
+  "VILLAIN_SCENES": [
+    {
+      "seen": 4,
+      "parts": [
+        {
+          "speaker": "villain_speaker",
+          "lines": [
+            "villain_1_1",
+            "villain_1_2",
+            "villain_1_3"
+          ]
+        }
+      ]
+    },
+    {
+      "seen": 8,
+      "parts": [
+        {
+          "speaker": "villain_speaker",
+          "lines": [
+            "villain_2_1",
+            "villain_2_2",
+            "villain_2_3"
+          ]
+        }
+      ]
+    },
+    {
+      "seen": 12,
+      "parts": [
+        {
+          "speaker": "villain_speaker",
+          "lines": [
+            "villain_3_1",
+            "villain_3_2"
+          ]
+        },
+        {
+          "speaker": "player_speaker",
+          "lines": [
+            "villain_3_player"
+          ]
+        },
+        {
+          "speaker": "villain_speaker",
+          "lines": [
+            "villain_3_3"
+          ]
+        }
+      ]
+    }
+  ]
+}
