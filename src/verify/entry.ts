@@ -17,7 +17,7 @@ import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency 
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
 import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
-import { Box3, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Object3D } from 'three';
+import { Box3, BoxGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D } from 'three';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
@@ -26,7 +26,7 @@ import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT,
 import { canRide, isInWorld } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams } from '../world/ride';
-import { Vehicle, VEHICLE_TUNE } from '../world/vehicle';
+import { Vehicle, MODE_TUNE, RIDE_MODES, autoScaleToHeight } from '../world/vehicle';
 import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
 import { PRESETS, clampTier } from '../core/settings';
@@ -1251,7 +1251,7 @@ check('verify_controls', () => {
 
   // 4. 自行车那三个数必须**一字不改**地等于源项目的 RIDE
   asserts++;
-  const bt = VEHICLE_TUNE.bike;
+  const bt = MODE_TUNE.bike;
   if (bt.maxSpeed !== RIDE.MAX_SPEED) probs.push(`自行车极速 ${bt.maxSpeed} ≠ 源项目 ${RIDE.MAX_SPEED}`);
   asserts++;
   if (bt.accel !== RIDE.ACCEL) probs.push(`自行车加速度 ${bt.accel} ≠ 源项目 ${RIDE.ACCEL}`);
@@ -1260,25 +1260,45 @@ check('verify_controls', () => {
 
   // 5. 滑板必须**真的不一样**，否则"切换载具"只是换了个模型
   asserts++;
-  const st = VEHICLE_TUNE.skate;
+  const st = MODE_TUNE.skate;
   if (st.maxSpeed === bt.maxSpeed && st.accel === bt.accel && st.turn === bt.turn) {
     probs.push('滑板与自行车的运动参数完全相同，切换就只剩换模型');
   }
 
-  // 6. 没有滑板模型时不给切——而不是切过去发现是空的
+  // 5b. **默认必须是徒步**（用户要求：起始没有载具，只有角色）。
+  //     写错的表现很隐蔽：玩家一进世界已经在骑车，而他自己不知道。
+  asserts++;
+  if (RIDE_MODES[0] !== 'foot') probs.push(`默认模式是 ${RIDE_MODES[0]}，应为 foot（起始没有载具）`);
+  asserts++;
+  if (RIDE_MODES.length !== 3) probs.push(`模式有 ${RIDE_MODES.length} 种，应为 3（foot/bike/skate）`);
+
+  // 5c. 缩放必须**算出来**，不能写死：模型是归一化到 1 单位的，
+  //     换一批模型高度就变了，写死的数字会在下次换模型时悄悄失配。
+  asserts++;
+  {
+    const g = new Object3D();
+    g.add(new Mesh(new BoxGeometry(1, 1, 1)));
+    const sc = autoScaleToHeight(g, 1.75);
+    if (Math.abs(sc - 1.75) > 1e-6) probs.push(`autoScaleToHeight(1 单位高 → 1.75m) 得到 ${sc}`);
+  }
+
+  // 6. 没有滑板模型时不给切——而不是切过去发现是空的。
+  //    **默认模式是 foot**，所以"切失败之后仍是原来那个"要验的是 foot。
   asserts++;
   const v = new Vehicle();
   v.attach({ bike: null, skate: null, char: null, clips: {} });
-  if (v.canSwitch('skate')) probs.push('没有滑板模型却报告"可以切"');
+  if (v.canEnter('skate')) probs.push('没有滑板模型却报告"可以进"');
   asserts++;
   if (v.set('skate')) probs.push('没有滑板模型却切成功了');
   asserts++;
-  if (v.id !== 'bike') probs.push('切换失败之后载具却被改成了 skate');
+  if (v.id !== 'foot') probs.push(`切换失败之后模式却是 ${v.id}，应为 foot`);
 
-  // 7. 有了滑板之后能切，而且切得回去
+  // 7. 有了滑板之后能进，而且进得去出得来
   asserts++;
-  v.attach({ bike: null, skate: new Object3D(), char: null, clips: {} });
-  if (!v.canSwitch('skate')) probs.push('有滑板模型却报告"不能切"');
+  v.attach({ bike: new Object3D(), skate: new Object3D(), char: new Object3D(), clips: {} });
+  if (!v.canEnter('skate')) probs.push('有滑板模型却报告"不能进"');
+  asserts++;
+  if (v.id !== 'foot') probs.push('装上模型之后默认模式被改掉了');
   asserts++;
   if (!v.set('skate')) probs.push('有滑板模型却切不过去');
   asserts++;
@@ -1287,9 +1307,13 @@ check('verify_controls', () => {
   if (!v.set('bike')) probs.push('切回自行车失败');
   asserts++;
   if (v.id !== 'bike') probs.push('切回自行车之后 id 不对');
+  asserts++;
+  if (!v.set('foot')) probs.push('切回徒步失败');
+  asserts++;
+  if (v.id !== 'foot') probs.push('切回徒步之后 id 不对');
 
   const summary =
-    `机位 ${CAM_MODES.join('/')}（默认 ${CAM_MODES[0]}）· ` +
+    `模式 ${RIDE_MODES.join('/')}（默认 ${RIDE_MODES[0]}）· 机位 ${CAM_MODES.join('/')}（默认 ${CAM_MODES[0]}）· ` +
     `自行车 ${bt.maxSpeed}m/s 保持源项目 · 滑板 ${st.maxSpeed}m/s`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });

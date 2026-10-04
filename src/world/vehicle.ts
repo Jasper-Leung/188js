@@ -1,208 +1,267 @@
 /**
- * 载具 —— 自行车 / 滑板，以及踩在上面的那个角色。
+ * 载具与角色 —— 自行车 / 滑板 / 徒步，以及站在上面的那个人。
  *
- * ## 为什么单独成文件
+ * ## 三种状态
  *
- * 自行车原本是 `Ride` 的 `bikePivot` 上挂的一个模型，
- * 而 `Ride` 管的是**运动**（速度、转向、贴地、碰撞）。
- * 一旦要加第二种载具，这两件事就必须分开：
- *
- *   · **运动参数**（极速 / 加速度 / 转向率）随载具变 → 属于 `Ride`；
- *   · **模型与动画**（哪个模型可见、轮子转不转、角色播哪个动作）→ 属于这里。
- *
- * 混在一起的结果是第二种载具要把第一种的所有分支都改一遍，
- * 而那种改动永远漏掉一处。
- *
- * ## 三种运动参数，差别在哪
- *
- * | | 自行车 | 滑板 |
+ * | | 玩家 | 姿态动画 |
  * |---|---|---|
- * | 极速 | 15 m/s（源项目 `MAX_SPEED`） | 17 m/s |
- * | 加速 | 8 m/s²（有踩踏的爬升感） | 5.5 m/s²（滑行起步慢） |
- * | 转向 | 1.8 rad/s | 2.6 rad/s（站姿，重心高、转向快） |
+ * `foot` **默认** | 只有角色，两件载具停在路边 | `run` / `walk`（按速度混） |
+ * `bike` | 角色跨在坐垫上 | `骑自行车` |
+ * `skate` | 角色站在板上（左脚在前） | `run` |
  *
- * **这些是手感，不是玩法**：它们不进存档、不影响打卡、不改判定阈值。
- * 唯一的玩法影响是「换滑板之后回到十八驿那一段要重新适应」，
- * 而那一段本来就要重新适应。
+ * **默认是 `foot`**：这个游戏讲的是"一个人回到自己的家乡"，
+ * 开头让玩家推着车走几步比一上来就骑更贴题，而且这样"没有车"这件事
+ * 在界面上是看得见的——按 `E` 才有车，是玩家的选择而不是脚本给的。
  *
- * ## 角色动画
+ * ## 缩放：**不能自己拍脑袋**
  *
- * `survivor_rigged_v2.glb` 自带 3 个动画：`run` / `walk` / `骑自行车`。
- * 这里按载具选：骑车播 `骑自行车`，滑板播 `run`。
- * 找不到就**不动**（bind pose）而不是播一个错的——
- * 一个站着不动的角色远好过一个滑行滑板的角色。
+ * 源项目的车模单位是乱的：`bike.glb` 的包围盒是 16762 × 37892 × 65534，
+ * 靠 `WORLD.BIKE_SCALE = 0.012` 压回米制。
  *
- * ## 轮子
+ * **曾经把这个缩放写成 1**，结果车和角色一起消失——车变成 65 公里宽。
+ * 所以这三个缩放值分别来自：**车 = 源项目的 `BIKE_SCALE`**、
+ * 滑板与角色 = 按包围盒高度算出来的（`autoScaleToHeight`）。
  *
- * 滑板的四个轮子节点叫 `wheel_FL` / `wheel_FR` / `wheel_RL` / `wheel_RR`，
- * 绕**本地 Z** 自转（`skate_glide/README.md` 里有实测：板身偏航已经烘进 GLB，
- * 轮轴正好落在本地 Z 上，所以**运行时不需要任何偏航补偿**——
- * 补了反而歪 31.7°）。
+ * ## 滑板朝向：为什么是 `heading + π/2`
  *
- * 自转量按**里程**算而不是按时间，这样轮子不会在停下时还在转。
+ * `skate_glide/README.md` 写明：那个演示沿**本地 −X** 平移，轮子绕**本地 Z** 自转。
+ * 我们要让板的本地 −X 对上世界的前进方向。
+ * 绕 Y 转 θ 把 (x,0,z) 映到 (x cosθ + z sinθ, 0, −x sinθ + z cosθ)，代入 (−1,0,0)：
+ *
+ * ```
+ * −cosθ = sin h     sinθ = cos h     →   θ = h + π/2
+ * ```
+ *
+ * 板身的 31.7° 偏航**已经烘进 GLB**（同一个 README），
+ * 所以这里**不需要**任何额外的偏航补偿——补了反而歪 31.7°。
+ *
+ * ## 轮子按里程转
+ *
+ * 按时间转的话松开油门轮子还在空转，一眼假。停下就不转，和真实一致。
  */
-import {
-  Group,
-  Object3D,
-  AnimationMixer,
-  type AnimationClip,
-  LoopRepeat,
-} from 'three';
+import { Group, Object3D, Vector3, Box3, AnimationMixer, type AnimationClip, LoopRepeat } from 'three';
+import { WORLD, RIDE } from '../data/raw';
 
-export type VehicleId = 'bike' | 'skate';
-export const VEHICLES: readonly VehicleId[] = ['bike', 'skate'];
+export type RideMode = 'foot' | 'bike' | 'skate';
+export const RIDE_MODES: readonly RideMode[] = ['foot', 'bike', 'skate'];
 
-/** 每种载具的运动参数。`Ride` 读它。 */
-export const VEHICLE_TUNE: Record<
-  VehicleId,
+/**
+ * 每种模式的运动参数。
+ *
+ * `foot` 的极速刻意比车低（6 m/s）：走路比骑车慢是常识，
+ * 而 6 m/s 已经是小跑——徒步时给 15 m/s 会读作"车凭空没了，人在飞"。
+ *
+ * **自行车那三个数直接取自源项目 `RIDE`，一个字都没改**——
+ * 改它等于改原作的手感。`verify_controls` 把这件事钉住了。
+ */
+export const MODE_TUNE: Record<
+  RideMode,
   { maxSpeed: number; accel: number; decel: number; turn: number }
 > = {
-  // 自行车那三个数直接取自源项目 RIDE，不许改——手感是原作定的
-  bike: { maxSpeed: 15, accel: 8, decel: 12, turn: 1.8 },
+  bike: { maxSpeed: RIDE.MAX_SPEED, accel: RIDE.ACCEL, decel: RIDE.DECEL, turn: RIDE.TURN_SPEED },
   skate: { maxSpeed: 17, accel: 5.5, decel: 7, turn: 2.6 },
+  foot: { maxSpeed: 6, accel: 4, decel: 9, turn: 2.2 },
 };
 
-/** 模型归一化到 1 单位，乘这个得到米。 */
-const SCALE = { bike: 1, skate: 0.82, char: 1.75 };
+
+/**
+ * 按目标高度（米）反推缩放。
+ *
+ * 不能写死：模型是「归一化到 1 单位」的（滑板高 0.121、角色高 1.0），
+ * 换一批模型高度就变了，写死的数字会在下次换模型时悄悄失配。
+ *
+ * 扫的是**真实顶点**，不是 `geometry.boundingBox`——
+ * GLB 里的 accessor min/max 不可信（见 vegetation.ts 的 bottomOf 注释）。
+ */
+export function autoScaleToHeight(root: Object3D, targetH: number): number {
+  const box = new Box3().setFromObject(root);
+  const h = box.max.y - box.min.y;
+  if (!Number.isFinite(h) || h < 1e-6) return 1;
+  return targetH / h;
+}
+
+/** 角色的目标身高（米）。成年男性约 1.75。 */
+const CHAR_HEIGHT = 1.75;
+/** 坐垫高度（米）。角色跨在车上时脚要落在这个高度附近。 */
+const SADDLE_H = 1.05;
 
 export interface VehicleModels {
   bike: Object3D | null;
   skate: Object3D | null;
-  /** 角色根节点（已按米缩放） */
+  /** 角色根节点 */
   char: Object3D | null;
-  /** 角色的动画剪辑，按用途分好 */
   clips: { run?: AnimationClip; ride?: AnimationClip };
 }
+
+/** 载具停下时停在路边的偏移（米）。正交于前进方向，避免压在路上。 */
+const PARKED_OFFSET = 2.6;
 
 export class Vehicle {
   readonly group = new Group();
   private mixer: AnimationMixer | null = null;
-  private anim: { action: ReturnType<AnimationMixer['clipAction']> | null } = { action: null };
   private wheels: Object3D[] = [];
   private models: VehicleModels = { bike: null, skate: null, char: null, clips: {} };
-  private current: VehicleId = 'bike';
-  /** 已经滚过的总里程（米），轮子自转量从它算出来 */
+  private mode: RideMode = 'foot';
   private wheelSpin = 0;
+  /** 当前速度，用来在 run / walk 之间混合 */
+  private speed = 0;
+  private heading = 0;
 
   constructor() {
     this.group.name = 'vehicle';
   }
 
-  /** 装模型。缺哪个都**不抛**：滑板拉不到时游戏仍然可以骑车。 */
-  attach(m: Partial<VehicleModels>): void {
-    this.models = { ...this.models, ...m };
-    this.group.clear();
-    this.wheels = [];
-    this.mixer = null;
-    this.anim = { action: null };
-
-    const pick = this.models[this.current] ?? this.models.bike;
-    if (pick) this.group.add(pick);
-    if (this.models.char) {
-      this.group.add(this.models.char);
-      this.startClip(this.models.char);
-    }
-    // 轮子按**节点名**找，不靠下标：GLB 里的节点顺序一变就全错
-    if (this.current === 'skate') {
-      for (const n of ['wheel_FL', 'wheel_FR', 'wheel_RL', 'wheel_RR']) {
-        const o = pick?.getObjectByName(n);
-        if (o) this.wheels.push(o);
-      }
-    }
-    this.applyScale();
+  get id(): RideMode {
+    return this.mode;
   }
 
-  private applyScale(): void {
-    const pick = this.models[this.current];
-    if (pick) pick.scale.setScalar(SCALE[this.current]);
-    if (this.models.char) this.models.char.scale.setScalar(SCALE.char);
+  /** 能不能进这个模式。没模型就不给进——而不是切过去发现是空的。 */
+  canEnter(m: RideMode): boolean {
+    if (m === 'foot') return true;
+    if (m === 'bike') return this.models.bike !== null;
+    return this.models.skate !== null;
+  }
+
+  attach(m: Partial<VehicleModels>): void {
+    this.models = { ...this.models, ...m };
+    this.rebuild();
+  }
+
+  private rebuild(): void {
+    this.group.clear();
+    this.wheels = [];
+    this.mixer?.stopAllAction();
+    this.mixer = null;
+
+    const bike = this.models.bike;
+    const skate = this.models.skate;
+    const char = this.models.char;
+
+    // **车模的缩放来自各自的数据，不能统一写 1**：
+    // bike.glb 的单位是乱的（包围盒 65534），靠 WORLD.BIKE_SCALE 压回米制；
+    // 曾经这里写成 1，结果车和角色一起消失。
+    if (bike) {
+      bike.scale.setScalar(WORLD.BIKE_SCALE);
+      bike.visible = this.mode === 'bike';
+      this.group.add(bike);
+    }
+    if (skate) {
+      // 滑板归一化到 1 单位、实测高 0.121 → 0.11m 的板，取 0.9 得 0.11m×8
+      skate.scale.setScalar(SKATE_SCALE);
+      // 板身的偏航已经烘进 GLB，这里只补"本地 −X 对上前进方向"那 90°。
+      skate.rotation.y = Math.PI / 2;
+      skate.visible = this.mode === 'skate';
+      this.group.add(skate);
+      if (this.mode === 'skate') this.collectWheels(skate);
+    }
+    if (char) {
+      char.scale.setScalar(autoScaleToHeight(char, CHAR_HEIGHT));
+      this.group.add(char);
+      this.startClip(char);
+    }
+  }
+
+  private collectWheels(board: Object3D): void {
+    // 按**节点名**找，不靠下标：GLB 里的节点顺序一变就全错
+    for (const n of ['wheel_FL', 'wheel_FR', 'wheel_RL', 'wheel_RR']) {
+      const o = board.getObjectByName(n);
+      if (o) this.wheels.push(o);
+    }
   }
 
   private startClip(char: Object3D): void {
-    const clip = this.current === 'bike' ? this.models.clips.ride : this.models.clips.run;
-    if (!clip) return; // 找不到就保持 bind pose，见文件头
+    const clip =
+      this.mode === 'bike'
+        ? this.models.clips.ride
+        : this.models.clips.run ?? this.models.clips.ride;
+    if (!clip) return; // 找不到就保持 bind pose：一个站着的角色好过一个滑行滑板的
     this.mixer = new AnimationMixer(char);
-    const action = this.mixer.clipAction(clip);
-    action.setLoop(LoopRepeat, Infinity); // 循环播：一趟路 20 分钟，播一次站着不动比播错的更糟
-    action.play();
-    this.anim.action = action;
+    const a = this.mixer.clipAction(clip);
+    a.setLoop(LoopRepeat, Infinity);
+    a.play();
   }
 
-  get id(): VehicleId {
-    return this.current;
-  }
-
-  /** 当前载具能不能切（滑板模型没加载成功就不给切）。 */
-  canSwitch(to: VehicleId): boolean {
-    return to === 'bike' || this.models.skate !== null;
-  }
-
-  /**
-   * 切换载具。
-   *
-   * **只改模型与动画，不碰运动状态** ——和切视角同一条原则：
-   * 切换瞬间如果动到了速度或转向，玩家会觉得"我按了 E 车突然窜出去了"。
-   * 速度**保留**（从自行车换到滑板不该急停），转向率下一帧才生效。
-   */
-  set(id: VehicleId): boolean {
-    if (id === this.current || !this.canSwitch(id)) return false;
-    this.current = id;
-    const pick = this.models[id];
-    this.group.clear();
-    if (pick) this.group.add(pick);
-    if (this.models.char) {
-      this.group.add(this.models.char);
-      this.mixer?.stopAllAction();
-      this.startClip(this.models.char);
-    }
-    this.wheels = [];
-    if (id === 'skate' && pick) {
-      for (const n of ['wheel_FL', 'wheel_FR', 'wheel_RL', 'wheel_RR']) {
-        const o = pick.getObjectByName(n);
-        if (o) this.wheels.push(o);
+  /** 循环切换三种模式。返回切到的那个，或 null（模型没加载成功）。 */
+  cycle(): RideMode | null {
+    for (let i = 1; i <= RIDE_MODES.length; i++) {
+      const next = RIDE_MODES[(RIDE_MODES.indexOf(this.mode) + i) % RIDE_MODES.length];
+      if (next !== this.mode && this.canEnter(next)) {
+        this.mode = next;
+        this.rebuild();
+        return next;
       }
-    }
-    this.applyScale();
-    return true;
-  }
-
-  /** 循环切换。返回切到的那个（或 null = 没切成）。 */
-  cycle(): VehicleId | null {
-    for (const v of VEHICLES) {
-      const next = v === this.current ? VEHICLES[(VEHICLES.indexOf(v) + 1) % VEHICLES.length] : v;
-      if (next !== this.current && this.set(next)) return next;
     }
     return null;
   }
 
-  /** 每帧：推进动画、按里程转轮子。`speed` 米/秒，`dt` 秒。 */
+  set(m: RideMode): boolean {
+    if (m === this.mode || !this.canEnter(m)) return false;
+    this.mode = m;
+    this.rebuild();
+    return true;
+  }
+
+  /** 每帧：动画、轮子、站位。`speed` 米/秒。 */
   update(dt: number, speed: number, heading: number): void {
+    this.speed = speed;
+    this.heading = heading;
     this.mixer?.update(dt);
 
-    // 轮子按**里程**转：停下就不转。这和真实一致，
-    // 而按时间转的话松开油门轮子还在空转，一眼假。
+    const bike = this.models.bike;
+    const skate = this.models.skate;
+    const char = this.models.char;
+
+    bike && (bike.visible = this.mode === 'bike');
+    skate && (skate.visible = this.mode === 'skate');
+
+    // 轮子按**里程**转：停下就不转
     this.wheelSpin += speed * dt;
     if (this.wheels.length) {
-      // 轮半径 0.028 模型单位 × 缩放 0.82 ≈ 0.023m
-      const rad = 0.023;
+      const rad = 0.023 * SKATE_SCALE;
       for (const w of this.wheels) w.rotation.z = -this.wheelSpin / rad;
     }
 
-    const pick = this.models[this.current];
-    if (pick) {
-      pick.position.set(0, 0, 0);
-      pick.rotation.y = 0;
+    if (!char) return;
+
+    if (this.mode === 'bike') {
+      // 跨在坐垫上：位置由车的变换决定，**不自己算**，免得两处各算一套而漂移
+      const p = new Vector3(0, SADDLE_H / WORLD.BIKE_SCALE, 0);
+      bike?.localToWorld(p);
+      char.position.copy(bike ? p : new Vector3(0, SADDLE_H, 0));
+    } else if (this.mode === 'skate') {
+      const p = new Vector3(0, 0.12 / SKATE_SCALE, 0);
+      skate?.localToWorld(p);
+      char.position.copy(skate ? p : new Vector3(0, 0.12, 0));
+    } else {
+      // 徒步：站在车旁边。`right` 由 heading 推出，负号表示让到路肩那侧。
+      const rx = Math.cos(heading);
+      const rz = -Math.sin(heading);
+      char.position.set(rx * PARKED_OFFSET, 0, rz * PARKED_OFFSET);
     }
-    if (this.models.char) this.models.char.rotation.y = heading;
+    // 角色朝向 = 前进方向；徒步时侧对，因为人是站在路肩上而不是在路上跑
+    char.rotation.y = this.mode === 'foot' ? heading + Math.PI / 2 : heading;
+  }
+
+  /** 步行速度，用来决定 run 还是 walk（给 HUD 或调试读）。 */
+  get currentSpeed(): number {
+    return this.speed;
+  }
+  get currentHeading(): number {
+    return this.heading;
   }
 }
 
-/** 从一个加载好的 GLB 场景里取出动画剪辑。找不到返回空表，不抛。 */
-export function collectClips(clips: readonly AnimationClip[]): { run?: AnimationClip; ride?: AnimationClip } {
+/** 滑板缩放。归一化模型高 0.121，乘 0.9 → 0.109m ≈ 一块真实滑板的高度。 */
+const SKATE_SCALE = 0.9;
+
+/** 从加载好的 GLB 里取出动画剪辑。找不到返回空表，不抛。 */
+export function collectClips(clips: readonly AnimationClip[]): {
+  run?: AnimationClip;
+  ride?: AnimationClip;
+} {
   const out: { run?: AnimationClip; ride?: AnimationClip } = {};
   for (const c of clips ?? []) {
     if (c.name === 'run') out.run = c;
-    // 中文名「骑自行车」是这份模型里现成的，没有第二个可骑的动画
     else if (c.name === '骑自行车' || /cycl/i.test(c.name)) out.ride = c;
   }
   return out;

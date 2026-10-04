@@ -73,7 +73,8 @@
     "veh_bike": "自行车",
     "veh_skate": "滑板",
     "veh_switched": "载具 · %s",
-    "veh_locked": "还没有滑板"
+    "veh_locked": "还没有滑板",
+    "veh_foot": "徒步"
   },
   "en": {
     "mg_success": "Done",
@@ -148,6 +149,7 @@
     "veh_bike": "Bicycle",
     "veh_skate": "Skateboard",
     "veh_switched": "Vehicle · %s",
-    "veh_locked": "No skateboard yet"
+    "veh_locked": "No skateboard yet",
+    "veh_foot": "On foot"
   }
 }

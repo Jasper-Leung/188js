@@ -21,7 +21,7 @@ import { Group, Vector3, MathUtils, type PerspectiveCamera } from 'three';
 import { RIDE, WORLD } from '../data/raw';
 import { Terrain } from './terrain';
 import { Road } from './road';
-import { Vehicle, VEHICLE_TUNE, type VehicleId } from './vehicle';
+import { Vehicle, MODE_TUNE, type RideMode } from './vehicle';
 import { Stations, type StationRuntime } from './stations';
 import { clamp, damp } from '../core/math';
 
@@ -90,7 +90,6 @@ export class Ride {
   readonly bikePivot = new Group();
   /** 载具模型 + 角色。运动参数在这里，模型与动画也在里面。 */
   readonly vehicle = new Vehicle();
-  private vehicleId: VehicleId = 'bike';
 
   private speed = 0;
   private heading = 0;
@@ -179,7 +178,7 @@ export class Ride {
     } else {
       // 运动参数随载具变（自行车 / 滑板）。**读取发生在运动开始之前**，
       // 所以切载具的那一帧用的还是旧参数 —— 速度与转向都连续，不会窜出去。
-      const tune = VEHICLE_TUNE[this.vehicleId];
+      const tune = MODE_TUNE[this.vehicle.id];
       if (vert < -0.1) {
         this.speed = Math.min(this.speed + tune.accel * dt, tune.maxSpeed);
       } else if (vert > 0.1) {
@@ -329,8 +328,11 @@ export class Ride {
   }
 
   /** 当前载具。给 HUD 显示用。 */
-  get vehicleKind(): VehicleId {
-    return this.vehicleId;
+  get vehicleKind(): RideMode {
+    // **单一来源**：模式只存在 Vehicle 里。原来 Ride 自己还存了一份，
+    // 于是 ehicle.set() 改了模式而 Ride 读的还是旧的——
+    // verify_ride 量到的是徒步的手势却报「应为 ACCEL=8」，看着像加速度被改坏了。
+    return this.vehicle.id;
   }
 
   /**
@@ -341,10 +343,8 @@ export class Ride {
    *
    * 返回切到的那个，或 null（滑板模型没加载成功 → 不给切）。
    */
-  cycleVehicle(): VehicleId | null {
-    const next = this.vehicle.cycle();
-    if (next) this.vehicleId = next;
-    return next;
+  cycleVehicle(): RideMode | null {
+    return this.vehicle.cycle();
   }
 
   /** 当前机位。给 HUD / 帮助面板显示用。 */

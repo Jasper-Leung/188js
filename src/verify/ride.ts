@@ -29,6 +29,7 @@ import { PRESETS } from '../core/settings';
 import { RIDE, WORLD, ROADMESH } from '../data/raw';
 import { canRide } from '../game/phase';
 import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import { Object3D } from 'three';
 
 /** 一个不碰 WebGL 的相机替身。骑行只写它的 position / lookAt。 */
 function fakeCamera() {
@@ -49,6 +50,16 @@ function build() {
   const road = new Road(terrain);
   const stations = new Stations(preset, terrain);
   const ride = new Ride(terrain, road, stations, fakeCamera());
+  // **显式切到自行车**再量。
+  // 游戏的默认模式是 `foot`（用户要求：起始没有载具，只有角色），
+  // 而徒步的极速是 6 m/s、加速度 4 —— 不切的话这里量到的全是徒步的手感，
+  // 然后**每一秒都会红**，而红的原因写着"应为 ACCEL=8"，看着像加速度被改坏了。
+  // 实际上被量错了对象。
+  //
+  // 必须先挂一个**占位车模**：`Vehicle.canEnter('bike')` 要求模型存在
+  // （这是"不给切到空载具"那条规则的落点），而 Node 里没有 GLB 可加载。
+  ride.vehicle.attach({ bike: new Object3D(), skate: null, char: null, clips: {} });
+  ride.vehicle.set('bike');
   const start = pointAtArcLength(0).pos;
   ride.spawn(start.x, start.z, 0);
   return { terrain, road, stations, ride, start };

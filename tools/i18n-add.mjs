@@ -33,7 +33,6 @@ const ADD = {
 
     // ---- 视角（V 切换）----
     key_camera: 'V',
-    key_camera_desc: '切换视角（向前 / 追车 / 骑手）',
     cam_forward: '向前',
     cam_chase: '追车',
     cam_first: '骑手',
@@ -51,7 +50,7 @@ const ADD = {
 
     // ---- 载具（E 切换）----
     key_vehicle: 'E',
-    key_vehicle_desc: '切换载具',
+    veh_foot: '徒步',
     veh_bike: '自行车',
     veh_skate: '滑板',
     veh_switched: '载具 · %s',
@@ -96,7 +95,8 @@ const ADD = {
 
     // ---- Vehicle (E) ----
     key_vehicle: 'E',
-    key_vehicle_desc: 'Switch vehicle',
+    key_vehicle_desc: 'On foot / bicycle / skateboard',
+    veh_foot: 'On foot',
     veh_bike: 'Bicycle',
     veh_skate: 'Skateboard',
     veh_switched: 'Vehicle · %s',

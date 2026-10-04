@@ -50,7 +50,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  */
 const DYNAMIC_PREFIXES = {
   cam_: ['cam_forward', 'cam_chase', 'cam_first'],
-  veh_: ['veh_bike', 'veh_skate'],
+  veh_: ['veh_foot', 'veh_bike', 'veh_skate'],
 };
 
 const isDynamicallyUsed = (k) =>
