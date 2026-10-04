@@ -831,7 +831,7 @@ check('verify_chapter', () => {
   if (GameStateManager.HOME_STATION !== 0) probs.push('十八驿不是 0 号驿站');
   asserts++;
   if (ROAD.FRAGMENT_SLOT_STATION_IDX.includes(GameStateManager.HOME_STATION)) {
-    probs.push('十八驿被算成碎片驿站，家���会和打卡混成一条路');
+    probs.push('十八驿被算成碎片驿站，回家会和打卡混成一条路');
   }
   asserts++;
   // 出生点必须在十八驿旁——否则"回家"是个玩家到不了的地方

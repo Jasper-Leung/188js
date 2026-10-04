@@ -323,7 +323,7 @@ export class Vegetation {
     this.treeOfChunk = new Array<InstancedMesh | null>(CHUNK_COUNT).fill(null);
     this.bushOfChunk = new Array<InstancedMesh | null>(CHUNK_COUNT).fill(null);
     // 模型的最低点。GLB 里的 accessor min/max 不可信（见 tools/glb-inspect.mjs
-    // 的说明：它们被按 int16 写，读出来是垃圾），所以现��从顶点算。
+    // 的说明：它们被按 int16 写，读出来是垃圾），所以现在从顶点算。
     const treeBottom = bottomOf(treeGeo);
     const bushBottom = bottomOf(bushGeo);
     for (const c of this.chunks) {
