@@ -18,6 +18,7 @@ import { Stations } from './stations';
 import { Sky } from './sky';
 import { Ride, type RideInput } from './ride';
 import { loadModel, modelUrl } from './assets';
+import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
 import { WORLD, ECON, MINIGAMES } from '../data/raw';
 import { game } from '../game/state';
@@ -543,9 +544,35 @@ export class World {
     if (!model) return false;
     const holder: Object3D = model.root;
     holder.scale.setScalar(WORLD.BIKE_SCALE);
-    this.ride.bikePivot.add(holder);
+    // 自行车只是**载具的一种**，模型交给 Vehicle 管，
+    // 这样加第二种载具时不必再动 Ride 的模型分支。
+    this.ride.vehicle.attach({ bike: holder });
     this.emit({ type: 'loaded', what: 'bike' });
     return true;
+  }
+
+  /**
+   * 滑板 + 角色。**可选**：拉不到就只是不能换滑板，
+   * 游戏本身照常能骑车——所以逐个 `catch`，不连坐。
+   */
+  async loadVehicleExtras(): Promise<void> {
+    const [skate, survivor] = await Promise.all([
+      loadModel(modelUrl('res://assets/models/skateboard.glb')).catch(() => null),
+      loadModel(modelUrl('res://assets/models/survivor.glb')).catch(() => null),
+    ]);
+    if (!skate) {
+      this.assetFail('滑板', 'skateboard.glb');
+      return;
+    }
+    if (!survivor) {
+      this.assetFail('角色', 'survivor.glb');
+    }
+    this.ride.vehicle.attach({
+      skate: skate.root,
+      char: survivor?.root ?? null,
+      clips: survivor ? collectClips(survivor.animations) : {},
+    });
+    this.emit({ type: 'loaded', what: 'vehicle' });
   }
 
   /**
@@ -607,7 +634,7 @@ export class World {
    */
   async loadSceneryModels(): Promise<void> {
     const want: [SceneryKind, string][] = [
-      ['bamboo', 'res://assets/models/bamboo.glb'],
+      ['bamboo', 'res://assets/models/bamboo_trim.glb'],
       ['mod_tower', 'res://assets/models/mod_tower.glb'],
       ['mod_house', 'res://assets/models/mod_house.glb'],
     ];

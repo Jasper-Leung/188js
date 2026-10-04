@@ -78,6 +78,36 @@ body {
   pointer-events: auto;
 }
 
+/* ---------------------------------------------------------------- 小游戏层 */
+/* 五个小游戏是**盖在世界之上**的一整屏，不是 .g-root 里的一块面板。
+   它必须自己撑满视口：宿主按 `root.getBoundingClientRect()` 反推画布尺寸，
+   没有这条规则时 root 退化成一块按内容收缩的普通 div，画布就退成左上角
+   一个 300×150 的小盒，还被 z-index:10 的 .g-root 压在下面——
+   看起来就是"进了乐事但什么都点不到"。
+   z-index 40 落在 HUD(10) 之上、启动屏(100) 之下。 */
+.minigame-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 14, 19, 0.92);
+}
+
+/* `hidden` 的 UA 样式是 `display:none`，会被上面的 `display:grid` 盖掉。
+   不补这条，结算后 `root.hidden = true` 会让残影一直留在屏幕上。 */
+.minigame-layer[hidden] {
+  display: none;
+}
+
+.minigame-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 云影台和琴要连续拖拽，不禁掉触控滚动/缩放就抓不住指针 */
+  touch-action: none;
+}
+
 /* ---------------------------------------------------------------- 启动屏 */
 #boot {
   position: fixed;
@@ -158,4 +188,50 @@ body {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---------------------------------------------------------------- 道具栏
+ *
+ * 摆在 HUD 下面一排，贴着底部安全区。
+ * `pointer-events:none` 是硬要求：一条道具栏吃掉正在按的空格键，
+ * 玩家的车会突然停住——那一下"莫名其妙"比没有提示更糟（同 toast 的取舍）。
+ * 没买到的格子显示成暗的轮廓而不是消失，这样玩家知道"还有四格是空的"。
+ */
+.g-itembar {
+  position: absolute;
+  left: 50%;
+  bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  pointer-events: none;
+  z-index: 6;
+}
+.g-item {
+  width: 52px;
+  padding: 6px 0 5px;
+  text-align: center;
+  border-radius: 8px;
+  border: 1px solid rgba(43, 36, 27, 0.16);
+  background: rgba(232, 224, 205, 0.82);
+  opacity: 0.42;
+}
+.g-item.is-own { opacity: 1; }
+.g-item.is-sel {
+  border-color: rgba(180, 96, 48, 0.85);
+  box-shadow: 0 0 0 2px rgba(180, 96, 48, 0.22);
+}
+.g-item-num {
+  font: 11px/1 ui-monospace, monospace;
+  color: rgba(43, 36, 27, 0.45);
+}
+.g-item-ic {
+  font-size: 13px;
+  color: #2b241b;
+  margin-top: 3px;
+}
+.g-item-c {
+  font: 10px/1.2 ui-monospace, monospace;
+  color: rgba(43, 36, 27, 0.6);
+  min-height: 12px;
 }

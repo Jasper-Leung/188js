@@ -30,6 +30,32 @@ const ADD = {
     fatal_title: '启动失败',
     fatal_note:
       '这一屏是故意留下的——把上面那行字连同浏览器控制台一起反馈，就能定位到具体哪一步。',
+
+    // ---- 视角（V 切换）----
+    key_camera: 'V',
+    key_camera_desc: '切换视角（向前 / 追车 / 骑手）',
+    cam_forward: '向前',
+    cam_chase: '追车',
+    cam_first: '骑手',
+    cam_switched: '视角 · %s',
+
+    // ---- 道具栏（1~4）----
+    item_bar_title: '道具',
+    key_item_bar_desc: '数字键选道具',
+    item_none: '还没买到任何道具',
+    item_paper: '信纸',
+    item_ink: '墨',
+    item_seal: '印',
+    item_env: '封口',
+    item_selected: '已选 · %s',
+
+    // ---- 载具（E 切换）----
+    key_vehicle: 'E',
+    key_vehicle_desc: '切换载具',
+    veh_bike: '自行车',
+    veh_skate: '滑板',
+    veh_switched: '载具 · %s',
+    veh_locked: '还没有滑板',
   },
   en: {
     chapter_label_1: 'Chapter One',
@@ -49,6 +75,32 @@ const ADD = {
     fatal_title: 'Failed to start',
     fatal_note:
       'This screen is here on purpose — send the line above along with your browser console and we can pin down which step failed.',
+
+    // ---- Camera (V) ----
+    key_camera: 'V',
+    key_camera_desc: 'Cycle camera (forward / chase / rider)',
+    cam_forward: 'Forward',
+    cam_chase: 'Chase',
+    cam_first: 'Rider',
+    cam_switched: 'Camera · %s',
+
+    // ---- Item bar (1~4) ----
+    item_bar_title: 'Items',
+    key_item_bar_desc: 'Number keys pick an item',
+    item_none: 'No items yet',
+    item_paper: 'Paper',
+    item_ink: 'Ink',
+    item_seal: 'Seal',
+    item_env: 'Envelope',
+    item_selected: 'Selected · %s',
+
+    // ---- Vehicle (E) ----
+    key_vehicle: 'E',
+    key_vehicle_desc: 'Switch vehicle',
+    veh_bike: 'Bicycle',
+    veh_skate: 'Skateboard',
+    veh_switched: 'Vehicle · %s',
+    veh_locked: 'No skateboard yet',
   },
 };
 

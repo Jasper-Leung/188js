@@ -21,17 +21,60 @@ import { Group, Vector3, MathUtils, type PerspectiveCamera } from 'three';
 import { RIDE, WORLD } from '../data/raw';
 import { Terrain } from './terrain';
 import { Road } from './road';
+import { Vehicle, VEHICLE_TUNE, type VehicleId } from './vehicle';
 import { Stations, type StationRuntime } from './stations';
 import { clamp, damp } from '../core/math';
 
 const {
-  MAX_SPEED, ACCEL, DECEL, REVERSE_SPEED, TURN_SPEED,
+  REVERSE_SPEED,
   CAM_BACK, CAM_UP, CAM_SIDE, CAM_LOOK_AHEAD, CAM_LOOK_UP,
 } = RIDE;
 
 const BIKE_RADIUS = 0.9; // 车轮半径，用于撞墙时算接触点
 /** 相机跟随的指数衰减率。由原版每帧 lerp 0.12 折算：-ln(1-0.12)×60 ≈ 7.7 */
 const CAM_DAMP = -Math.log(1 - 0.12) * 60;
+
+/**
+ * 机位。
+ *
+ * ## 为什么默认是「向前」
+ *
+ * 原来的机位在**正后方加一个横向偏移**（`CAM_SIDE`）。那个偏移是有理由的：
+ * 车在正后方投影成一根竖条，认不出是自行车，让开之后车才读成"车"。
+ *
+ * 但代价是**画面是斜的**——地平线歪、路面朝一个方向斜出去，
+ * 习惯了第三人称的人觉得"车在画面里斜着跑"。
+ * 所以把它降级成**可选机位**，默认换成居中向前的那个。
+ *
+ * ## 三种机位各自回答什么问题
+ *
+ * - `forward`（默认）居中、正前方。路面笔直伸向远处，车在画面正中。
+ *   **看不出斜**，代价是车只剩后轮和车尾那一点。
+ * - `chase` 原机位。**车最好看**，代价是画面斜。
+ * - `first` 骑手视角，几乎第一人称。看路最清楚，代价是看不到自己的车。
+ *
+ * ## 切换**绝不影响移动**
+ *
+ * 机位只写 `camera.position` 与 `lookAt`，**不碰 `_fwd` / `_right` / 速度 / 转向**。
+ * 这一点必须成立：切换瞬间如果动到了任何一个输入相关的量，
+ * 玩家会觉得"我按了 V 车突然往旁边走了"。
+ */
+export type CamMode = 'forward' | 'chase' | 'first';
+export const CAM_MODES: readonly CamMode[] = ['forward', 'chase', 'first'];
+
+const CAM = {
+  /** 居中机位：正后方一点点，抬高到骑手视线高度 */
+  forward: { back: 3.2, up: 2.05, side: 0 },
+  /** 原机位：横向让开让车读成车 */
+  chase: { back: CAM_BACK, up: CAM_UP, side: CAM_SIDE },
+  /** 骑手视角：几乎贴着头 */
+  first: { back: 0.15, up: 1.62, side: 0 },
+} as const;
+
+/** 读某个机位的参数。回归要验「forward 的横向偏移是 0」，所以得能问。 */
+export function camParams(mode: CamMode) {
+  return CAM[mode];
+}
 
 export interface RideInput {
   /** -1..1，负为前进 */
@@ -45,6 +88,9 @@ export class Ride {
   readonly camera: PerspectiveCamera;
   /** 车模型容器（GLB 装进来） */
   readonly bikePivot = new Group();
+  /** 载具模型 + 角色。运动参数在这里，模型与动画也在里面。 */
+  readonly vehicle = new Vehicle();
+  private vehicleId: VehicleId = 'bike';
 
   private speed = 0;
   private heading = 0;
@@ -60,6 +106,7 @@ export class Ride {
   private camPos = new Vector3();
   private camLook = new Vector3();
   private camInit = false;
+  private camMode: CamMode = 'forward';
 
   private terrain: Terrain;
   private road: Road;
@@ -79,6 +126,7 @@ export class Ride {
     this.camera = camera;
     this.camera.name = 'camera';
     this.root.add(this.bikePivot);
+    this.bikePivot.add(this.vehicle.group);
   }
 
   /** 起点：第 0 座驿站旁的路面 */
@@ -129,13 +177,16 @@ export class Ride {
     if (!this.canMove) {
       this.speed = 0;
     } else {
+      // 运动参数随载具变（自行车 / 滑板）。**读取发生在运动开始之前**，
+      // 所以切载具的那一帧用的还是旧参数 —— 速度与转向都连续，不会窜出去。
+      const tune = VEHICLE_TUNE[this.vehicleId];
       if (vert < -0.1) {
-        this.speed = Math.min(this.speed + ACCEL * dt, MAX_SPEED);
+        this.speed = Math.min(this.speed + tune.accel * dt, tune.maxSpeed);
       } else if (vert > 0.1) {
-        this.speed = Math.max(this.speed - DECEL * dt, -REVERSE_SPEED);
+        this.speed = Math.max(this.speed - tune.decel * dt, -REVERSE_SPEED);
       } else {
-        if (this.speed > 0) this.speed = Math.max(this.speed - DECEL * 0.3 * dt, 0);
-        else this.speed = Math.min(this.speed + DECEL * 0.3 * dt, 0);
+        if (this.speed > 0) this.speed = Math.max(this.speed - tune.decel * 0.3 * dt, 0);
+        else this.speed = Math.min(this.speed + tune.decel * 0.3 * dt, 0);
       }
 
       // 转向随速度渐入：静止时打方向不生效，避免原地转圈
@@ -143,7 +194,7 @@ export class Ride {
       if (Math.abs(this.speed) > 0.5) {
         turnFactor = clamp(Math.abs(this.speed) / 3, 0, 1);
       }
-      this.heading += -horiz * TURN_SPEED * dt * turnFactor * Math.sign(this.speed);
+      this.heading += -horiz * tune.turn * dt * turnFactor * Math.sign(this.speed);
     }
 
     // 车头方向。-Z 为前，与 three 的相机默认朝向一致。
@@ -220,6 +271,9 @@ export class Ride {
   /** 每帧：姿态、轮子、相机 */
   render(dt: number) {
     const p = this.position;
+    // 载具动画与轮子。**在这里而不是 render() 里**：固步长下才是稳定的转速。
+    this.vehicle.update(dt, this.speed, this.heading);
+
     this.bikePivot.position.copy(p);
     this.bikePivot.rotation.y = this.heading;
     // 车身随地形俯仰。只按前后取样，转弯时侧倾交给相机的 damp，
@@ -232,13 +286,17 @@ export class Ride {
 
     if (this.cameraLocked) return;
 
+    // 机位参数。**这里只读不写**：切换机位绝不能动到任何输入相关的量
+    // （见 CamMode 的注释）。
+    const m = CAM[this.camMode];
+
     // 跟随机位。用指数 damp 而不是 lerp(0.12)：
     // 后者在低帧率下等效速度会变（30fps 时每帧 0.12，60fps 时每帧 0.12，
     // 前者实际跟随更慢），手感在低配机上会明显不同。
     const target = this._tmp.set(
-      p.x - this._fwd.x * CAM_BACK + this._right.x * CAM_SIDE,
-      p.y + CAM_UP,
-      p.z - this._fwd.z * CAM_BACK + this._right.z * CAM_SIDE,
+      p.x - this._fwd.x * m.back + this._right.x * m.side,
+      p.y + m.up,
+      p.z - this._fwd.z * m.back + this._right.z * m.side,
     );
     if (!this.camInit) {
       this.camPos.copy(target);
@@ -268,6 +326,53 @@ export class Ride {
   /** 相机瞬间就位（打卡过场、传送） */
   snapCamera() {
     this.camInit = false;
+  }
+
+  /** 当前载具。给 HUD 显示用。 */
+  get vehicleKind(): VehicleId {
+    return this.vehicleId;
+  }
+
+  /**
+   * 切换载具。
+   *
+   * **只改模型与动画，不动速度与转向** —— 和 cycleCamera() 同一条原则。
+   * 速度保留：从自行车换到滑板不该急停，那读作「按 E 车被绊了一下」。
+   *
+   * 返回切到的那个，或 null（滑板模型没加载成功 → 不给切）。
+   */
+  cycleVehicle(): VehicleId | null {
+    const next = this.vehicle.cycle();
+    if (next) this.vehicleId = next;
+    return next;
+  }
+
+  /** 当前机位。给 HUD / 帮助面板显示用。 */
+  get cameraMode(): CamMode {
+    return this.camMode;
+  }
+
+  /**
+   * 切换机位。**只改一个枚举值 + 重新对齐相机**，不碰任何运动状态。
+   *
+   * 为什么要 `snapCamera()`：切机位时 `camPos` 还停在旧机位的位子上，
+   * 玩家会看到相机"飘"过去。重新对齐让它**当场跳到新机位**，
+   * 而 `damp` 的跟随手感在切换之后立刻恢复。
+   *
+   * 返回新的机位（调用方拿它去刷 HUD）。
+   */
+  cycleCamera(): CamMode {
+    const i = CAM_MODES.indexOf(this.camMode);
+    this.camMode = CAM_MODES[(i + 1) % CAM_MODES.length];
+    this.snapCamera();
+    return this.camMode;
+  }
+
+  /** 直接指定机位（设置面板用）。 */
+  setCameraMode(mode: CamMode): void {
+    if (mode === this.camMode) return;
+    this.camMode = mode;
+    this.snapCamera();
   }
 
   /** 过场用的相机接管：把相机放到一个自由位置 */

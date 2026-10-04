@@ -107,12 +107,23 @@ const SPEC: Record<SceneryKind, {
   radius: number;
 }> = {
   // 竹：离路 26~110m。是"从路上看得见的山坡竹林"，不是地图角落里的植物。
-  bamboo: { quad: [-1, -1], max: 34, step: 13, scale: [9, 15], road: [26, 110], pick: 'hash', radius: 150 },
+  //
+  // **数量为什么从 34 变成 100**：`bamboo.glb` 的底部 35% 被裁掉了
+  // （`tools/trim-glb.mjs`）——整株插进地里，地下那一截永远看不见，
+  // 却是实打实每帧在算的面。18,444 → 4,265 面（剩 23%），
+  // 省下的预算直接换成密度：**密度是玩家看得见的，地下那一截不是。**
+  //
+  // 缩放也跟着调：裁完之后模型高 0.978 → 0.635，
+  // 所以 [9,15] 改 [13,22]，成品高度仍是 8~14m。
+  bamboo: { quad: [-1, -1], max: 100, step: 9, scale: [13, 22], road: [26, 110], pick: 'hash', radius: 150 },
   // 塔楼：离路 70~230m，抱团 = 一个新区。
   mod_tower: { quad: [1, 1], max: 3, step: 26, scale: [34, 44], road: [70, 230], pick: 'near', radius: 280 },
   // 圆屋：离路 60~200m，围着塔楼散开。
   mod_house: { quad: [1, 1], max: 4, step: 24, scale: [11, 16], road: [60, 200], pick: 'hash', radius: 240 },
 };
+
+/** 埋进地里的深度（米）。竹子尤其需要——裁完的底面是一个平面，不埋会露出来。 */
+const BURY: Record<SceneryKind, number> = { bamboo: 0.6, mod_tower: 0, mod_house: 0 };
 
 /** 沿中心线的最短距离（米）。命中弧长之后在附近窗口里精算。 */
 export function distToRoad(px: number, pz: number): number {
@@ -280,7 +291,7 @@ export class Scenery {
         const p = cell.items[i];
         q.setFromAxisAngle(up, p.rotY);
         scl.setScalar(p.scale);
-        pos.set(p.x, p.y - bottom * p.scale, p.z);
+        pos.set(p.x, p.y - bottom * p.scale - BURY[cell.kind], p.z);
         mat4.compose(pos, q, scl);
         m.setMatrixAt(i, mat4);
       }

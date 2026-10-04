@@ -22,8 +22,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { extractEmbeddedImages, replaceEmbeddedImages, imageSize } from './glb-image.mjs';
-import { SRC_EXTRA, EXTRA_MODELS, isMassModel, splitTargetName } from './extra-models.mjs';
+import { SRC_EXTRA, EXTRA_MODELS, isMassModel, splitTargetName, trimTargetName } from './extra-models.mjs';
 import { splitGlb } from './split-glb.mjs';
+import { trimGlb } from './trim-glb.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -44,16 +45,16 @@ const MASS_MODELS = { has: isMassModel };
 const jobs = existsSync(SRC_MODELS)
   ? readdirSync(SRC_MODELS)
       .filter((f) => f.toLowerCase().endsWith('.glb'))
-      .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODEL_NAMES.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }))
+      .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }))
   : [];
 if (existsSync(SRC_BIKE)) {
   jobs.push({ src: SRC_BIKE, name: 'bike.glb', dst: 'bike.glb', maxTex: MAX_TEX_HERO });
 }
 // 外部补充资产（松树 / 竹 / 两栋现代建筑）。清单见 tools/extra-models.mjs 的文件头：
 // 松树是这一轮补上的关键——源项目那株行道树简化压不动，见那份文件的说明。
-for (const [srcName, dstName, maxTex, split] of EXTRA_MODELS) {
-  const p = join(SRC_EXTRA, srcName);
-  if (existsSync(p)) jobs.push({ src: p, name: dstName, dst: dstName, maxTex, split });
+for (const [srcName, dstName, maxTex, split, trim, srcDir] of EXTRA_MODELS) {
+  const p = join(srcDir ?? SRC_EXTRA, srcName);
+  if (existsSync(p)) jobs.push({ src: p, name: dstName, dst: dstName, maxTex, split, trim });
   else console.warn(`  ! 补充资产缺失，跳过：${p}`);
 }
 
@@ -104,8 +105,18 @@ for (const job of jobs) {
   inBytes += raw.length;
   outBytes += glb.length;
 
-  // 拆簇。**必须在贴图压完之后**：拆开会重写 primitive 与索引，
-  // 先拆再压的话新生成的 bufferView 拿不到压缩过的图。
+  // 裁底部。**同样必须在贴图压完之后**：裁剪会重写 primitive 与索引。
+  // 先裁再压的话，新生成的 bufferView 拿不到压缩过的图。
+  if (job.trim) {
+    const dst = join(CACHE, trimTargetName(job.dst ?? job.name));
+    const r = await trimGlb(join(CACHE, job.dst ?? job.name), dst, job.trim);
+    const pct = r.trisIn ? Math.round((r.trisOut / r.trisIn) * 100) : 0;
+    console.log(
+      `  ${job.dst} 裁掉底部 ${(job.trim * 100).toFixed(0)}%：${r.trisIn} → ${r.trisOut} 面（剩 ${pct}%）→ ${trimTargetName(job.dst ?? job.name)}`,
+    );
+  }
+
+  // 拆簇。**必须在贴图压完之后**：拆开会重写 primitive 与索引。
   if (job.split) {
     const dst = join(CACHE, splitTargetName(job.dst ?? job.name));
     const r = await splitGlb(join(CACHE, job.dst ?? job.name), dst);

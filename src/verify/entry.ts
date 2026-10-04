@@ -17,13 +17,16 @@ import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency 
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
 import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
-import { Box3, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute } from 'three';
+import { Box3, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Object3D } from 'three';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
 import { Road } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
 import { canRide, isInWorld } from '../game/phase';
+import { RIDE } from '../data/raw';
+import { CAM_MODES, camParams } from '../world/ride';
+import { Vehicle, VEHICLE_TUNE } from '../world/vehicle';
 import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
 import { PRESETS, clampTier } from '../core/settings';
@@ -1212,6 +1215,83 @@ check('verify_scenery', () => {
 
   const sum = kinds.map((k) => `${k}×${all[k].length}`).join(' ');
   return expect(probs.length === 0, probs.length ? probs.join('；') : sum, asserts);
+});
+
+// ---------------------------------------------------------------- 视角 / 载具
+/**
+ * 视角与载具：**切换绝不能影响移动**。
+ *
+ * 这是用户明确提的一条硬要求：「切换视角不影响移动操作」。
+ * 它之所以要钉住，是因为这两件事**在代码上很容易互相污染**：
+ * 视角和载具都读 `heading` / `_fwd`，顺手改一个，
+ * 玩家的反应是「我按了 V 车突然往旁边走了」——而画面上完全看不出原因。
+ *
+ * 另外钉住自行车那三个数不许被改：那是源项目 `RIDE` 的手感，
+ * 改它等于改原作。滑板可以有自己的一套，自行车不能。
+ */
+check('verify_controls', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 1. 默认机位必须是**向前**那个（用户要求：斜的视角有人不习惯）
+  asserts++;
+  if (CAM_MODES[0] !== 'forward') probs.push(`默认机位是 ${CAM_MODES[0]}，应为 forward`);
+
+  // 2. 三种机位都在，且没有重复
+  asserts++;
+  if (CAM_MODES.length !== 3) probs.push(`机位有 ${CAM_MODES.length} 种，应为 3`);
+  asserts++;
+  if (new Set(CAM_MODES).size !== CAM_MODES.length) probs.push('机位列表里有重复');
+
+  // 3. 「向前」那个机位的**横向偏移必须是 0** —— 那正是"斜"的来源。
+  //    写成 0.01 看着没区别，但玩家看得出地平线歪。
+  asserts++;
+  const cf = camParams('forward');
+  if (Math.abs(cf.side) > 1e-9) probs.push(`forward 机位的横向偏移是 ${cf.side}，应为 0（那正是"斜"）`);
+
+  // 4. 自行车那三个数必须**一字不改**地等于源项目的 RIDE
+  asserts++;
+  const bt = VEHICLE_TUNE.bike;
+  if (bt.maxSpeed !== RIDE.MAX_SPEED) probs.push(`自行车极速 ${bt.maxSpeed} ≠ 源项目 ${RIDE.MAX_SPEED}`);
+  asserts++;
+  if (bt.accel !== RIDE.ACCEL) probs.push(`自行车加速度 ${bt.accel} ≠ 源项目 ${RIDE.ACCEL}`);
+  asserts++;
+  if (bt.turn !== RIDE.TURN_SPEED) probs.push(`自行车转向率 ${bt.turn} ≠ 源项目 ${RIDE.TURN_SPEED}`);
+
+  // 5. 滑板必须**真的不一样**，否则"切换载具"只是换了个模型
+  asserts++;
+  const st = VEHICLE_TUNE.skate;
+  if (st.maxSpeed === bt.maxSpeed && st.accel === bt.accel && st.turn === bt.turn) {
+    probs.push('滑板与自行车的运动参数完全相同，切换就只剩换模型');
+  }
+
+  // 6. 没有滑板模型时不给切——而不是切过去发现是空的
+  asserts++;
+  const v = new Vehicle();
+  v.attach({ bike: null, skate: null, char: null, clips: {} });
+  if (v.canSwitch('skate')) probs.push('没有滑板模型却报告"可以切"');
+  asserts++;
+  if (v.set('skate')) probs.push('没有滑板模型却切成功了');
+  asserts++;
+  if (v.id !== 'bike') probs.push('切换失败之后载具却被改成了 skate');
+
+  // 7. 有了滑板之后能切，而且切得回去
+  asserts++;
+  v.attach({ bike: null, skate: new Object3D(), char: null, clips: {} });
+  if (!v.canSwitch('skate')) probs.push('有滑板模型却报告"不能切"');
+  asserts++;
+  if (!v.set('skate')) probs.push('有滑板模型却切不过去');
+  asserts++;
+  if (v.id !== 'skate') probs.push(`切过去之后 id 是 ${v.id}`);
+  asserts++;
+  if (!v.set('bike')) probs.push('切回自行车失败');
+  asserts++;
+  if (v.id !== 'bike') probs.push('切回自行车之后 id 不对');
+
+  const summary =
+    `机位 ${CAM_MODES.join('/')}（默认 ${CAM_MODES[0]}）· ` +
+    `自行车 ${bt.maxSpeed}m/s 保持源项目 · 滑板 ${st.maxSpeed}m/s`;
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
 check('verify_chapter', () => {

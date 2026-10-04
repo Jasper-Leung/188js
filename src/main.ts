@@ -180,10 +180,10 @@ async function main() {
       return world.loadVegetationModels();
     })
     .then(() => {
-      // 区域散布（竹 / 现代建筑）排在植被之后、地标之前：它们是**可选**的，
-      // 拉不到只是少一片竹、少一个开发区，不该拖住整条链。
+      // 载具配件（滑板 + 角色）与区域散布都是**可选**的：
+      // 拉不到只是不能换滑板 / 少一片竹，不该拖住整条链。
       boot(0.9);
-      return world.loadSceneryModels();
+      return Promise.all([world.loadSceneryModels(), world.loadVehicleExtras()]);
     })
     .then(() => {
       boot(1);
@@ -535,8 +535,10 @@ class App {
         // 需要"只认新的一下"的地方由小游戏自己记按着状态。
         return;
       }
-      // 先问小游戏要不要。它吃掉了就别让这次按键冒到打卡上。
-      if (this.mg.isRunning && this.mg.consumesKey(e.code)) return;
+      // 小游戏自己有一支 `window` keydown 监听器在派发（云/茶要长按，不能滤 repeat）。
+      // 这里再问一次 `consumesKey` 会把同一次按键**派发两遍**——琴会一次吃两声、
+      // 云的光标一次挪两格。宿主在跑就整段让位。
+      if (this.mg.isRunning) return;
       if (this.phase === 'minigame') return;
 
       this.keys.add(e.code);
@@ -584,6 +586,33 @@ class App {
         case 'KeyB':
           if (this.debug?.isShown) this.debug.setMode('buildings');
           break;
+        case 'KeyV':
+          // 切视角。`world.ride.cycleCamera()` **只改机位**，
+          // 不碰任何运动状态 —— 见 ride.ts 的 CamMode 注释。
+          this.ui.showToast(t('cam_switched', { mode: t(`cam_${this.world.ride.cycleCamera()}`) }), 1200);
+          break;
+        case 'KeyE':
+          // 切载具。滑板模型没加载成功时不切，并说清为什么——
+          // 按了键没反应而不解释，玩家会以为 E 坏了。
+          {
+            const v = this.world.ride.cycleVehicle();
+            this.ui.showToast(
+              v ? t('veh_switched', { mode: t(`veh_${v}`) }) : t('veh_locked'),
+              1200,
+            );
+          }
+          break;
+        case 'Digit1':
+        case 'Digit2':
+        case 'Digit3':
+        case 'Digit4': {
+          // 道具栏。选中失败 = 那一格还没买到
+          const n = e.code.slice(-1);
+          const ok = this.ui.selectItemSlot(n);
+          this.ui.items.sync();
+          if (!ok) this.ui.showToast(t('item_none'), 1200);
+          break;
+        }
         default:
           break;
       }
@@ -874,6 +903,11 @@ class App {
     }
     this.ui.touch.checkInPressed = false;
     this.world.fixedUpdate(dt, { throttle: clamp(throttle, -1, 1), steer: clamp(steer, -1, 1) }, canRide);
+    // 小游戏的状态机也按固定步长走。漏掉这一句，`step()` 永远不被调用：
+    // 茶的注水不走、竹的引子不放、琴的示范不响、禽的倒计时不动，
+    // 而且 `resultT` 不倒完所以 `run()` 的 Promise 永远不 resolve，
+    // 五件乐事全部卡死。
+    this.mg.fixedUpdate(dt);
     this.world.postFixedUpdate();
   }
 

@@ -99,7 +99,7 @@ export class Onboarding {
     this.setTouch(o.touch);
   }
 
-  /** 桌面：WASD / 空格 / ESC / M，与 main 的 keydown 分支一一对应。 */
+  /** 桌面：WASD / 空格 / ESC / M / V / E / 1~4，与 main 的 keydown 分支一一对应。 */
   private buildDesk(): HTMLDivElement {
     const box = el('div', 'g-keys');
     const items: [string, string][] = [
@@ -110,6 +110,9 @@ export class Onboarding {
       ['key_check_in', 'Space / Enter'],
       ['key_pause', 'Esc'],
       ['key_mute', 'M'],
+      ['key_camera', 'V'],
+      ['key_vehicle', 'E'],
+      ['key_item_bar', '1 ~ 4'],
     ];
     for (const [k, glyph] of items) {
       const r = el('div', 'g-key');

@@ -29,11 +29,13 @@
 
 /** 补充资产的源目录（和 SRC_MODELS 一样是机器相关的硬编码，见各脚本） */
 export const SRC_EXTRA = 'D:/code/20260920';
+/** 角色与滑板在另一个目录（`modelbone`），文件名也不同 */
+export const SRC_BONE = 'D:/code/20261001/modelbone';
 
 /**
- * `[源文件名, 输出短名, 贴图边长, 需要拆簇?]`
+ * `[源文件名, 输出短名, 贴图边长, 需要拆簇?, 裁底部比例, 源目录?]`
  * 贴图边长：768 = 量产道具（单株在屏幕上不超过百来像素），
- * 1024 = 地标（玩家会绕着它骑）。
+ * 1024 = 地标 / 玩家全程盯着的东西（载具、角色）。
  *
  * 第四项 `split`：这个模型**一棵网格里排了多棵树**
  * （`pine+trees+3d+model.glb` 是 6 棵，X 方向顶点直方图有六个峰）。
@@ -43,15 +45,31 @@ export const SRC_EXTRA = 'D:/code/20260920';
  * 拆法见 `tools/split-glb.mjs`。
  */
 export const EXTRA_MODELS = [
-  ['pine+trees+3d+model.glb', 'pine.glb', 768, true],
-  ['bamboo+stalks+3d+model.glb', 'bamboo.glb', 768, false],
-  ['modern+building+3d+model.glb', 'mod_tower.glb', 1024, false],
-  ['modern+circular+house+3d+model.glb', 'mod_house.glb', 1024, false],
+  ['pine+trees+3d+model.glb', 'pine.glb', 768, true, 0],
+  // 竹子要**裁掉底部 35%**：整株插进地里当竹丛，地下那一截永远看不见，
+  // 而它是实打实每帧都在算的面。裁掉之后 18,444 → 4,265 面（剩 23%），
+  // 省下的预算直接换成数量——密度是玩家看得见的，地下那一截不是。
+  ['bamboo+stalks+3d+model.glb', 'bamboo.glb', 768, false, 0.35],
+  ['modern+building+3d+model.glb', 'mod_tower.glb', 1024, false, 0],
+  ['modern+circular+house+3d+model.glb', 'mod_house.glb', 1024, false, 0],
+  // 滑板：42,600 面 / 归一化 0.973×0.121×0.711。
+  // `skate_glide/README.md` 写明板身的 31.7° 偏航**已经烘进 GLB**，
+  // 所以运行时**不要**再补一次 modelYawFix——补了就会歪 31.7°。
+  // 轮子节点名是 wheel_FL / wheel_FR / wheel_RL / wheel_RR，绕**本地 Z**自转。
+  ['skate_glide/skateboard+3d+model.glb', 'skateboard.glb', 1024, false, 0, SRC_BONE],
+  // 角色：51,423 面 / 归一化高 1.0 / **86 骨** / 3 个动画
+  // （`run` / `walk` / `骑自行车`）。贴图 1024 是因为它是玩家全程盯着的东西。
+  ['survivor_rigged_v2.glb', 'survivor.glb', 1024, false, 0, SRC_BONE],
 ];
 
 /** 需要拆簇的模型 → 拆分后输出的短名。 */
 export function splitTargetName(dst) {
   return dst.replace(/\.glb$/, '_split.glb');
+}
+
+/** 需要裁底部的模型 → 裁完输出的短名。 */
+export function trimTargetName(dst) {
+  return dst.replace(/\.glb$/, '_trim.glb');
 }
 
 /**

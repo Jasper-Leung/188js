@@ -38,6 +38,26 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * 动态前缀：`t(\`cam_${mode}\`)` 这种写法里，key 在运行时才拼出来，
+ * **字面量扫描看不见它们**，于是每个都���判成"死字"。
+ *
+ * 这是保守口径的必然代价（它只会少报不会多报），但"少报"在这里变成了
+ * **误报并让 verify 变红**，所以必须显式登记。
+ *
+ * 登记的规矩：**前缀必须能唯一确定一小组 key，且那组 key 全都在表里。**
+ * 真出现 `cam_foo` 这种表里没有的拼法时，它照旧是死字。
+ */
+const DYNAMIC_PREFIXES = {
+  cam_: ['cam_forward', 'cam_chase', 'cam_first'],
+  veh_: ['veh_bike', 'veh_skate'],
+};
+
+const isDynamicallyUsed = (k) =>
+  Object.entries(DYNAMIC_PREFIXES).some(
+    ([p, known]) => k.startsWith(p) && known.includes(k),
+  );
+
 /** 递归收集 src 下的 .ts（跳过 verify 自己，免得它引用 key 把死字变成活字）。 */
 function collect(dir, out = []) {
   for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -54,7 +74,7 @@ export function scanDead() {
   const files = collect(join(ROOT, 'src')).filter((f) => !f.includes(`${'verify'}\\`) && !f.includes('/verify/'));
   const blob = files.map((f) => readFileSync(f, 'utf8')).join('\n');
 
-  const used = (k) => blob.includes(`'${k}'`) || blob.includes(`"${k}"`) || blob.includes('`' + k + '`');
+  const used = (k) => isDynamicallyUsed(k) || blob.includes(`'${k}'`) || blob.includes(`"${k}"`) || blob.includes('`' + k + '`');
   const dead = Object.keys(zh).filter((k) => !used(k));
 
   const allowPath = join(ROOT, 'tools/i18n-dead-allow.json');

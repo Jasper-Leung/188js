@@ -42,6 +42,8 @@ export interface LoadedModel {
   /** 模型自身的包围盒（未缩放），用来算落地高度与 keepout */
   box: Box3;
   meshes: Mesh[];
+  /** GLB 里的动画剪辑（骨骼模型才有）。之前没保留，导致角色模型加载完只能站着。 */
+  animations: import('three').AnimationClip[];
 }
 
 const loader = new GLTFLoader();
@@ -90,7 +92,7 @@ async function loadInternal(url: string): Promise<LoadedModel | null> {
         // 在这里算会把包围盒算进一个之后又被 groupScale 二次放大的世界。
         gltf.scene.updateMatrixWorld(true);
         const box = new Box3().setFromObject(root);
-        resolve({ root, box, meshes });
+        resolve({ root, box, meshes, animations: gltf.animations ?? [] });
       },
       undefined,
       () => resolve(null),

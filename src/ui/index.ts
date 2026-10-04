@@ -52,6 +52,7 @@ import { SynthesisPanel } from './synthesisPanel';
 import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
 import { Toast } from './toast';
+import { ItemBar } from './itemBar';
 import { MoodMask } from './moodMask';
 import { PerfPanel } from './perfPanel';
 
@@ -218,6 +219,7 @@ export class UI {
   private endCard: EndCard;
   private touchCtl: TouchControls;
   private toast: Toast;
+  private itemBar!: ItemBar;
   private mood: MoodMask;
   private perf: PerfPanel;
 
@@ -247,6 +249,7 @@ export class UI {
     // 同一个 root 内部的绘制顺序靠这个 append 顺序决定，所以它是语义的一部分。
     this.mood = new MoodMask(this.root, this.game);
     this.toast = new Toast(this.root);
+    this.itemBar = new ItemBar(this.root);
     this.dialogue = new Dialogue(this.root);
     this.hud = new Hud(this.root, {
       world: this.world,
@@ -314,11 +317,24 @@ export class UI {
     if (this.worldVisible === v) return;
     this.worldVisible = v;
     setShown(this.hud.root, v);
+    // 道具栏跟着 HUD 一起进出世界：它和 HUD 一样是"在世界里的信息"，
+    // 标题页上摆一排空格子只会让人以为少了什么。
+    this.itemBar.setVisible(v);
     // 触屏控件跟着 HUD 一起进出世界。
     // 标题页/引导页上摆一个活的摇杆是有害的：那里点它什么也不会发生，
     // 而摇杆长得又很像"可以拖"，于是玩家会在标题页上推两下、发现没反应、
     // 得出"这游戏在手机上玩不了"的结论。**控件不出现，就不会被误试。**
     this.applyTouchVisibility();
+  }
+
+  /** 数字键 1~4 选道具。返回 false 表示那一格还没买到。 */
+  selectItemSlot(num: string): boolean {
+    return this.itemBar.select(num);
+  }
+
+  /** 道具栏，用来在打卡/购买之后刷新已拥有状态 */
+  get items(): ItemBar {
+    return this.itemBar;
   }
 
   showTitle(): void {
