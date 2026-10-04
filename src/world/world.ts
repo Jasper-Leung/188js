@@ -548,25 +548,54 @@ export class World {
     return true;
   }
 
+  /**
+   * 资产加载失败的原因。**空数组 = 什么都没失败。**
+   *
+   * 为什么要有它：`loadModel()` 失败时是 `resolve(null)`，**不抛异常**，
+   * 于是 `if (tree && bush)` 会一声不吭地跳过 —— 世界照常建起来、
+   * 游戏照常能玩，只是路边没有树。
+   *
+   * 这个 bug 已经咬过一次：`pine_split.glb` 拉不到时，
+   * 树和灌木**一起**消失（`Promise.all` 里任一失败，另一个的结果也白拿），
+   * 而界面上没有任何线索。探针会打印这份记录。
+   */
+  readonly assetErrors: string[] = [];
+
+  private assetFail(what: string, url: string): void {
+    const msg = `${what} 拉不到：${url}`;
+    this.assetErrors.push(msg);
+    console.warn('[gift188]', msg);
+  }
+
   async loadVegetationModels(): Promise<void> {
-    // `pine.glb` 不是源项目那株树：那株是 **32,929 面/棵**，而松树是
-    // **6 棵合一个网格、31,219 面，折合 5,203 面/棵**。便宜 6.3 倍，
-    // 所以路边能摆 434 株而不是 49 株。详见 src/world/vegetation.ts。
+    // `pine_split.glb` 不是源项目那株树：那株是 **32,929 面/棵**且简化压不动；
+    // 而松树是 6 棵一共 31,219 面（5,203 面/棵），便宜 6.3 倍。
+    //
+    // **`_split` 是关键**：源文件是 6 棵排成一行的一棵网格，
+    // 整丛共用一个 Y 会导致「有的悬空有的半埋」。
+    // `tools/split-glb.mjs` 把它拆成 6 个独立 mesh（各自压实过顶点），
+    // 运行时逐株取地形高度。详见 src/world/vegetation.ts。
+    //
     // 注意 `tree.glb` 仍然要留着——它是「榕树下」这个地标本身（配置表第 5 项）。
     const [tree, bush] = await Promise.all([
-      loadModel(modelUrl('res://assets/models/pine.glb')),
+      loadModel(modelUrl('res://assets/models/pine_split.glb')),
       loadModel(modelUrl('res://assets/models/bush.glb')),
     ]);
-    if (tree && bush) {
-      // 原项目里 tree 用 scale 8、灌木用更小的缩放；这里沿用同一组比例
-      this.veg.attachMeshes(
-        firstGeometry(tree),
-        firstMaterial(tree),
-        firstGeometry(bush),
-        firstMaterial(bush),
-      );
-      this.emit({ type: 'loaded', what: 'vegetation' });
+    // **逐个判空**：原先写成 `if (tree && bush)`，一个失败就把另一个也一起丢掉，
+    // 于是"松树拉不到"表现成"树和灌木都没了"，排查时完全指错了方向。
+    if (tree) {
+      const geos = allGeometries(tree);
+      if (geos.length < 6) this.assetFail(`松树只取到 ${geos.length}/6 个网格`, 'pine_split.glb');
+      this.veg.attachTrees(geos, firstMaterial(tree));
+    } else {
+      this.assetFail('松树', 'pine_split.glb');
     }
+    if (bush) {
+      this.veg.attachBushes(firstGeometry(bush), firstMaterial(bush));
+    } else {
+      this.assetFail('灌木', 'bush.glb');
+    }
+    this.emit({ type: 'loaded', what: 'vegetation' });
   }
 
   /**
@@ -626,6 +655,28 @@ function firstMaterial(m: { root: Object3D }): Material | null {
     }
   });
   return mat;
+}
+
+/**
+ * 取出**全部** mesh 的几何体（拆簇后的松树有 6 个）。
+ *
+ * `firstGeometry()` 只拿第一个——那对"一棵树一个模型"的资产是对的，
+ * 对 `pine_split.glb` 就只拿到一棵，于是路边全是同一棵树复制出来的。
+ * 顺序按节点名里的 `tree_k` 排，**保证第 k 棵树对应变体 k**，
+ * 不依赖遍历顺序（顺序一变，画面上的树型分布就会跟着变）。
+ */
+function allGeometries(m: { root: Object3D }): BufferGeometry[] {
+  const found: { name: string; geo: BufferGeometry }[] = [];
+  m.root.traverse((o) => {
+    if (!(o as { isMesh?: boolean }).isMesh) return;
+    found.push({ name: (o as Object3D).name || '', geo: (o as unknown as Mesh).geometry });
+  });
+  found.sort((a, b) => {
+    const ka = Number(/tree_(\d+)/.exec(a.name)?.[1] ?? Number.MAX_SAFE_INTEGER);
+    const kb = Number(/tree_(\d+)/.exec(b.name)?.[1] ?? Number.MAX_SAFE_INTEGER);
+    return ka - kb;
+  });
+  return found.map((f) => f.geo);
 }
 
 /** 找到离 (x,z) 最近的一点中心线（用于把车放在路上） */

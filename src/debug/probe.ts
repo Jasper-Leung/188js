@@ -260,6 +260,17 @@ function nearbyVeg(world: World, x: number, z: number, radius: number): string[]
     out.push(...near.slice(0, 8));
   }
 
+  // ---- 资产加载失败 ----
+  //
+  // `loadModel()` 失败时是 `resolve(null)`，**不抛异常**，
+  // 所以"模型没拉到"过去一次都不会在界面上留下痕迹——
+  // 症状只是"路边没有树"，而布置表和剔除统计都说树在那儿。
+  // 这一段把失败原因摆出来，它为空才代表什么都没失败。
+  if (world.assetErrors.length) {
+    out.push(`  资产加载失败 ${world.assetErrors.length} 条：`);
+    for (const e of world.assetErrors) out.push(`    ✗ ${e}`);
+  }
+
   // ---- 植被为什么没画出来 ----
   //
   // 这段是被一件**很旧的事**逼出来的：整条环线的行道树从来没有渲染过，

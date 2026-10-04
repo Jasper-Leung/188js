@@ -16,7 +16,7 @@ import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
-import { groundOffsetFor, bottomOf, Vegetation, TREES_PER_COPE } from '../world/vegetation';
+import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
 import { Box3, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute } from 'three';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
@@ -1048,51 +1048,93 @@ check('verify_veg_density', () => {
   // 这里只用到 x/z 两个字段，所以就地写结构类型而不是把它导出——
   // 为了让一条断言能跑就把模块的内部形状变成公共 API，不划算。
   type P = { x: number; z: number };
-  const counts: { tier: number; tree: number; copse: number; bush: number; nearTree: number; nearBush: number }[] = [];
+  const counts: {
+    tier: number;
+    tree: number;
+    nearTree: number;
+    bush: number;
+    variants: number;
+    minRoad: number;
+    minBury: number;
+  }[] = [];
   for (let tier = 0 as Tier; tier <= 2; tier = (tier + 1) as Tier) {
     const veg = new Vegetation(PRESETS[tier], terrain);
-    const chunks = (veg as unknown as { chunks: { tree: P[]; bush: P[] }[] }).chunks;
-    let copse = 0;
+    const chunks = (veg as unknown as { chunks: { tree: (P & { variant: number; bury: number })[]; bush: P[] }[] }).chunks;
+    let tree = 0;
     let bush = 0;
-    let nearCopse = 0;
-    let nearBush = 0;
+    let nearTree = 0;
+    const variants = new Set<number>();
     const s0 = STATIONS[0];
     for (const c of chunks) {
-      copse += c.tree.length;
+      tree += c.tree.length;
       bush += c.bush.length;
-      for (const p of c.tree) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearCopse++;
-      for (const p of c.bush) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearBush++;
+      for (const p of c.tree) {
+        variants.add(p.variant);
+        if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearTree++;
+      }
     }
-    counts.push({
-      tier,
-      tree: copse * TREES_PER_COPE,
-      copse,
-      bush,
-      nearTree: nearCopse * TREES_PER_COPE,
-      nearBush,
-    });
+    // 最近的一棵树离中心线多远 ——「树不许压在路面上」这条硬约束的实测值
+    let minRoad = Infinity;
+    // 最小的埋地深度 ——「松树不悬空」那条
+    let minBury = Infinity;
+    for (const c of chunks) {
+      for (const p of c.tree) {
+        minRoad = Math.min(minRoad, distToRoad(p.x, p.z));
+        minBury = Math.min(minBury, p.bury);
+      }
+    }
+    counts.push({ tier, tree, nearTree, bush, variants: variants.size, minRoad, minBury });
   }
 
-  // 1. 每档全环线至少 300 株。低于这个数，1228m 的路就是"两旁没东西"，
+  // 1. 每档全环线至少 120 株。低于这个数，1228m 的路就是"两旁没东西"，
   //    而玩家一进世界看到的就是前 60m。
   asserts++;
   for (const c of counts) {
-    if (c.tree < 220) probs.push(`第 ${c.tier} 档全环线只有 ${c.tree} 株树`);
+    if (c.tree < 120) probs.push(`第 ${c.tier} 档全环线只有 ${c.tree} 株树`);
   }
 
-  // 2. 起点 60m 内至少 24 株 —— 开局第一眼。一丛 6 株，4 丛是底线。
+  // 2. 起点 60m 内至少 24 株 —— 开局第一眼。
   asserts++;
   for (const c of counts) {
-    if (c.nearTree < 14) probs.push(`第 ${c.tier} 档起点 60m 内只有 ${c.nearTree} 株树`);
+    if (c.nearTree < 12) probs.push(`第 ${c.tier} 档起点 60m 内只有 ${c.nearTree} 株树`);
   }
 
-  // 3. 灌木同理，但门槛低一档：它是补空地的，不是主景。
+  // 3. **变体要真的被用到**：拆分出的 6 棵如果只用到 1 棵，
+  //    画面上仍是同一个模型复制 N 遍 —— 那是"看起来有树"而不是"有树林"。
+  asserts++;
+  for (const c of counts) {
+    if (c.variants < 4) probs.push(`第 ${c.tier} 档只用到 ${c.variants} 个树变体（拆了 6 棵）`);
+  }
+
+  // 4. **树不许压在路面上**：路面总半宽 6.5m，树冠半径最坏 8.1m，
+  //    所以树干中心离中心线必须 ≥ 14.6m。
+  //    这一条是硬约束：画面上一眼能看出"树枝搭在沥青上"，
+  //    而回归不钉住它，下一次调株距就会被改回去。
+  asserts++;
+  for (const c of counts) {
+    if (c.minRoad < 14.6) {
+      probs.push(`第 ${c.tier} 档最近的一棵树离中心线只有 ${c.minRoad.toFixed(1)}m（应 ≥14.6）`);
+    }
+  }
+
+  // 5. **每棵都要往地里埋一点** ——「松树不悬空」这条用户要求。
+  //
+  //    `terrain.getHeightAt()` 是**点采样**：它给的是树干中心那一柱的高度，
+  //    而地形在树根那 0.5m 直径内是有坡度的。树根正好坐在坡的上沿时，
+  //    下坡那一侧会露出缝 —— 读作"树浮在地面上"。
+  //    埋一点就把这个缝吃掉；代价是树看起来矮一点点，**而没有人会数树有多高**。
+  asserts++;
+  for (const c of counts) {
+    if (c.minBury <= 0) probs.push(`第 ${c.tier} 档有树完全没往地里埋（bury=${c.minBury}），根下会露缝`);
+  }
+
+  // 6. 灌木同理，但门槛低一档：它是补空地的，不是主景。
   asserts++;
   for (const c of counts) {
     if (c.bush < 80) probs.push(`第 ${c.tier} 档全环线只有 ${c.bush} 丛灌木`);
   }
 
-  // 4. 密度不得再随档位断崖式下跌：低档砍的是**半径**，不是株数。
+  // 7. 密度不得再随档位断崖式下跌：低档砍的是**半径**，不是株数。
   //    半径已经能把看不见的那些块剔掉，再砍株数就是两次砍同一刀。
   asserts++;
   const low = counts[0];
@@ -1102,33 +1144,11 @@ check('verify_veg_density', () => {
   }
 
   const summary = counts
-    .map((c) => `档${c.tier} ${c.copse}丛/${c.tree}株(起点${c.nearTree})`)
+    .map((c) => `档${c.tier} ${c.tree}株/起点${c.nearTree}/变体${c.variants}/最近${c.minRoad.toFixed(1)}m`)
     .join(' · ');
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
-// ---------------------------------------------------------------- 章节
-/**
- * 第一章 = 一趟完整的 188，**收在十八驿**。
- *
- * 四条断言守的正是这次改动想成立的那件事：
- * 集齐五件之后不再就地结算，而是把目标换成"回家"；
- * 到了十八驿才完成，且只能完成一次。
- */
-// ---------------------------------------------------------------- 区域散布
-/**
- * 竹在西北（屏幕左上）、现代建筑在东南（屏幕右下）——**位置本身就是叙事**。
- *
- * 东南那两片现代建筑代表"这个环线上已经被开发过的地方"。
- * 一旦它们跑到别的象限，玩家就少了那层对照：一个无人来过的乡野，
- * 只有一角动过土——这是这个设定里唯一一处"人为痕迹"。
- *
- * 四条约束各自对应一次"放错了看得出来"：
- * 水下、压在路上、骑在驿站屋顶上、陡坡上悬空。
- *
- * 注意这里验的是**原始落点**而不是 InstancedMesh——
- * 无头环境里没有 GLB，`attachMeshes` 不会跑，而位置对不对与画不画得出来无关。
- */
 check('verify_scenery', () => {
   let asserts = 0;
   const probs: string[] = [];

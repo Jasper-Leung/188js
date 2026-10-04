@@ -72,7 +72,9 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     pixelRatioCap: 1,
     groundDetail: 0,
     groundDetailRadius: 26,
-    treeRadius: 52,
+    // 树半径**必须小于 fogFar**，否则会看见树从雾里长出来。
+    // 调远可见半径 = 调远雾距，两者要一起动。
+    treeRadius: 95,
     // **1 而不是 0.35。** 降档砍的是**半径**（52m，看不见的那 94% 已经被剔掉了），
     // 株数是第二刀：25m 株距 × 0.35 密度 = 每 100m 一棵树，
     // 实机截屏上这条路读起来就是"高速公路"，而玩家开局 60m 内只剩 2 株。
@@ -81,7 +83,7 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     treeDensity: 1,
     bushRadius: 40,
     fogNear: 26,
-    fogFar: 130,
+    fogFar: 175,
     stationLoadDistance: 130,
     waterDetail: 0,
     windInterval: 4,
@@ -96,12 +98,12 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     pixelRatioCap: 1.25,
     groundDetail: 1,
     groundDetailRadius: 34,
-    treeRadius: 92,
+    treeRadius: 150,
     // 同低档：半径是第一刀，株数不再挨第二刀。见 verify_veg_density。
     treeDensity: 1,
     bushRadius: 80,
     fogNear: 45,
-    fogFar: 260,
+    fogFar: 300,
     stationLoadDistance: 220,
     waterDetail: 1,
     windInterval: 2,
@@ -116,11 +118,11 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     pixelRatioCap: 2,
     groundDetail: 2,
     groundDetailRadius: 58,
-    treeRadius: 160,
+    treeRadius: 220,
     treeDensity: 1,
     bushRadius: 140,
     fogNear: 80,
-    fogFar: 400,
+    fogFar: 420,
     stationLoadDistance: 320,
     waterDetail: 2,
     windInterval: 1,

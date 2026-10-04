@@ -32,7 +32,7 @@ import {
   Group,
   type Material,
 } from 'three';
-import { CENTERLINE, TOTAL_ARCLENGTH, type Vec3Flat } from '../data/route';
+import { CENTERLINE, TOTAL_ARCLENGTH, distToCenterline, type Vec3Flat } from '../data/route';
 import { hashGrid } from '../core/noise';
 import { clamp } from '../core/math';
 import type { Terrain } from './terrain';
@@ -97,9 +97,54 @@ const CHUNK_COUNT = Math.ceil(TOTAL_ARCLENGTH / CHUNK_LEN);
  * 远看（几十米以外）没问题，近看（贴着路肩 10m）会读成"绿色的柱子"。
  * 这一点是资产的现状，不是代码能补的——要真树冠层次需要换贴图或换模型。
  */
-const TREE_SPACING = 28;
-/** `pine.glb` 一丛几棵。回归用它把"丛数"换算成玩家看得见的"株数"。 */
+/**
+ * 行道树株距（沿路弧长，米）。
+ *
+ * 拆成单棵之后株距与株高**解绑**了，可以单独调密度。
+ * 7m 配左右错开 = **每侧 14m 一株**，接近真实乡村公路的行道树株距（15~25m）。
+ * 再密三角面就吃不消：单株 5,200 面，高档可见半径 160m 对应 320m 走廊，
+ * 9m 一株是 36 株 = 19 万面。
+ */
+const TREE_SPACING = 7;
+/**
+ * `pine.glb` 被 `tools/split-glb.mjs` 拆成了几棵独立的。
+ *
+ * 拆开之前是「一丛 6 棵」当**一个**实例摆，6 棵共用一个 Y——
+ * 而整丛宽 26m，地形在这 26m 里起伏明显，于是**有的悬空、有的半埋**。
+ * 拆开之后每棵各自取 `terrain.getHeightAt()`，这是"不悬空"的根上解法，
+ * 而且顺带把株距与株高解绑了（原来 0.15S 同时决定"多高"和"挨多近"）。
+ */
 export const TREES_PER_COPE = 6;
+/** 沉进地里的深度（米）。见下面 `TREE_SIDE_OFFSET` 旁边那段说明。 */
+const TREE_BURY = 0.45;
+/**
+ * 树到中心线的横向距离下限（米）。
+ *
+ * **这是"树不许压在路面上"这条硬约束的落点**，不是一个审美数字。
+ * 路面总半宽 `ROAD_HALF_WIDTH = 6.5m`，拆分后单棵最宽 0.261（模型单位），
+ * 缩放上限 31 → 树冠半径 8.1m，理论下限 6.5 + 8.1 = **14.6m**。
+ * 这里取 16m 再留 2m 抖动，于是**最坏情况下枝条离沥青仍有 3.4m**。
+ *
+ * 取 12.5m 会让缩放大的那几株（scale 31）压到路面上——
+ * 而"树压在沥青上"是画面上一眼能看出的那种错。
+ */
+const TREE_SIDE_OFFSET = 16;
+/**
+ * 树到**整条**中心线的最近距离下限（米）。
+ *
+ * 路面总半宽 6.5m + 树冠半径最坏 8.1m = 14.6m 是理论下限，
+ * 这里取 16m 留一点余量。**这不是审美数字，是「树不许压在路面上」的硬约束**，
+ * 由 verify_veg_density 量实测值守住。
+ */
+const TREE_ROAD_CLEAR = 16;
+/**
+ * 灌木也埋一点，但比树浅。
+ *
+ * 灌木是"贴着地的"东西，沉 0.5m 就会变成半个球露在外面；
+ * 而它同样受点采样的坑（`getHeightAt` 只给中心那一柱）。
+ * 0.25m 是两边都能接受的折中。
+ */
+const BUSH_BURY = 0.25;
 const BUSH_SPACING = 11;
 
 /**
@@ -137,6 +182,10 @@ interface Placement {
   z: number;
   rotY: number;
   scale: number;
+  /** 往地里埋的深度（米）。灌木是 0。 */
+  bury: number;
+  /** 用哪个模型变体（拆分出来的第几棵）。灌木恒为 0。 */
+  variant: number;
 }
 
 interface Chunk {
@@ -157,7 +206,6 @@ export class Vegetation {
   readonly groupTrees = new Group();
   readonly groupBushes = new Group();
   private chunks: Chunk[] = [];
-  private treeMesh: InstancedMesh | null = null;
   private bushMesh: InstancedMesh | null = null;
   private lastChunkIndex = -1;
   private preset: QualityPreset;
@@ -174,7 +222,7 @@ export class Vegetation {
    * 症状很安静：帧率只掉几个点，没有报错，也没有任何一条判据会红。
    * 所以这里显式维护映射表，而不是靠下标推算。
    */
-  private treeOfChunk: (InstancedMesh | null)[] = [];
+  private treeOfChunk: InstancedMesh[][] = [];
   private bushOfChunk: (InstancedMesh | null)[] = [];
 
   /** 统计，给 FPS/调试面板 */
@@ -261,16 +309,14 @@ export class Vegetation {
       c.cz = mid.z;
     }
 
-    // ---- 行道树：一"丛" = 模型里的 6 棵，整丛沿路摆放 ----
+    // ---- 行道树：逐株摆放 ----
     //
-    // 源项目那株单棵行道树是 **32,929 三角面**，而 `pine.glb` 是
-    // **6 棵合成一个网格、31,219 面，折合 5,203 面/棵**——便宜 6.3 倍。
-    // 所以这里摆的不再是"一株一株"，而是"一丛一丛"，一丛 = 6 棵。
+    // 每一株**独立取地形高度**（`terrain.getHeightAt`），
+    // 这是"树不悬空"的根上解法：之前整丛 6 棵共用一个 Y，
+    // 而整丛宽 26m，地形在这 26m 里起伏明显——必然有的悬空、有的半埋。
     //
-    // **丛的行必须与路平行**（`rotY` 对齐切线），否则一丛 17m 宽的树
-    // 横着插在路边，内侧那几棵会直接压在路面上——路面总半宽 6.5m，
-    // 而丛深 0.238×17 ≈ 4m，横向摆的话内缘会到 11−8.5 = 2.5m。
-    // 平行摆时内缘在 11−2 = 9m，离路缘还有 2.5m。
+    // 变体来自 `tools/split-glb.mjs` 的拆分结果（6 棵不同大小的松），
+    // 逐株随机取一个，避免整条路是同一棵树复制出来的。
     const nTree = Math.floor(TOTAL_ARCLENGTH / TREE_SPACING);
     for (let i = 0; i < nTree; i++) {
       if (i % 2 === 1 && this.preset.treeDensity < 0.75) continue;
@@ -279,22 +325,36 @@ export class Vegetation {
       const r1 = hashGrid(i, 1, 7717);
       const r2 = hashGrid(i, 2, 3313);
       const r3 = hashGrid(i, 3, 9091);
+      const r4 = hashGrid(i, 4, 5507);
       const { p, tx, tz } = this.sampleAt(t);
       const side = i % 2 === 0 ? -1 : 1; // 左右错开
-      // 横向偏移：路面总半宽 6.5m，丛半深 0.119×27 ≈ 3.2m，
-      // 所以 13m 留出 3.3m 的净空，再加一点抖动免得整条路像用尺子量过。
-      const off = 13 + r3 * 2.0;
+      // 横向偏移。**下限是硬的**：路面总半宽 ROAD_HALF_WIDTH = 6.5m，
+      // 加上树冠最宽处的半径，保证树**任何一根枝条都不会压在沥青上**。
+      // 拆分后单棵宽 0.26（模型单位）× 缩放 27 ≈ 7m，半宽 3.5m，
+      // 所以 6.5 + 3.5 = 10m 是理论下限；实际取 12.5m 留出抖动余量。
+      const off = TREE_SIDE_OFFSET + r3 * 2.0;
       const x = p.x + -tz * off * side;
       const z = p.z + tx * off * side;
+      // **硬约束：到整条中心线的最近距离必须够远。**
+      // 上面那两行是"沿法线推 off 米"，那只在路是直线时等价于距离；
+      // 8 字的两条支路会绕回来互相靠近，于是"离本段 16m"的位置
+      // 可能离**另一段**只有 4m——树就长在沥青上了（实测过 4.2m）。
+      // 所以这里必须量整条线，不够就丢弃这一株。
+      if (distToCenterline(x, z) < TREE_ROAD_CLEAR) continue;
       const y = terrain.getHeightAt(x, z);
       chunks[chunkAt(x, z)].tree.push({
         x, y, z,
-        // 模型的长轴是本地 +X；绕 Y 转 θ 把 +X 映到 (cosθ, 0, −sinθ)，
-        // 要它等于切线 (tx, 0, tz) 就是 θ = atan2(−tz, tx)。
-        // 再叠一点随机朝向，否则整条路的树带像用直尺排的。
-        rotY: Math.atan2(-tz, tx) + (r2 - 0.5) * 0.1,
-        // 0.467 是单株高度（模型单位），×27 ≈ 12.6m 的松
-        scale: 25 + r1 * 6,
+        // 单棵模型的长轴是本地 +X（6 棵排成一行时是这个方向）。
+        // 绕 Y 转 θ 把 +X 映到 (cosθ, 0, −sinθ)，要它等于切线就是 θ = atan2(−tz, tx)。
+        // 再叠一点随机朝向，否则整条路的树像用尺子排的。
+        rotY: Math.atan2(-tz, tx) + (r2 - 0.5) * 0.9,
+        // 0.463 是单棵高度（模型单位），×27 ≈ 12.5m 的松
+        scale: 24 + r1 * 7,
+        // 往地里埋一点：`getHeightAt` 是点采样，给的是树干中心那一柱的高度，
+        // 而地形在树根那 0.5m 内有坡度——正好坐在坡的上沿时，
+        // 下坡那一侧会露出缝，读作"树浮在地面上"。
+        bury: TREE_BURY,
+        variant: Math.floor(r4 * TREES_PER_COPE) % TREES_PER_COPE,
       });
     }
 
@@ -313,7 +373,13 @@ export class Vegetation {
       const x = p.x + -tz * off * side;
       const z = p.z + tx * off * side;
       const y = terrain.getHeightAt(x, z);
-      chunks[chunkAt(x, z)].bush.push({ x, y, z, rotY: r1 * Math.PI * 2, scale: 0.5 + r2 * 0.5 });
+      chunks[chunkAt(x, z)].bush.push({
+        x, y, z,
+        rotY: r1 * Math.PI * 2,
+        scale: 0.5 + r2 * 0.5,
+        bury: BUSH_BURY,
+        variant: 0,
+      });
     }
 
     // ---- 草皮：已移除 ----
@@ -335,58 +401,75 @@ export class Vegetation {
   }
 
   /**
-   * 装上模型网格。树与灌木各一个 InstancedMesh，**每块一次 draw call**。
-   * 草皮是一个自定义的交叉双面片，顶点着色器做风摆。
+   * 装上**树**的模型网格。
+   *
+   * 拆簇后的松树有 6 个几何体，所以每一块要按变体分组：
+   * 同一个变体的树共用一个 geometry，于是「一块 N 株」变成
+   * 「一块最多 N 个 InstancedMesh」。块长 12m、株距 7m，
+   * 一块平均 1.7 株、最多 3 个变体 —— **draw call 的增长是有界的**，不是 ×6。
+   *
+   * **树与灌木分开装**，是为了让加载失败时互不牵连：
+   * 之前是 `if (tree && bush) { attachMeshes(...) }`，
+   * 松树拉不到就表现成"树和灌木一起消失"，排查时完全指错了方向。
    */
-  attachMeshes(treeGeo: BufferGeometry, treeMat: Material | null, bushGeo: BufferGeometry, bushMat: Material | null) {
-    this.treeMesh = new InstancedMesh(treeGeo, treeMat ?? defaultVegMaterial(), 1);
-    this.bushMesh = new InstancedMesh(bushGeo, bushMat ?? defaultVegMaterial(), 1);
-    this.treeMesh.castShadow = true;
-    this.treeMesh.receiveShadow = true;
-    this.bushMesh.castShadow = true;
-    this.bushMesh.receiveShadow = true;
-    this.treeMesh.frustumCulled = true;
-    this.bushMesh.frustumCulled = true;
-    // 树的矩阵每块单独一份（一个 InstancedMesh = 一块），
-    // 但用同一个 geometry/material，所以显存不翻倍
+  attachTrees(treeGeos: BufferGeometry[], treeMat: Material | null) {
     this.groupTrees.clear();
-    this.groupBushes.clear();
-    this.treeOfChunk = new Array<InstancedMesh | null>(CHUNK_COUNT).fill(null);
-    this.bushOfChunk = new Array<InstancedMesh | null>(CHUNK_COUNT).fill(null);
-    // 模型的最低点。GLB 里的 accessor min/max 不可信（见 tools/glb-inspect.mjs
-    // 的说明：它们被按 int16 写，读出来是垃圾），所以现在从顶点算。
-    const treeBottom = bottomOf(treeGeo);
-    const bushBottom = bottomOf(bushGeo);
+    this.treeOfChunk = new Array<InstancedMesh[]>(CHUNK_COUNT).fill(null as never);
+    if (!treeGeos.length) return;
     for (const c of this.chunks) {
-      // 树的 p.scale 已经是**绝对**缩放（6~9，取自源项目 SCALE_MIN/MAX），
-      // 所以这里不要再乘一个模型缩放——乘两次的话树会变成 48 倍，
-      // 而那正是"相机一进世界就埋在树冠里"的量级。
-      if (c.tree.length) {
-        const m = this.makeInstanced(this.treeMesh, c.tree, 1.0, treeBottom, 'tree');
-        this.treeOfChunk[c.index] = m;
+      if (!c.tree.length) continue;
+      const byVariant = new Map<number, Placement[]>();
+      for (const p of c.tree) {
+        const v = Math.min(treeGeos.length - 1, Math.max(0, p.variant));
+        const arr = byVariant.get(v);
+        if (arr) arr.push(p);
+        else byVariant.set(v, [p]);
+      }
+      const made: InstancedMesh[] = [];
+      for (const [v, list] of byVariant) {
+        const m = this.makeInstanced(treeGeos[v], treeMat, list, 1.0, bottomOf(treeGeos[v]), 'tree', v);
+        made.push(m);
         this.groupTrees.add(m);
       }
-      if (c.bush.length) {
-        const m = this.makeInstanced(this.bushMesh, c.bush, 4.0, bushBottom, 'bush');
-        this.bushOfChunk[c.index] = m;
-        this.groupBushes.add(m);
-      }
+      this.treeOfChunk[c.index] = made;
     }
+    // **必须重算一次可见集**：`update()` 只在玩家跨块时才跑，
+    // 而模型是异步到达的 —— 到达时那些网格的 `visible` 是默认的 true，
+    // 于是全场 103 块的树会在同一帧全亮出来（一次几十万三角面）。
+    this.lastChunkIndex = -1;
+  }
+
+  /** 装上灌木的模型网格。 */
+  attachBushes(bushGeo: BufferGeometry, bushMat: Material | null) {
+    this.bushMesh = new InstancedMesh(bushGeo, bushMat ?? defaultVegMaterial(), 1);
+    this.bushMesh.castShadow = true;
+    this.bushMesh.receiveShadow = true;
+    this.bushMesh.frustumCulled = true;
+    this.groupBushes.clear();
+    this.bushOfChunk = new Array<InstancedMesh | null>(CHUNK_COUNT).fill(null);
+    for (const c of this.chunks) {
+      if (!c.bush.length) continue;
+      const m = this.makeInstanced(bushGeo, bushMat, c.bush, 4.0, bottomOf(bushGeo), 'bush', 0);
+      this.bushOfChunk[c.index] = m;
+      this.groupBushes.add(m);
+    }
+    this.lastChunkIndex = -1;
   }
 
   private makeInstanced(
-    proto: InstancedMesh,
+    geo: BufferGeometry,
+    mat: Material | null,
     placements: Placement[],
     modelScale: number,
     modelBottom: number,
     kind: 'tree' | 'bush',
+    variant: number,
   ): InstancedMesh {
-    const m = new InstancedMesh(proto.geometry, proto.material, placements.length);
-    // 名字里带上块号。`?dump=1` 的场景自检要靠它把"画面左边那个黑方块"
-    // 对应到具体对象上——没有名字时自检只能报"一个 InstancedMesh"，
-    // 等于没有回答问题。名字里也带上落地抬升量：
-    // 下次再有人看见"树埋在土里"，一眼就能看出偏移是不是 0。
-    m.name = `veg-${kind}-${placements.length}@${groundOffsetFor(modelBottom, modelScale, 1).toFixed(2)}`;
+    const m = new InstancedMesh(geo, mat ?? defaultVegMaterial(), placements.length);
+    // 名字里带上株数、变体号与沉地深度。`?dump=1` 的场景自检与 `?probe`
+    // 都要靠它把"画面左边那个东西"对应回具体对象——没有名字时
+    // 自检只能报"一个 InstancedMesh"，等于没有回答问题。
+    m.name = `veg-${kind}-v${variant}-${placements.length}@bury${(placements[0]?.bury ?? 0).toFixed(2)}`;
     const mat4 = new Matrix4();
     const q = new Quaternion();
     const pos = new Vector3();
@@ -396,16 +479,18 @@ export class Vegetation {
       const p = placements[i];
       q.setFromAxisAngle(up, p.rotY);
       const s = modelScale * p.scale;
-      // 抬升量跟着**这一株**的最终缩放走（见 groundOffsetFor 的说明）
-      pos.set(p.x, p.y + groundOffsetFor(modelBottom, modelScale, p.scale), p.z);
+      // 抬升量跟着**这一株**的最终缩放走（见 groundOffsetFor 的说明），
+      // 再减去这一株要埋进地里的深度
+      pos.set(p.x, p.y + groundOffsetFor(modelBottom, modelScale, p.scale) - p.bury, p.z);
       scl.setScalar(s);
       mat4.compose(pos, q, scl);
       m.setMatrixAt(i, mat4);
     }
     m.instanceMatrix.needsUpdate = true;
     m.count = placements.length;
-    m.castShadow = proto.castShadow;
+    m.castShadow = true;
     m.receiveShadow = true;
+    m.frustumCulled = true;
     return m;
   }
   /**
@@ -444,13 +529,14 @@ export class Vegetation {
 
       const iTree = this.treeOfChunk[c.index];
       const iBush = this.bushOfChunk[c.index];
-      if (iTree) iTree.visible = showTree;
+      // 一块可能有多个变体网格，逐个开关
+      if (iTree) for (const m of iTree) m.visible = showTree;
       if (iBush) iBush.visible = showBush;
 
       if (showTree) {
         visibleChunks++;
         treeCount += c.tree.length;
-        calls++;
+        calls += iTree ? iTree.length : 0;
       }
       if (showBush) {
         bushCount += c.bush.length;

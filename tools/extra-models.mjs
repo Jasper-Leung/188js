@@ -31,16 +31,28 @@
 export const SRC_EXTRA = 'D:/code/20260920';
 
 /**
- * `[源文件名, 输出短名, 贴图边长]`
+ * `[源文件名, 输出短名, 贴图边长, 需要拆簇?]`
  * 贴图边长：768 = 量产道具（单株在屏幕上不超过百来像素），
  * 1024 = 地标（玩家会绕着它骑）。
+ *
+ * 第四项 `split`：这个模型**一棵网格里排了多棵树**
+ * （`pine+trees+3d+model.glb` 是 6 棵，X 方向顶点直方图有六个峰）。
+ * 不拆的话 6 棵共用一个实例、**共用一个 Y**，而整丛宽 26m，
+ * 地形在这段距离里起伏明显——结果就是有的悬空、有的半埋。
+ * 拆完之后每棵各自取地形高度，株距与株高也解绑了。
+ * 拆法见 `tools/split-glb.mjs`。
  */
 export const EXTRA_MODELS = [
-  ['pine+trees+3d+model.glb', 'pine.glb', 768],
-  ['bamboo+stalks+3d+model.glb', 'bamboo.glb', 768],
-  ['modern+building+3d+model.glb', 'mod_tower.glb', 1024],
-  ['modern+circular+house+3d+model.glb', 'mod_house.glb', 1024],
+  ['pine+trees+3d+model.glb', 'pine.glb', 768, true],
+  ['bamboo+stalks+3d+model.glb', 'bamboo.glb', 768, false],
+  ['modern+building+3d+model.glb', 'mod_tower.glb', 1024, false],
+  ['modern+circular+house+3d+model.glb', 'mod_house.glb', 1024, false],
 ];
+
+/** 需要拆簇的模型 → 拆分后输出的短名。 */
+export function splitTargetName(dst) {
+  return dst.replace(/\.glb$/, '_split.glb');
+}
 
 /**
  * 量产道具：同一个网格重复几十次，单个在屏幕上不超过百来个像素。
@@ -50,5 +62,13 @@ export const EXTRA_MODELS = [
  *
  * **这里曾经有一个不生效的 bug**：`MASS_MODELS` 在 `optimize-assets.mjs`
  * 里声明了却从没被 `JOBS` 读过，树和灌木一直按地标阈值简化。
+ *
+ * 用**前缀**匹配而不是精确名，是为了 `_split` 变体自动继承同一档——
+ * 否则拆出来的松树会因为名字对不上而偷偷回到地标的阈值。
  */
+const MASS_BASES = ['tree', 'bush', 'pine', 'bamboo'];
+export function isMassModel(name) {
+  const base = name.replace(/\.glb$/, '').replace(/_split$/, '');
+  return MASS_BASES.includes(base);
+}
 export const MASS_MODEL_NAMES = new Set(['tree.glb', 'bush.glb', 'pine.glb', 'bamboo.glb']);

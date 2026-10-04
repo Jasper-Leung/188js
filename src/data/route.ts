@@ -167,6 +167,43 @@ export function nearestArcParam(px: number, pz: number): number {
   return bestS;
 }
 
+/**
+ * 到**整条**中心线的最近距离（米）。扫全路径，所以两条支路互相靠近的地方
+ * （8 字交叉口附近）也能给出正确的距离。
+ *
+ * ## 为什么必须有这个函数，而不是"垂直于切线偏移 N 米"
+ *
+ * 植被与散布原本都是这么摆的：取弧长上的一个点，沿法线推 `off` 米。
+ * **那只在路是直线时等价于距离**。8 字的两条支路会绕回来互相靠近，
+ * 于是"离本段 16m"的位置可能离**另一段**只有 4m —— 树就长在沥青上了。
+ *
+ * 实测过：按法线推 16m，最近的一棵树离中心线只有 **4.2m**。
+ * 画面上就是"树枝搭在路面上"，而截图之前一直没被注意到。
+ *
+ * 所以凡是"东西不许靠近路"的判定，都必须用**到整条线的最近距离**。
+ */
+export function distToCenterline(px: number, pz: number): number {
+  let best = Infinity;
+  for (let i = 0; i < CENTERLINE.length - 1; i++) {
+    const a = CENTERLINE[i];
+    const b = CENTERLINE[i + 1];
+    const abx = b.x - a.x;
+    const abz = b.z - a.z;
+    const l2 = abx * abx + abz * abz;
+    if (l2 < 1e-9) {
+      const d = (px - a.x) ** 2 + (pz - a.z) ** 2;
+      if (d < best) best = d;
+      continue;
+    }
+    const t = clamp01(((px - a.x) * abx + (pz - a.z) * abz) / l2);
+    const dx = px - (a.x + abx * t);
+    const dz = pz - (a.z + abz * t);
+    const d = dx * dx + dz * dz;
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
+}
+
 /** 到整条中心线的最近距离（米）。只用于初始化时给驿站挑方向。 */
 function distToRoad(p: V2): number {
   let best = Infinity;
