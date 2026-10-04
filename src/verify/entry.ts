@@ -10,15 +10,16 @@
  * 更糟：它绿着，而漏洞也在。
  */
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
-import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
+import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD, WATER } from '../data/raw';
 import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
 import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
-import { groundOffsetFor, Vegetation } from '../world/vegetation';
-import { Box3 } from 'three';
+import { groundOffsetFor, bottomOf, Vegetation, TREES_PER_COPE } from '../world/vegetation';
+import { Box3, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute } from 'three';
 import { Stations } from '../world/stations';
+import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
 import { Road } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
@@ -934,6 +935,76 @@ check('verify_veg_ground', () => {
     if (groundOffsetFor(bad, 1, 8) !== 0) probs.push(`退化输入 ${bad} 得到了非零偏移 ${groundOffsetFor(bad, 1, 8)}`);
   }
 
+  // 4. **交错属性**——这一条是「路边从来没有树」的守护。
+  //
+  //    原实现遍历 `pos.array` 并按 `itemSize` 跨步，那只对**独立数组**成立。
+  //    而这些模型（NORMAL + POSITION + TEXCOORD_0 共用一个 buffer）的
+  //    属性是交错的，跨步会把法线和 UV 当成 Y 读进来：
+  //    实测树的实例 Y 落到 **+949,141 米**，被视锥剔除，一次都不画。
+  //
+  //    下面造一个真的交错 BufferAttribute 来复现——**用非交错的那种测不出来**。
+  asserts++;
+  {
+    // 每个顶点 8 个 float：normal(3) + position(3) + uv(2)
+    const n = 4;
+    const stride = 8;
+    const data = new Float32Array(n * stride);
+    for (let i = 0; i < n; i++) {
+      const o = i * stride;
+      data[o + 0] = 0; // normal.x
+      data[o + 1] = 9e9; // normal.y
+      data[o + 2] = 0; // normal.z
+      data[o + 3] = i * 0.25; // position.x
+      data[o + 4] = 100 + i * 2; // position.y ← 真正的底面是 100，不是 0
+      data[o + 5] = 0; // position.z
+      data[o + 6] = 5e8; // uv.x
+      data[o + 7] = 5e8; // uv.y
+    }
+    // 真实形态是 `InterleavedBuffer`：三种属性共用一块数组、stride 8。
+    // **不能拿 `new BufferAttribute(data, 3, 8)` 冒充**——那个第三个参数
+    // 是 normalized（布尔），写 8 会在运行时报错，测的就不是同一件事了。
+    const buf = new InterleavedBuffer(data, stride);
+    const inter = new InterleavedBufferAttribute(buf, 3, 3); // offset 3 = POSITION
+    const g = new BufferGeometry();
+    g.setAttribute('position', inter);
+    const b = bottomOf(g);
+    // 旧的跨步循环在这份数据上读到的是 index 3i+1：
+    // 9e9 / position.y / uv.y / vertex1.normal.z(=0) …… 最小值落在 **0**，
+    // 于是它把模型当成"底面在原点"——而真实底面是 100。
+    // 差 100m，×缩放 27 就是 2.7km，正是"树飘到天上"的量级。
+    if (Math.abs(b - 100) > 1e-6) probs.push(`交错属性读出底面 ${b}，应为 100（跨步把法线/UV 当成了 Y）`);
+  }
+
+  // 5. 非交错的老路径不能被改坏。
+  asserts++;
+  {
+    const g = new BufferGeometry();
+    g.setAttribute(
+      'position',
+      new BufferAttribute(new Float32Array([-1, 3, 0, 1, 0, 0, 0, 1, 0]), 3),
+    );
+    if (Math.abs(bottomOf(g)) > 1e-6) probs.push(`非交错属性的底面读成 ${bottomOf(g)}，应为 0`);
+  }
+
+  // 6. 一个远离本体的游离顶点不该毁掉"最低点"。
+  asserts++;
+  {
+    const g = new BufferGeometry();
+    const pts: number[] = [];
+    for (let i = 0; i < 200; i++) pts.push(0, i * 0.02, 0); // 0..3.98
+    pts.push(5, -35000, 5); // 唯一的游离顶点
+    g.setAttribute('position', new BufferAttribute(new Float32Array(pts), 3));
+    const b = bottomOf(g);
+    if (b < -0.01) probs.push(`游离顶点污染了底面：${b}（应为 0 附近）`);
+  }
+
+  // 7. 空几何退化成 0，而不是抛。
+  asserts++;
+  {
+    const g = new BufferGeometry();
+    if (bottomOf(g) !== 0) probs.push('空几何的底面不为 0');
+  }
+
   return expect(
     probs.length === 0,
     probs.length ? probs.join('；') : '底面落地，偏移随缩放，方向为正',
@@ -960,16 +1031,13 @@ check('verify_veg_ground', () => {
  * 真实的乡村公路行道树是**每侧 15~25m 一株**，
  * 也就是说这里的密度只有真实值的三分之一，而截图上读起来就是"高速公路"。
  *
- * 根因是一株树 **35,461 个三角面**（`tools/glb-inspect.mjs` 量得到）：
- * 49 株就是 174 万面，再多种必然掉帧，于是作者选了少种。
- * 而 `tools/optimize-assets.mjs` 里那张给"量产道具"单独定预算的
- * `MASS_MODELS` 表**声明了从没被用过**，树和灌木一直按地标的阈值在简化——
- * 接上之后树 51K→32K、灌木 35K→17K，但简化器在 32,924 面撞到硬底
- * （UV/法线接缝太多，几乎没有一条边可以塌缩），**这条路已经到顶**。
+ * 根因是一株树 **35,461 个三角面**，简化压不动（详见 vegetation.ts 的注释）。
  *
- * 所以这里钉的不是"株距该是多少"（那是作者的取舍），
- * 而是**下限**：任何一档都不许退回到"起点 60m 看不见树"，
- * 而那正是这个 bug 最开始的样子。
+ * ## 换完低模松树之后
+ *
+ * `pine.glb` 一丛 6 棵、31,219 面（5,203 面/棵），株距从 25m 收到 17m，
+ * 于是全环线 **72 丛 = 434 株**，起点 60m 内从 6 株变成 30 株。
+ * 断言记的是**株数**（丛数 × `TREES_PER_COPE`），因为那才是玩家看见的东西。
  */
 check('verify_veg_density', () => {
   let asserts = 0;
@@ -980,35 +1048,42 @@ check('verify_veg_density', () => {
   // 这里只用到 x/z 两个字段，所以就地写结构类型而不是把它导出——
   // 为了让一条断言能跑就把模块的内部形状变成公共 API，不划算。
   type P = { x: number; z: number };
-  const counts: { tier: number; tree: number; bush: number; nearTree: number; nearBush: number }[] = [];
+  const counts: { tier: number; tree: number; copse: number; bush: number; nearTree: number; nearBush: number }[] = [];
   for (let tier = 0 as Tier; tier <= 2; tier = (tier + 1) as Tier) {
     const veg = new Vegetation(PRESETS[tier], terrain);
     const chunks = (veg as unknown as { chunks: { tree: P[]; bush: P[] }[] }).chunks;
-    let tree = 0;
+    let copse = 0;
     let bush = 0;
-    let nearTree = 0;
+    let nearCopse = 0;
     let nearBush = 0;
     const s0 = STATIONS[0];
     for (const c of chunks) {
-      tree += c.tree.length;
+      copse += c.tree.length;
       bush += c.bush.length;
-      for (const p of c.tree) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearTree++;
+      for (const p of c.tree) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearCopse++;
       for (const p of c.bush) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearBush++;
     }
-    counts.push({ tier, tree, bush, nearTree, nearBush });
+    counts.push({
+      tier,
+      tree: copse * TREES_PER_COPE,
+      copse,
+      bush,
+      nearTree: nearCopse * TREES_PER_COPE,
+      nearBush,
+    });
   }
 
-  // 1. 每档全环线至少 45 株。低于这个数，1228m 的路就是"两旁没东西"，
+  // 1. 每档全环线至少 300 株。低于这个数，1228m 的路就是"两旁没东西"，
   //    而玩家一进世界看到的就是前 60m。
   asserts++;
   for (const c of counts) {
-    if (c.tree < 45) probs.push(`第 ${c.tier} 档全环线只有 ${c.tree} 株树`);
+    if (c.tree < 220) probs.push(`第 ${c.tier} 档全环线只有 ${c.tree} 株树`);
   }
 
-  // 2. 起点 60m 内至少 5 株 —— 开局第一眼。
+  // 2. 起点 60m 内至少 24 株 —— 开局第一眼。一丛 6 株，4 丛是底线。
   asserts++;
   for (const c of counts) {
-    if (c.nearTree < 5) probs.push(`第 ${c.tier} 档起点 60m 内只有 ${c.nearTree} 株树`);
+    if (c.nearTree < 14) probs.push(`第 ${c.tier} 档起点 60m 内只有 ${c.nearTree} 株树`);
   }
 
   // 3. 灌木同理，但门槛低一档：它是补空地的，不是主景。
@@ -1026,7 +1101,9 @@ check('verify_veg_density', () => {
     probs.push(`低档 ${low.tree} 株不足高档 ${high.tree} 株的一半：密度与半径被重复扣了一次`);
   }
 
-  const summary = counts.map((c) => `档${c.tier} ${c.tree}树/${c.bush}灌木/起点${c.nearTree}`).join(' · ');
+  const summary = counts
+    .map((c) => `档${c.tier} ${c.copse}丛/${c.tree}株(起点${c.nearTree})`)
+    .join(' · ');
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -1038,6 +1115,85 @@ check('verify_veg_density', () => {
  * 集齐五件之后不再就地结算，而是把目标换成"回家"；
  * 到了十八驿才完成，且只能完成一次。
  */
+// ---------------------------------------------------------------- 区域散布
+/**
+ * 竹在西北（屏幕左上）、现代建筑在东南（屏幕右下）——**位置本身就是叙事**。
+ *
+ * 东南那两片现代建筑代表"这个环线上已经被开发过的地方"。
+ * 一旦它们跑到别的象限，玩家就少了那层对照：一个无人来过的乡野，
+ * 只有一角动过土——这是这个设定里唯一一处"人为痕迹"。
+ *
+ * 四条约束各自对应一次"放错了看得出来"：
+ * 水下、压在路上、骑在驿站屋顶上、陡坡上悬空。
+ *
+ * 注意这里验的是**原始落点**而不是 InstancedMesh——
+ * 无头环境里没有 GLB，`attachMeshes` 不会跑，而位置对不对与画不画得出来无关。
+ */
+check('verify_scenery', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const terrain = new Terrain();
+  const sc = new Scenery(terrain);
+  const all = sceneryPlacements(sc);
+
+  const kinds: SceneryKind[] = ['bamboo', 'mod_tower', 'mod_house'];
+  for (const kind of kinds) {
+    const sp = scenerySpec(kind);
+    const [sx, sz] = sp.quad;
+    const pts = all[kind];
+
+    // 1. 摆满了没有。摆不满说明判定条件太苛刻——玩家那一角就空了。
+    asserts++;
+    if (pts.length < sp.max) probs.push(`${kind} 只摆了 ${pts.length}/${sp.max} 个`);
+
+    // 2. **象限**。这是这一族的全部意义，放错象限等于没做。
+    asserts++;
+    const wrong = pts.filter((p) => sx * p.x < 8 || sz * p.z < 8);
+    if (wrong.length) probs.push(`${kind} 有 ${wrong.length} 个落在象限外（首例 ${wrong[0].x.toFixed(0)},${wrong[0].z.toFixed(0)}）`);
+
+    // 3. 不在水下。
+    asserts++;
+    const wet = pts.filter((p) => p.y < WATER.WATER_LEVEL + 0.6);
+    if (wet.length) probs.push(`${kind} 有 ${wet.length} 个在水里`);
+
+    // 4. 离路**落在区间内**。下限是别压路；上限是"玩家看得见"——
+    //    这条是踩过坑才有的：最初没有上限，候选从象限角落开始贪心填，
+    //    结果竹子全落在离路 460m 处，而雾距上限才 400m，一辈子看不见。
+    asserts++;
+    const offRoad = pts.filter((p) => {
+      const d = distToRoad(p.x, p.z);
+      return d < sp.road[0] || d > sp.road[1];
+    });
+    if (offRoad.length) probs.push(`${kind} 有 ${offRoad.length} 个离路不在 ${sp.road[0]}~${sp.road[1]}m 内`);
+
+    // 5. 不骑在驿站上。
+    asserts++;
+    const onStation = pts.filter((p) => STATIONS.some((s) => Math.hypot(p.x - s.mapX, p.z - s.mapZ) < ROAD.STATION_OFFSET));
+    if (onStation.length) probs.push(`${kind} 有 ${onStation.length} 个压在驿站 keepout 里`);
+
+    // 6. 不在陡坡上（建筑一半悬空）。
+    asserts++;
+    const steep = pts.filter((p) => {
+      const h = terrain.getHeightAt(p.x, p.z);
+      return Math.max(Math.abs(terrain.getHeightAt(p.x + 6, p.z) - h), Math.abs(terrain.getHeightAt(p.x, p.z + 6) - h)) / 6 > 0.35;
+    });
+    if (steep.length) probs.push(`${kind} 有 ${steep.length} 个在陡坡上`);
+  }
+
+  // 7. 两样东西**不能同象限**：竹在西北、建筑在东南，
+  //    放到一起就分不出"哪边是开发区"了。这条只需验一次。
+  asserts++;
+  const modInNW = all.mod_tower.filter((p) => p.x < 0 && p.z < 0).length + all.mod_house.filter((p) => p.x < 0 && p.z < 0).length;
+  const bamInSE = all.bamboo.filter((p) => p.x > 0 && p.z > 0).length;
+  if (modInNW > 0) probs.push(`${modInNW} 栋现代建筑落到了西北`);
+  asserts++;
+  if (bamInSE > 0) probs.push(`${bamInSE} 丛竹落到了东南`);
+
+  const sum = kinds.map((k) => `${k}×${all[k].length}`).join(' ');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : sum, asserts);
+});
+
 check('verify_chapter', () => {
   let asserts = 0;
   const probs: string[] = [];

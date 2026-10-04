@@ -13,6 +13,7 @@ import { Terrain } from './terrain';
 import { Road, ROAD } from './road';
 import { Water } from './water';
 import { Vegetation } from './vegetation';
+import { Scenery, type SceneryKind } from './scenery';
 import { Stations } from './stations';
 import { Sky } from './sky';
 import { Ride, type RideInput } from './ride';
@@ -59,6 +60,7 @@ export class World {
   readonly road: Road;
   readonly water: Water;
   readonly veg: Vegetation;
+  readonly scenery: Scenery;
   readonly stations: Stations;
   readonly sky: Sky;
   readonly ride: Ride;
@@ -140,12 +142,14 @@ export class World {
     step('水面');
     this.veg = new Vegetation(preset, this.terrain);
     step('植被布置');
+    this.scenery = new Scenery(this.terrain);
+    step('区域散布');
     this.stations = new Stations(preset, this.terrain);
     step('驿站');
     this.sky = new Sky(this.scene, preset.shadowMapSize, preset.shadowDistance || 120);
     step('天穹');
 
-    this.scene.add(this.terrain.mesh, this.water.group, this.veg.group, this.stations.group);
+    this.scene.add(this.terrain.mesh, this.water.group, this.veg.group, this.scenery.group, this.stations.group);
 
     this.ride = new Ride(this.terrain, this.road, this.stations, camera);
     this.scene.add(this.ride.root);
@@ -201,6 +205,7 @@ export class World {
 
     const vis = game.getVisibilityFactor();
     this.veg.update(this.ride.pos.x, this.ride.pos.z, vis);
+    this.scenery.update(this.ride.pos.x, this.ride.pos.z, vis);
 
     // 地标渐进加载：每 0.4s 放一座。一次性涌进来会在弱机上造成明显长卡顿。
     this.stationModelTimer += dt;
@@ -486,6 +491,7 @@ export class World {
     this.veg.setPreset(preset);
     this.terrain.setPreset(preset);
     this.veg.invalidate();
+    this.scenery.invalidate();
     this.stations.setPreset(preset);
     this.water.setDetail(preset.waterDetail);
   }
@@ -543,8 +549,12 @@ export class World {
   }
 
   async loadVegetationModels(): Promise<void> {
+    // `pine.glb` 不是源项目那株树：那株是 **32,929 面/棵**，而松树是
+    // **6 棵合一个网格、31,219 面，折合 5,203 面/棵**。便宜 6.3 倍，
+    // 所以路边能摆 434 株而不是 49 株。详见 src/world/vegetation.ts。
+    // 注意 `tree.glb` 仍然要留着——它是「榕树下」这个地标本身（配置表第 5 项）。
     const [tree, bush] = await Promise.all([
-      loadModel(modelUrl('res://assets/models/tree.glb')),
+      loadModel(modelUrl('res://assets/models/pine.glb')),
       loadModel(modelUrl('res://assets/models/bush.glb')),
     ]);
     if (tree && bush) {
@@ -556,6 +566,37 @@ export class World {
         firstMaterial(bush),
       );
       this.emit({ type: 'loaded', what: 'vegetation' });
+    }
+  }
+
+  /**
+   * 区域散布的模型（竹 / 现代塔楼 / 现代圆屋）。
+   *
+   * **独立于植被那一条链**：这三样不在路边，是按区域摆的；
+   * 而且它们是**可选**的——拉不到只是"西北没有竹、东南没有开发区"，
+   * 不该让整局像植被那样连锁失败。逐个 `catch`，缺哪个记哪个。
+   */
+  async loadSceneryModels(): Promise<void> {
+    const want: [SceneryKind, string][] = [
+      ['bamboo', 'res://assets/models/bamboo.glb'],
+      ['mod_tower', 'res://assets/models/mod_tower.glb'],
+      ['mod_house', 'res://assets/models/mod_house.glb'],
+    ];
+    const got: Partial<Record<SceneryKind, { geo: BufferGeometry; mat: Material | null }>> = {};
+    await Promise.all(
+      want.map(async ([kind, path]) => {
+        try {
+          const m = await loadModel(modelUrl(path));
+          if (m) got[kind] = { geo: firstGeometry(m), mat: firstMaterial(m) };
+          else console.warn(`[gift188] ${kind} 模型拉不到，${kind} 这一片不会出现`);
+        } catch (e) {
+          console.warn(`[gift188] ${kind} 模型出错：`, e);
+        }
+      }),
+    );
+    if (Object.keys(got).length) {
+      this.scenery.attachMeshes(got);
+      this.emit({ type: 'loaded', what: 'scenery' });
     }
   }
 

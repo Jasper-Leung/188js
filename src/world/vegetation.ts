@@ -41,35 +41,65 @@ import type { QualityPreset } from '../core/settings';
 const CHUNK_LEN = 12; // 米，按中心线弧长
 const CHUNK_COUNT = Math.ceil(TOTAL_ARCLENGTH / CHUNK_LEN);
 /**
- * 株距（沿路弧长，米）。行道树的 25m 直接取自源项目 `TreeScatter.SPACING`。
- * 这个数决定"路看起来通不通透"——它是低配与高配**唯一不该变**的东西：
- * 降档砍的是株数，不是株距。
+ * 上一轮的调查结论（保留下来，因为它是"为什么换成丛"的理由）：
  *
- * ## 25m 意味着整条环线上只有 49 棵树
+ * 株距原本取源项目 `TreeScatter.SPACING` 的 25m，于是
+ * `TOTAL_ARCLENGTH / 25 = 49` 棵，左右错开 = **每侧 50m 一株**。
+ * 真实的乡村公路是每侧 15~25m，所以密度只有真实值的三分之一，
+ * 实机截屏上这条路读起来是"高速公路"而不是"乡道"——
+ * 而且这不是档位问题：高档也是 49 株（高档只是看得更远）。
  *
- * `TOTAL_ARCLENGTH / 25 = 49`，而且左右错开，于是**每侧 50m 一株**。
- * 真实的乡村公路行道树是每侧 15~25m 一株，所以这里的密度约为真实值的三分之一。
- * 实机截屏上这条路读起来就是"高速公路"而不是"乡道"——
- * 而这不是档位问题：高档也是 49 株（高档只是看得更远）。
- *
- * ## 为什么不敢多种：树太贵
- *
- * 一株行道树 **35,461 个三角面 / 63,817 个顶点**（`tools/glb-inspect.mjs` 量得到）。
- * 49 株就是 174 万面。真实项目里一棵行道树该是 500~3000 面。
- *
+ * **当时为什么不敢多种：一株树 35,461 三角面。** 49 株就 174 万面。
  * `tools/optimize-assets.mjs` 里那张给"量产道具"单独定预算的 `MASS_MODELS`
- * 表**声明了却从没被 `JOBS` 读过**，树和灌木一直按地标的阈值在简化。
- * 接上之后实测：树 51K→32K、灌木 35K→17K——
- * 但简化器在 **32,924 面撞到硬底**（ratio 调到 0.02、error 调到 0.15、
- * 连 `lockBorder: false` 都试过，一动不动）。
- * 原因是这类摄影测量网格的 UV/法线接缝太多，几乎没有一条边可以塌缩。
+ * 表**声明了却从没被 `JOBS` 读过**，接上之后树 51K→32K、灌木 35K→17K，
+ * 但简化器在 **32,924 面撞到硬底**（ratio 0.02 / error 0.15 / `lockBorder: false`
+ * 全试过，一动不动——这类摄影测量网格 UV 接缝太多，几乎没有一条边能塌缩）。
  *
- * **结论：靠调参数已经到顶了。** 要让这条路真的像乡村，
- * 需要的是一棵**低模行道树**（面数 2~3k），而不是把 25m 改小。
- * 在那之前，25m 是作者定的值，本项目不改——`verify_veg_density` 守的是**下限**：
- * 任何一档都不许退回"起点 60m 看不见树"。
+ * **当时的结论是"靠调参数到顶了，得换一棵低模树"。**
+ * 现在低模树换进来了（`pine.glb`，6 棵/31,219 面 = 5,203 面/棵），
+ * 结论随之变成"可以种满"——下面就是它怎么种的。
  */
-const TREE_SPACING = 25;
+/**
+ * 行道树**丛**的株距（沿路弧长，米）。
+ *
+ * ## 一丛是 6 棵，量过了
+ *
+ * `pine+trees+3d+model.glb` 的 X 方向顶点直方图有**六个清晰的峰**
+ * （40 个桶里的第 4/10/16/23/29/35 桶），确实是一行 6 棵。
+ * 模型归一化到 1 单位，所以：
+ *
+ *   · 整丛宽 **1.0**、高 **0.467**、深 **0.238**
+ *   · 单株宽约 **0.15**、高 **0.467**（长宽比 1:3.1，是正常树的比例）
+ *   · **株距只有 0.15** —— 6 棵挨在一起
+ *
+ * ## 为什么缩放取 25~31 而不是更小
+ *
+ * 缩放 S 时单株高 0.467S、株距 0.15S，**两者永远同时放大**——
+ * 所以「树有多高」和「树挨得多近」是绑死的，调节它们的是一个数：
+ *
+ *   S=17 时单株 8m、株距 2.6m → 六棵贴成一堵绿墙
+ *   S=27 时单株 12.6m、株距 4.1m → 读作**一丛松**
+ *
+ * 想要单株 12m 就取 S≈26，整丛宽 26m，**株距必须跟着放到 28m 左右**，
+ * 否则丛和丛互相穿插，路边那条绿带会变成一堵连续的墙。
+ *
+ * ## 密度与三角面
+ *
+ * 1228.8 / 28 = 44 丛 = **264 株树**，比源项目那版（49 株）多 5.4 倍。
+ * 一丛 31,219 面，档次可见半径 160m → 约 11 丛 = 34 万面，
+ * 与源项目高档的总量相当，**而画面上的树多了 5.4 倍**。
+ *
+ * ## 贴图这件事要说在前面
+ *
+ * 这一株的 baseColor 实测是**草地纹理**（平均 RGB 69/90/43，标准差只有 9，
+ * 几乎是一整块平绿，见 `tools/` 里的取样）。所以它渲染出来是
+ * **一片均匀的深绿树冠**，没有针叶的层次。
+ * 远看（几十米以外）没问题，近看（贴着路肩 10m）会读成"绿色的柱子"。
+ * 这一点是资产的现状，不是代码能补的——要真树冠层次需要换贴图或换模型。
+ */
+const TREE_SPACING = 28;
+/** `pine.glb` 一丛几棵。回归用它把"丛数"换算成玩家看得见的"株数"。 */
+export const TREES_PER_COPE = 6;
 const BUSH_SPACING = 11;
 
 /**
@@ -231,10 +261,18 @@ export class Vegetation {
       c.cz = mid.z;
     }
 
-    // ---- 行道树：每 TREE_SPACING 米一株，左右错开（STAGGER）----
+    // ---- 行道树：一"丛" = 模型里的 6 棵，整丛沿路摆放 ----
+    //
+    // 源项目那株单棵行道树是 **32,929 三角面**，而 `pine.glb` 是
+    // **6 棵合成一个网格、31,219 面，折合 5,203 面/棵**——便宜 6.3 倍。
+    // 所以这里摆的不再是"一株一株"，而是"一丛一丛"，一丛 = 6 棵。
+    //
+    // **丛的行必须与路平行**（`rotY` 对齐切线），否则一丛 17m 宽的树
+    // 横着插在路边，内侧那几棵会直接压在路面上——路面总半宽 6.5m，
+    // 而丛深 0.238×17 ≈ 4m，横向摆的话内缘会到 11−8.5 = 2.5m。
+    // 平行摆时内缘在 11−2 = 9m，离路缘还有 2.5m。
     const nTree = Math.floor(TOTAL_ARCLENGTH / TREE_SPACING);
     for (let i = 0; i < nTree; i++) {
-      // 密度只决定"这一株放不放"，不决定放多远
       if (i % 2 === 1 && this.preset.treeDensity < 0.75) continue;
       if (i % 4 === 2 && this.preset.treeDensity < 0.5) continue;
       const t = (i * TREE_SPACING) / TOTAL_ARCLENGTH;
@@ -243,15 +281,20 @@ export class Vegetation {
       const r3 = hashGrid(i, 3, 9091);
       const { p, tx, tz } = this.sampleAt(t);
       const side = i % 2 === 0 ? -1 : 1; // 左右错开
-      // 11m 是源项目的 SIDE_OFFSET：路面总半宽 6.5m，留 4.5m 给树根与路肩
-      const off = 11 + r3 * 1.5;
+      // 横向偏移：路面总半宽 6.5m，丛半深 0.119×27 ≈ 3.2m，
+      // 所以 13m 留出 3.3m 的净空，再加一点抖动免得整条路像用尺子量过。
+      const off = 13 + r3 * 2.0;
       const x = p.x + -tz * off * side;
       const z = p.z + tx * off * side;
       const y = terrain.getHeightAt(x, z);
       chunks[chunkAt(x, z)].tree.push({
         x, y, z,
-        rotY: r2 * Math.PI * 2,
-        scale: 6 + r1 * 3, // 源项目 SCALE_MIN 6 / SCALE_MAX 9
+        // 模型的长轴是本地 +X；绕 Y 转 θ 把 +X 映到 (cosθ, 0, −sinθ)，
+        // 要它等于切线 (tx, 0, tz) 就是 θ = atan2(−tz, tx)。
+        // 再叠一点随机朝向，否则整条路的树带像用直尺排的。
+        rotY: Math.atan2(-tz, tx) + (r2 - 0.5) * 0.1,
+        // 0.467 是单株高度（模型单位），×27 ≈ 12.6m 的松
+        scale: 25 + r1 * 6,
       });
     }
 
@@ -446,18 +489,82 @@ function defaultVegMaterial(): MeshStandardMaterial {
  * （`tools/glb-inspect.mjs` 能看到 `min=-32767` 这类值）。
  * 所以自己从顶点扫一遍。树 6.4 万顶点、灌木 4.2 万，只在挂载时各扫一次。
  *
- * 扫不出东西时（几何体没有 position、属性为空）返回 0，
- * 也就是"不抬也不沉"——退化到旧行为，而不是把整片植被抬到天上去。
+ * ## 这里曾经有一个让「路边从来没有树」的 bug
+ *
+ * 原写法是：
+ *
+ * ```ts
+ * for (let i = 1; i < pos.array.length; i += pos.itemSize) {
+ *   const y = pos.array[i];
+ * ```
+ *
+ * **它假定 `position` 是自己独立的一块数组。** 而 `pine.glb` / `tree.glb` /
+ * `bush.glb` 的属性是**交错**的（NORMAL + POSITION + TEXCOORD_0 共用一个
+ * buffer，stride 是 8 个 float 而不是 3）。于是这段按 3 跨步走，
+ * 会把**法线分量和 UV 坐标当成 Y 读进来**——而摄影测量模型的 UV 可以是很大的数。
+ *
+ * 现场读数（`?probe`）：树的实例 Y 在 **+949,141 米**，灌木在 **+103,334 米**，
+ * 包围球中心也在同一量级，于是**整批植被被视锥剔除，一次都不画**。
+ * 而布置表说它们在那儿、剔除统计说它们可见、19 条回归没有一条会红——
+ * 因为那些判据量的是"布了多少株"，不是"画了几次"。
+ *
+ * 改动前那株 `tree.glb` 也一样（读数 240,164 米），
+ * 所以这是**从移植第一天就在的**，不是最近才有的。
+ *
+ * ## 正确写法
+ *
+ * `pos.getY(i)` 由 three.js 自己处理交错与非交错两种布局。
+ * 另外加一道**离群剔除**：简化阶段会留下少数远离本体的顶点，
+ * 一个 −35 公里的游离点就足以毁掉"最低点"这个问法（见 `safeBottom`）。
+ *
+ * 扫不出东西时返回 0（"不抬也不沉"），而不是把整片植被抬到天上去。
  */
-function bottomOf(geo: BufferGeometry): number {
+export function bottomOf(geo: BufferGeometry): number {
   const pos = geo.getAttribute('position');
   if (!pos || pos.count === 0) return 0;
+
+  // 先按 getY 取一遍（**不能碰 pos.array**，理由见文件头）
+  const ys = new Float64Array(pos.count);
   let minY = Infinity;
-  for (let i = 1; i < pos.array.length; i += pos.itemSize) {
-    const y = pos.array[i];
+  let maxY = -Infinity;
+  let sum = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    ys[i] = y;
+    sum += y;
     if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
   }
-  return Number.isFinite(minY) ? minY : 0;
+  if (!Number.isFinite(minY)) return 0;
+
+  // 离群剔除：一个游离顶点就能毁掉绝对最小值。
+  //
+  // 判据用**中位数 + MAD**（median absolute deviation），不用 min/max 也不用 σ：
+  //   · 用 min/max 求跨度的话，离群点自己把跨度撑大，
+  //     cutoff = mean − 4×span 于是反而把离群点圈进来——自己给自己开门；
+  //   · 用 σ 同理：σ 被离群点撑大之后判据就失效。
+  // 中位数与 MAD 对少数离群点免疫，这是它被用来做这件事的原因。
+  // 实测：200 个点在 0~3.98、外加一个 −35000 的游离点，
+  // 中位数 ≈1.99、MAD ≈1.0 → cutoff ≈ −3.9 → 离群点被剔掉，底面读成 0。
+  const sorted = Float64Array.from(ys).sort();
+  const mid = pos.count >> 1;
+  const median = pos.count % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  const dev = new Float64Array(pos.count);
+  for (let i = 0; i < pos.count; i++) dev[i] = Math.abs(ys[i] - median);
+  dev.sort();
+  const mad = pos.count % 2 ? dev[mid] : (dev[mid - 1] + dev[mid]) / 2;
+  // MAD 为 0（大量重合顶点）时不剔，否则会把模型整体剔没
+  const cutoff = mad > 1e-12 ? median - 4 * 1.4826 * mad : -Infinity;
+  let lo = Infinity;
+  let kept = 0;
+  for (let i = 0; i < pos.count; i++) {
+    const y = ys[i];
+    if (y < cutoff) continue;
+    kept++;
+    if (y < lo) lo = y;
+  }
+  // 全被剔掉说明判据用错了，退回绝对最小值（返回 0 会让模型沉进地里，更糟）
+  return kept > 0 && Number.isFinite(lo) ? lo : minY;
 }
 
 function nearestChunkT(x: number, z: number): number {

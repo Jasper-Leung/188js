@@ -180,6 +180,12 @@ async function main() {
       return world.loadVegetationModels();
     })
     .then(() => {
+      // 区域散布（竹 / 现代建筑）排在植被之后、地标之前：它们是**可选**的，
+      // 拉不到只是少一片竹、少一个开发区，不该拖住整条链。
+      boot(0.9);
+      return world.loadSceneryModels();
+    })
+    .then(() => {
       boot(1);
       audio.prefetchSfx();
     })

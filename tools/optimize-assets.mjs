@@ -24,6 +24,7 @@ import { KHRDracoMeshCompression, EXTMeshoptCompression } from '@gltf-transform/
 import { weld, simplify, prune, dedup, meshopt } from '@gltf-transform/functions';
 import { MeshoptEncoder, MeshoptDecoder, MeshoptSimplifier } from 'meshoptimizer';
 import { imageSize } from './glb-image.mjs';
+import { MASS_MODEL_NAMES } from './extra-models.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -93,7 +94,7 @@ const files = existsSync(SRC_MODELS)
 // 自行车单独处理：它是玩家全程盯着看的那个物件，1.9MB 里绝大部分是
 // 贴图与冗余顶点，值得和地标一起压。单独列出来是为了能对它用更松的
 // 简化阈值——它离镜头最近，多留一点面数是划算的。
-const MASS_MODELS = new Set(['tree.glb', 'bush.glb']);
+const MASS_MODELS = MASS_MODEL_NAMES;
 // 自行车单独一档：它是玩家全程盯着看的那个物件，离镜头最近，
 // 值得比地标多留一点面数。其余按「是不是量产道具」分两档：
 //

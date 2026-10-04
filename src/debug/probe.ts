@@ -26,7 +26,7 @@
  * 所以每个位置都同时给**弧长百分比 + 米数 + 最近的驿站**，
  * 人看后者，机器用前者。
  */
-import { Box3, Vector3 } from 'three';
+import { Box3, Vector3, Matrix4 } from 'three';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, nearestArcParam, nearestStation } from '../data/route';
 import { ROADMESH, WORLD } from '../data/raw';
 import { getBasins } from '../world/basins';
@@ -220,6 +220,22 @@ function nearbyVeg(world: World, x: number, z: number, radius: number): string[]
   out.push(
     `  植被 本帧可见：块=${stats.chunksVisible} 树=${stats.trees} 灌木=${stats.bushes} draw=${stats.drawCalls}`,
   );
+  // 区域散布：竹 / 现代建筑。数量少但每一件都值钱，所以逐件报最近的那个，
+  // 让"西北到底有没有竹"这种问题不必靠截图回答。
+  {
+    const s = world.scenery.stats;
+    out.push(
+      `  散布 全图：竹=${s.bamboo} 塔楼=${s.mod_tower} 圆屋=${s.mod_house} · 本帧可见格=${s.visibleCells} draw=${s.drawCalls}`,
+    );
+    for (const child of world.scenery.group.children) {
+      const m = child as { name?: string; visible: boolean; matrixWorld?: Matrix4 };
+      if (!m.visible || !m.name) continue;
+      const p = new Vector3().setFromMatrixPosition((m.matrixWorld ?? new Matrix4()) as Matrix4);
+      const dist = Math.hypot(p.x - x, p.z - z);
+      if (dist > radius) continue;
+      out.push(`    ${m.name}  距 ${dist.toFixed(0)}m  中心 (${p.x.toFixed(0)}, ${p.z.toFixed(0)})`);
+    }
+  }
   // 逐个量最近的一株树/灌木（植被是按块实例化的，没有可枚举的实例表，
   // 所以这里量**块**而不是实例——块才是剔除的单位）
   const box = new Box3();
@@ -242,6 +258,64 @@ function nearbyVeg(world: World, x: number, z: number, radius: number): string[]
   if (near.length) {
     out.push('  最近的植被块（尺寸是**世界包围盒**，被地面切掉的部分也在里面）');
     out.push(...near.slice(0, 8));
+  }
+
+  // ---- 植被为什么没画出来 ----
+  //
+  // 这段是被一件**很旧的事**逼出来的：整条环线的行道树从来没有渲染过，
+  // 而当时 19 条回归没有一条能发现——它们量的是"布了多少株"，
+  // 不是"画了几次"。`attachMeshes()` 建出来的块**在场景里、visible=true、
+  // 包围盒也正常**，但渲染器一次都不画它。
+  //
+  // 所以这里不报"有几株"，报的是**逐项排查表**：
+  // 网格在不在 → 可见吗 → 材质是什么 → 材质有没有贴图 → 包围球有效吗。
+  out.push('  植被渲染排查');
+  for (const [label, group] of [['树', world.veg.groupTrees], ['灌木', world.veg.groupBushes]] as const) {
+    const kids = group.children as unknown as {
+      name?: string;
+      visible: boolean;
+      count: number;
+      material?: { type?: string; map?: unknown; vertexColors?: boolean };
+      geometry?: { attributes?: Record<string, unknown> };
+      boundingSphere?: { radius: number; center: { x: number; y: number; z: number } } | null;
+      computeBoundingSphere?: () => void;
+    }[];
+    const vis = kids.filter((k) => k.visible).length;
+    out.push(`    ${label}：网格 ${kids.length} 个，可见 ${vis} 个`);
+    const first = kids.find((k) => k.visible) ?? kids[0];
+    if (!first) {
+      out.push(`      ${label} 一个网格都没有 —— attachMeshes() 没跑到`);
+      continue;
+    }
+    const mat = first.material;
+    out.push(`      材质 ${mat?.type ?? '(无)'}  贴图=${mat?.map ? '有' : '**无**'}  vertexColors=${mat?.vertexColors ? '开' : '关'}`);
+    const attrs = Object.keys(first.geometry?.attributes ?? {});
+    out.push(`      几何属性 ${attrs.join('/') || '(空)'}  实例数 ${first.count}`);
+    if (first.computeBoundingSphere && first.boundingSphere === null) first.computeBoundingSphere();
+    const bs = first.boundingSphere;
+    out.push(
+      bs
+        ? `      包围球 r=${bs.radius.toFixed(1)} 中心(${bs.center.x.toFixed(0)}, ${bs.center.y.toFixed(0)}, ${bs.center.z.toFixed(0)})`
+        : '      包围球 **算不出来**',
+    );
+    // 顶点真实范围。**这一条是「树为什么不画」的关键**：
+    // 包围球可能来自 accessor 声明的 min/max（看着正常），
+    // 而顶点本身已经飞到别处——两者不一致时只有扫顶点能看出来。
+    const pos = (first.geometry as { getAttribute?: (n: string) => { count: number; getX(i: number): number; getY(i: number): number; getZ(i: number): number } | undefined })?.getAttribute?.('position');
+    if (pos) {
+      const lo = [Infinity, Infinity, Infinity];
+      const hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < pos.count; i++) {
+        const c = [pos.getX(i), pos.getY(i), pos.getZ(i)];
+        for (let k = 0; k < 3; k++) {
+          if (c[k] < lo[k]) lo[k] = c[k];
+          if (c[k] > hi[k]) hi[k] = c[k];
+        }
+      }
+      out.push(
+        `      顶点实际范围 x[${lo[0].toFixed(2)}, ${hi[0].toFixed(2)}] y[${lo[1].toFixed(2)}, ${hi[1].toFixed(2)}] z[${lo[2].toFixed(2)}, ${hi[2].toFixed(2)}]  底面 y=${lo[1].toFixed(2)}`,
+      );
+    }
   }
   return out;
 }

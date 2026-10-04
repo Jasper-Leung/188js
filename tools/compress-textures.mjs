@@ -22,6 +22,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import sharp from 'sharp';
 import { extractEmbeddedImages, replaceEmbeddedImages, imageSize } from './glb-image.mjs';
+import { SRC_EXTRA, EXTRA_MODELS, MASS_MODEL_NAMES } from './extra-models.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -38,14 +39,21 @@ const MIN_BYTES = 24 * 1024;
 
 mkdirSync(CACHE, { recursive: true });
 
-const MASS_MODELS = new Set(['tree.glb', 'bush.glb']);
+const MASS_MODELS = MASS_MODEL_NAMES;
 const jobs = existsSync(SRC_MODELS)
   ? readdirSync(SRC_MODELS)
       .filter((f) => f.toLowerCase().endsWith('.glb'))
-      .map((f) => ({ src: join(SRC_MODELS, f), name: f, maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }))
+      .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODEL_NAMES.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }))
   : [];
 if (existsSync(SRC_BIKE)) {
-  jobs.push({ src: SRC_BIKE, name: 'bike.glb', maxTex: MAX_TEX_HERO });
+  jobs.push({ src: SRC_BIKE, name: 'bike.glb', dst: 'bike.glb', maxTex: MAX_TEX_HERO });
+}
+// 外部补充资产（松树 / 竹 / 两栋现代建筑）。清单见 tools/extra-models.mjs 的文件头：
+// 松树是这一轮补上的关键——源项目那株行道树简化压不动，见那份文件的说明。
+for (const [srcName, dstName, maxTex] of EXTRA_MODELS) {
+  const p = join(SRC_EXTRA, srcName);
+  if (existsSync(p)) jobs.push({ src: p, name: dstName, dst: dstName, maxTex });
+  else console.warn(`  ! 补充资产缺失，跳过：${p}`);
 }
 
 let inBytes = 0;
@@ -91,7 +99,7 @@ for (const job of jobs) {
   }
 
   const glb = replaceEmbeddedImages(raw, replacements);
-  writeFileSync(join(CACHE, job.name), glb);
+  writeFileSync(join(CACHE, job.dst ?? job.name), glb);
   inBytes += raw.length;
   outBytes += glb.length;
 }
