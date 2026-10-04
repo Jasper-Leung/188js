@@ -214,6 +214,8 @@
     "stele_2_line": "你替所有人记住回家的路。",
     "stele_3_line": "编号 188。这条路认得每一个走过的人。",
     "stele_4_line": "字被人凿平了。只剩半个 188。",
+    "home_name": "家",
+    "home_pass_line": "到家了。灯还亮着。",
     "mg_success": "成了",
     "mg_success_hint": "这一刻收下了 · 驿站上的圆点亮了一格",
     "mg_timeout": "这一件超时了",
@@ -265,7 +267,9 @@
     "chapter2_unlocked": "第二章 · 已解锁",
     "touch_home_button": "回到十八驿",
     "synthesis_home_hint": "第一章完成了。收下这份礼物，或者再骑一圈。",
-    "tier_ground": "地面细节"
+    "tier_ground": "地面细节",
+    "fatal_title": "启动失败",
+    "fatal_note": "这一屏是故意留下的——把上面那行字连同浏览器控制台一起反馈，就能定位到具体哪一步。"
   },
   "en": {
     "game_title": "Gift No.188",
@@ -482,6 +486,8 @@
     "stele_2_line": "You keep the way home for everyone.",
     "stele_3_line": "Marked No.188. This road knows everyone who has walked it.",
     "stele_4_line": "The letters have been chiselled away. Half a 188 is all that's left.",
+    "home_name": "Home",
+    "home_pass_line": "Home. The lamp is still on.",
     "mg_success": "Done",
     "mg_success_hint": "Taken. One more light on the station.",
     "mg_timeout": "Out of time",
@@ -533,6 +539,8 @@
     "chapter2_unlocked": "Chapter Two - Unlocked",
     "touch_home_button": "Return to the Post",
     "synthesis_home_hint": "Chapter one is done. Take the gift, or ride one more lap.",
-    "tier_ground": "Ground detail"
+    "tier_ground": "Ground detail",
+    "fatal_title": "Failed to start",
+    "fatal_note": "This screen is here on purpose — send the line above along with your browser console and we can pin down which step failed."
   }
 }

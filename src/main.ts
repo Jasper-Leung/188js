@@ -980,21 +980,40 @@ function escapeHtml(s: string): string {
   );
 }
 
+/**
+ * 「这台浏览器跑不动」。
+ *
+ * 走 `t()` 而不是写死中文，理由很实际：**这一屏恰恰是给英文玩家看的**——
+ * 跑不动 WebGL 2 的机器里，英文用户占比不低（老机器、旧系统、外籍同事的笔电），
+ * 而写死中文的话他们看到的是一整屏读不懂的字，只能干瞪眼。
+ * 文案本身（`unsupported_title/body/fix`）在表里中英都是齐的。
+ *
+ * `escapeHtml` 仍然要套在能力报告上：那是一段 `JSON.stringify`，里面有 `"`。
+ */
 function showUnsupported(c: Capability) {
   bootEl.innerHTML = `<div style="padding:2.4em;max-width:34em;color:#2a2622;background:#e8e0cd;font:15px/1.9 system-ui,sans-serif">
-    <h1 style="font-weight:500;margin:0 0 .8em">这台机器跑不动</h1>
-    <p style="margin:0 0 1em">这个游戏需要 <b>WebGL 2</b>，而当前浏览器没有提供。</p>
-    <p style="margin:0 0 1em;color:#6b6156">如果你是用远程桌面或虚拟机，请把「使用硬件加速」打开再试一次。</p>
+    <h1 style="font-weight:500;margin:0 0 .8em">${escapeHtml(t('unsupported_title'))}</h1>
+    <p style="margin:0 0 1em">${escapeHtml(t('unsupported_body'))}</p>
+    <p style="margin:0 0 1em;color:#6b6156">${escapeHtml(t('unsupported_fix'))}</p>
     <pre style="margin:1.4em 0 0;padding:1em;background:#ddd4bd;font-size:12px;white-space:pre-wrap">${escapeHtml(JSON.stringify(c, null, 2))}</pre>
   </div>`;
 }
 
+/**
+ * 致命错误页。
+ *
+ * **故意留白屏之外的这一屏**：模块自己出错时，页面上只剩一句「启动失败」的话，
+ * 玩家没法把它变成一条可提交的信息。而这一屏连同 `window.error` 监听
+ * （见文件末尾）是这个项目里唯一能把「哪一步炸了」带出去的地方。
+ *
+ * 文案同样走 `t()`：崩溃不分语言。
+ */
 function showFatal(msg: string, err: unknown) {
   console.error('[gift188]', msg, err);
   bootEl.innerHTML = `<div style="padding:2.4em;max-width:34em;color:#2a2622;background:#e8e0cd;font:15px/1.9 system-ui,sans-serif">
-    <h1 style="font-weight:500;margin:0 0 .8em">启动失败</h1>
+    <h1 style="font-weight:500;margin:0 0 .8em">${escapeHtml(t('fatal_title'))}</h1>
     <p style="margin:0 0 1em">${escapeHtml(msg)}</p>
-    <p style="margin:0;color:#6b6156">这一屏是故意留下的——把上面那行字连同浏览器控制台一起反馈，就能定位到具体哪一步。</p>
+    <p style="margin:0;color:#6b6156">${escapeHtml(t('fatal_note'))}</p>
   </div>`;
 }
 

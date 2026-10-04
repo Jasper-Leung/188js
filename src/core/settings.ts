@@ -73,7 +73,12 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     groundDetail: 0,
     groundDetailRadius: 26,
     treeRadius: 52,
-    treeDensity: 0.35,
+    // **1 而不是 0.35。** 降档砍的是**半径**（52m，看不见的那 94% 已经被剔掉了），
+    // 株数是第二刀：25m 株距 × 0.35 密度 = 每 100m 一棵树，
+    // 实机截屏上这条路读起来就是"高速公路"，而玩家开局 60m 内只剩 2 株。
+    // 半径已经按块剔掉了远处，密度再砍一次砍的是**近处**——
+    // 也就是玩家唯一看得见的那部分。见 verify_veg_density。
+    treeDensity: 1,
     bushRadius: 40,
     fogNear: 26,
     fogFar: 130,
@@ -92,7 +97,8 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     groundDetail: 1,
     groundDetailRadius: 34,
     treeRadius: 92,
-    treeDensity: 0.75,
+    // 同低档：半径是第一刀，株数不再挨第二刀。见 verify_veg_density。
+    treeDensity: 1,
     bushRadius: 80,
     fogNear: 45,
     fogFar: 260,

@@ -15,7 +15,8 @@ import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from 
 import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
 import { stickVector, keyToVec } from '../core/stick';
-import { groundOffsetFor } from '../world/vegetation';
+import { decideTouch } from '../core/touch';
+import { groundOffsetFor, Vegetation } from '../world/vegetation';
 import { Box3 } from 'three';
 import { Stations } from '../world/stations';
 import { Terrain } from '../world/terrain';
@@ -25,7 +26,7 @@ import { canRide, isInWorld } from '../game/phase';
 import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
 import { PRESETS, clampTier } from '../core/settings';
-import { TIER_LOW, TIER_MEDIUM, TIER_HIGH } from '../core/capability';
+import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
 
 export interface Check {
   name: string;
@@ -837,7 +838,63 @@ check('verify_touch', () => {
   }
   if (speed <= 0) probs.push('推着摇杆三十帧，车速仍然是 0');
 
-  return expect(probs.length === 0, probs.length ? probs.join('；') : '摇杆符号约定正确，死区/饱和/键盘一致', asserts);
+  // ---- 触屏判定本身 ----
+  //
+  // 这一族是**在开发机上真的踩到过的**：窗口 639×907（桌面浏览器侧栏分屏），
+  // `min(短边) < 900` 为真，于是一个用鼠标的玩家被挂上了摇杆，
+  // 而摇杆一直吃掉左下角一大片点击区。
+  //
+  // 症状之所以要钉住：它不报错、不白屏，画面看着还挺像手机版，
+  // 键盘玩家只觉得"左下角有个推不动的东西压着小地图"。
+  const desktop = { coarse: false, points: 0, fine: true, shortEdge: 639, touched: false };
+
+  // 1. 窄窗口 + 鼠标 → 不挂。这条在修复前是红的（decideTouch 不看 fine）。
+  asserts++;
+  if (decideTouch(desktop)) probs.push(`窄桌面窗口（短边 ${desktop.shortEdge}px，有鼠标）被误判成触屏`);
+
+  // 2. 1440 笔记本贴靠半屏是同一个坑，也是最常见的触发姿势
+  asserts++;
+  if (decideTouch({ ...desktop, shortEdge: 720 })) probs.push('半屏窗口（720px）被误判成触屏');
+
+  // 3. 普通桌面窗口 → 不挂
+  asserts++;
+  if (decideTouch({ ...desktop, shortEdge: 1080 })) probs.push('普通桌面窗口被误判成触屏');
+
+  // 4. 手机竖屏 → 挂。coarse 为真，与 shortEdge 无关（横过来也照样挂）。
+  asserts++;
+  if (!decideTouch({ coarse: true, points: 5, fine: false, shortEdge: 390, touched: false })) {
+    probs.push('手机竖屏没挂触屏控件');
+  }
+  asserts++;
+  if (!decideTouch({ coarse: true, points: 5, fine: false, shortEdge: 844, touched: false })) {
+    probs.push('手机横屏没挂触屏控件（coarse 与短边方向无关）');
+  }
+
+  // 5. 手机开「桌面版网站」：coarse 变 false，靠触点数接住
+  asserts++;
+  if (!decideTouch({ coarse: false, points: 5, fine: false, shortEdge: 360, touched: false })) {
+    probs.push('桌面版网站的安卓 Chrome 没挂触屏控件');
+  }
+
+  // 6. 不报 pointer media query 的安卓 WebView：四个信号里只剩 shortEdge 可用。
+  //    这正是第 3 条信号**唯一**存在的理由，所以 fine 取不到值按 false 时它必须仍然生效。
+  asserts++;
+  if (!decideTouch({ coarse: false, points: 0, fine: false, shortEdge: 480, touched: false })) {
+    probs.push('不报 pointer 查询的 WebView 没挂触屏控件');
+  }
+
+  // 7. 真按过一次屏 → 永远挂（最强的信号，压过一切）
+  asserts++;
+  if (!decideTouch({ ...desktop, touched: true })) probs.push('已经触摸过屏却没挂触屏控件');
+
+  // 8. 触屏笔记本：主指针是鼠标（fine），但有触点 → 挂。
+  //    这条保证修复没有把「混合设备」一起误伤。
+  asserts++;
+  if (!decideTouch({ coarse: false, points: 10, fine: true, shortEdge: 800, touched: false })) {
+    probs.push('触屏笔记本被误判成纯桌面');
+  }
+
+  return expect(probs.length === 0, probs.length ? probs.join('；') : '摇杆符号约定正确，死区/饱和/键盘一致；触屏判定不吃窄窗口', asserts);
 });
 
 // ---------------------------------------------------------------- 植被落地
@@ -882,6 +939,95 @@ check('verify_veg_ground', () => {
     probs.length ? probs.join('；') : '底面落地，偏移随缩放，方向为正',
     asserts,
   );
+});
+
+// ---------------------------------------------------------------- 植被密度
+/**
+ * 路**两边必须有树**。
+ *
+ * ## 这条为什么存在
+ *
+ * 实机截屏里出现过的样子：一条光秃秃的柏油路，两侧是纯绿色山坡，
+ * 一棵树都没有——而那是**高档**。数出来才发现：
+ *
+ *   | 档位 | 全环线树 | 灌木 | 起点 60m 内 |
+ *   |---|---|---|---|
+ *   | 低 | 13 | 37 | 2 / 2 |
+ *   | 中 | 49 | 111 | 6 / 11 |
+ *   | 高 | 49 | 111 | 6 / 11 |
+ *
+ * 1228.8m 的环线一共 49 棵树（25m 株距、左右错开 = 每侧 50m 一株）。
+ * 真实的乡村公路行道树是**每侧 15~25m 一株**，
+ * 也就是说这里的密度只有真实值的三分之一，而截图上读起来就是"高速公路"。
+ *
+ * 根因是一株树 **35,461 个三角面**（`tools/glb-inspect.mjs` 量得到）：
+ * 49 株就是 174 万面，再多种必然掉帧，于是作者选了少种。
+ * 而 `tools/optimize-assets.mjs` 里那张给"量产道具"单独定预算的
+ * `MASS_MODELS` 表**声明了从没被用过**，树和灌木一直按地标的阈值在简化——
+ * 接上之后树 51K→32K、灌木 35K→17K，但简化器在 32,924 面撞到硬底
+ * （UV/法线接缝太多，几乎没有一条边可以塌缩），**这条路已经到顶**。
+ *
+ * 所以这里钉的不是"株距该是多少"（那是作者的取舍），
+ * 而是**下限**：任何一档都不许退回到"起点 60m 看不见树"，
+ * 而那正是这个 bug 最开始的样子。
+ */
+check('verify_veg_density', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const terrain = new Terrain();
+  // `Placement` 没有导出（它是 vegetation.ts 的模块内类型），
+  // 这里只用到 x/z 两个字段，所以就地写结构类型而不是把它导出——
+  // 为了让一条断言能跑就把模块的内部形状变成公共 API，不划算。
+  type P = { x: number; z: number };
+  const counts: { tier: number; tree: number; bush: number; nearTree: number; nearBush: number }[] = [];
+  for (let tier = 0 as Tier; tier <= 2; tier = (tier + 1) as Tier) {
+    const veg = new Vegetation(PRESETS[tier], terrain);
+    const chunks = (veg as unknown as { chunks: { tree: P[]; bush: P[] }[] }).chunks;
+    let tree = 0;
+    let bush = 0;
+    let nearTree = 0;
+    let nearBush = 0;
+    const s0 = STATIONS[0];
+    for (const c of chunks) {
+      tree += c.tree.length;
+      bush += c.bush.length;
+      for (const p of c.tree) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearTree++;
+      for (const p of c.bush) if (Math.hypot(p.x - s0.mapX, p.z - s0.mapZ) < 60) nearBush++;
+    }
+    counts.push({ tier, tree, bush, nearTree, nearBush });
+  }
+
+  // 1. 每档全环线至少 45 株。低于这个数，1228m 的路就是"两旁没东西"，
+  //    而玩家一进世界看到的就是前 60m。
+  asserts++;
+  for (const c of counts) {
+    if (c.tree < 45) probs.push(`第 ${c.tier} 档全环线只有 ${c.tree} 株树`);
+  }
+
+  // 2. 起点 60m 内至少 5 株 —— 开局第一眼。
+  asserts++;
+  for (const c of counts) {
+    if (c.nearTree < 5) probs.push(`第 ${c.tier} 档起点 60m 内只有 ${c.nearTree} 株树`);
+  }
+
+  // 3. 灌木同理，但门槛低一档：它是补空地的，不是主景。
+  asserts++;
+  for (const c of counts) {
+    if (c.bush < 80) probs.push(`第 ${c.tier} 档全环线只有 ${c.bush} 丛灌木`);
+  }
+
+  // 4. 密度不得再随档位断崖式下跌：低档砍的是**半径**，不是株数。
+  //    半径已经能把看不见的那些块剔掉，再砍株数就是两次砍同一刀。
+  asserts++;
+  const low = counts[0];
+  const high = counts[2];
+  if (low.tree * 2 < high.tree) {
+    probs.push(`低档 ${low.tree} 株不足高档 ${high.tree} 株的一半：密度与半径被重复扣了一次`);
+  }
+
+  const summary = counts.map((c) => `档${c.tier} ${c.tree}树/${c.bush}灌木/起点${c.nearTree}`).join(' · ');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
 // ---------------------------------------------------------------- 章节

@@ -16,6 +16,7 @@ import { writeFileSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -82,5 +83,18 @@ if (noAssert > 0) {
 }
 console.log('');
 
+// ---- 文案死字 ----
+//
+// 单拎出来而不是塞进 entry.ts：它要读源码文件，而 entry 是给 esbuild 打进
+// 单文件的，那边没有 fs（`scanDead()` 在这里是当库 import 的）。
+//
+// 它也是唯一一条**以「没发生过的问题」为判据**的检查：白名单之外的死字必须为零。
+const deadRes = spawnSync(process.execPath, [join(__dirname, 'i18n-dead.mjs')], {
+  encoding: 'utf8',
+});
+if (deadRes.stdout) process.stdout.write(deadRes.stdout);
+if (deadRes.stderr) process.stderr.write(deadRes.stderr);
+const deadFail = deadRes.status !== 0;
+
 // 退出码只作为"CI 能不能红"的信号，**不作为通过与否的判据**
-process.exit(fail > 0 || noAssert > 0 ? 1 : 0);
+process.exit(fail > 0 || noAssert > 0 || deadFail ? 1 : 0);

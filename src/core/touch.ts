@@ -18,12 +18,33 @@
  * 四个信号取或，任一为真就当触屏：
  *   1. `pointer: coarse` —— 真的没有精细指针
  *   2. `navigator.maxTouchPoints > 0` —— 有触点就认为用户可能用手指
- *   3. 视口短边小于 900 CSS px —— 手机/小平板横屏
+ *   3. 视口短边小于 900 CSS px **且没有精确指针** —— 见下面「小屏这一条踩过坑」
  *   4. 曾经发生过一次 `touchstart` —— **最强的一条**：手指真的按过屏
  *
  * 第 4 条是关键补充：它在混合设备上最准，而且不会误伤纯桌面
  * （纯桌面前 30 秒没人碰屏，控件不挂，占不掉左下角的点击区）。
  * 一旦触发就永久记住（这次会话内），不因为旋转或分屏又翻回去。
+ *
+ * ## 小屏这一条踩过坑：窄窗口 ≠ 小设备
+ *
+ * 第 3 条原本写成 `min(innerWidth, innerHeight) < 900`，想抓的是
+ * 「手机 / 小平板横屏」。但**它分不出「窄的窗口」和「小的设备」**：
+ * 桌面浏览器窗口贴靠半屏（1440 笔记本对半 = 720×1440）、侧栏分屏、
+ * 浏览器缩放到 130%、Windows 贴靠布局——短边统统掉到 900 以下，
+ * 于是一个**用鼠标的桌面玩家**被挂上一个他根本用不了的摇杆，
+ * 而摇杆占住左下四分之一屏。
+ *
+ * 症状有欺骗性：界面「多了一套控件」，画面看着像手机版，
+ * 但键盘玩家会发现左下角有个永远推不动的东西盖住了小地图。
+ *
+ * 判据因此加一道 `any-pointer: fine`。这条不误伤它本来要抓的那些：
+ *   · 手机竖屏 —— 第 1 条（coarse）本来就为真，摇杆照挂；
+ *   · 手机开「桌面版网站」—— coarse 变 false，但第 2 条
+ *     （maxTouchPoints > 0）接住；
+ *   · 不报 pointer media query 的安卓 WebView —— fine 取不到值按 false，
+ *     第 3 条仍然成立，而那本来就是它唯一能生效的理由。
+ *
+ * 也就是说：**只有「既小、又确实摸不到鼠标」才算小屏设备**。
  *
  * ## 还有一层：手动开关
  *
@@ -77,16 +98,67 @@ function smallViewport(): boolean {
   return Math.min(window.innerWidth, window.innerHeight) < 900;
 }
 
+/**
+ * 有没有精确指针（鼠标 / 触控板）。
+ *
+ * 取不到值一律按 false —— 即「当作没有鼠标」，于是小屏信号照常生效。
+ * 这个默认值是故意的：它在**没有精确指针的设备**上才是对的，而取不到值的
+ * 设备（老 WebView）本来就没有鼠标可按。
+ */
+function hasFinePointer(): boolean {
+  try {
+    return matchMedia('(any-pointer: fine)').matches;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 触屏判定的**纯逻辑部分**。
+ *
+ * 单独抽出来是因为上面那条「窄窗口会误判」的坑是**在这台机器上真的踩到过的**
+ * ——而原来 `touchEnabled()` 直接读 `matchMedia` 与 `navigator`，
+ * 无头回归里根本没有 `window`，钉不住它。
+ *
+ * 抽成纯函数后 `verify_touch` 才能对它下断言（见 `entry.ts` 里的
+ * 「窄桌面窗口不该挂摇杆」）。
+ */
+export function decideTouch(s: {
+  /** `pointer: coarse` */
+  coarse: boolean;
+  /** `navigator.maxTouchPoints` */
+  points: number;
+  /** `any-pointer: fine` */
+  fine: boolean;
+  /** `min(innerWidth, innerHeight)` */
+  shortEdge: number;
+  /** 本次会话是否真的发生过一次 `touchstart` */
+  touched: boolean;
+}): boolean {
+  if (s.touched) return true;
+  if (s.coarse) return true;
+  if (s.points > 0) return true;
+  // 小屏**且没有鼠标**：窄窗口不是小设备，见文件头「小屏这一条踩过坑」
+  return s.shortEdge < 900 && !s.fine;
+}
+
 /** 当前是否应当挂触屏控件。 */
 export function touchEnabled(): boolean {
   if (mode === 'on') return true;
   if (mode === 'off') return false;
-  return touched || hasCoarsePointer() || maxTouchPoints() > 0 || smallViewport();
+  return decideTouch({
+    coarse: hasCoarsePointer(),
+    points: maxTouchPoints(),
+    fine: hasFinePointer(),
+    shortEdge: typeof window === 'undefined' ? 0 : Math.min(window.innerWidth, window.innerHeight),
+    touched,
+  });
 }
 
 /** 判定用的四个信号各是什么。设置面板拿它把理由写给玩家看。 */
-export function touchSignals(): { coarse: boolean; points: number; small: boolean; touched: boolean } {
-  return { coarse: hasCoarsePointer(), points: maxTouchPoints(), small: smallViewport(), touched };
+export function touchSignals(): { coarse: boolean; points: number; fine: boolean; small: boolean; touched: boolean } {
+  const fine = hasFinePointer();
+  return { coarse: hasCoarsePointer(), points: maxTouchPoints(), fine, small: smallViewport() && !fine, touched };
 }
 
 export function touchMode(): TouchMode {

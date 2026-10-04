@@ -27,6 +27,9 @@ const ADD = {
     chapter2_unlocked: '第二章 · 已解锁',
     touch_home_button: '回到十八驿',
     synthesis_home_hint: '第一章完成了。收下这份礼物，或者再骑一圈。',
+    fatal_title: '启动失败',
+    fatal_note:
+      '这一屏是故意留下的——把上面那行字连同浏览器控制台一起反馈，就能定位到具体哪一步。',
   },
   en: {
     chapter_label_1: 'Chapter One',
@@ -43,6 +46,9 @@ const ADD = {
     chapter2_unlocked: 'Chapter Two - Unlocked',
     touch_home_button: 'Return to the Post',
     synthesis_home_hint: 'Chapter one is done. Take the gift, or ride one more lap.',
+    fatal_title: 'Failed to start',
+    fatal_note:
+      'This screen is here on purpose — send the line above along with your browser console and we can pin down which step failed.',
   },
 };
 
