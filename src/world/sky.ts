@@ -53,6 +53,33 @@ float hash13(vec3 p) {
   return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
 }
 
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+float vnoise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x),
+    mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x),
+    u.y);
+}
+
+float fbmSky(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  v += a * vnoise2(p);
+  p *= 2.03; a *= 0.5;
+  v += a * vnoise2(p);
+  p *= 2.01; a *= 0.5;
+  v += a * vnoise2(p);
+  return v;
+}
+
 void main() {
   float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
   vec3 zenith = mix(zenith_day, zenith_dusk, dusk);
@@ -60,6 +87,38 @@ void main() {
   // 幂次把地平线附近的过渡拉长，天空才不会在头顶有一道明显的色带
   float t = pow(h, 0.55);
   vec3 col = mix(horizon, zenith, t);
+
+  /**
+   * 程序化云带。
+   *
+   * 没有云的天空是**渐变**，而渐变读作"渲染"；真实照片里的天空几乎总是
+   * 有云的——哪怕万里无云，地平线上方也有一条积云的边。
+   * 这是"像不像照片"里性价比最高的一笔：它不加任何几何、不加任何 draw call，
+   * 只在已有的那个全屏三角形里多做两次 fbm。
+   *
+   * 投影方式：把视线方向投到 y=1 的平面上取 uv。天空球是 normalize(position)，
+   * 所以 vDir 就是单位方向，vDir.xz / vDir.y 就是那个交点。
+   * 代价是地平线附近 uv 会爆掉——所以同时按 vDir.y 做一道软遮罩把噪声压下去。
+   */
+  if (vDir.y > 0.02) {
+    vec2 cuv = vDir.xz / vDir.y;
+    // 压扁：把 uv 沿 y 方向拉长，云层才是"横铺"的而不是正对着看的一团
+    vec2 c2 = vec2(cuv.x * 0.55, cuv.y * 0.16);
+    float n = fbmSky(c2 * 0.9 + vec2(0.0, 0.0));
+    float n2 = fbmSky(c2 * 2.7 + vec2(5.2, 1.3));
+    // 积云：只有高处才成形（n 的阈值随高度变化）
+    float cover = mix(0.72, 0.42, smoothstep(0.02, 0.45, vDir.y));
+    float cloud = smoothstep(cover, cover + 0.20, n * 0.7 + n2 * 0.3);
+    // 地平线上淡出，免得看见噪声被投影拉成条纹
+    cloud *= smoothstep(0.02, 0.20, vDir.y);
+    // 云底偏灰、云顶偏亮——这是云看起来"厚"而不是"一层纱"的唯一原因
+    float lit = smoothstep(cover, cover + 0.32, n * 0.7 + n2 * 0.3);
+    vec3 cloudCol = mix(horizon * 0.94, horizon * 1.10, lit);
+    cloudCol = mix(cloudCol, zenith * 1.05, 0.25);
+    // 黄昏时云底染色，日落那一层红就是这么来的
+    cloudCol = mix(cloudCol, mix(vec3(0.95, 0.62, 0.40), cloudCol, 0.45), dusk);
+    col = mix(col, cloudCol, cloud * (0.62 - 0.18 * dusk));
+  }
 
   // 日轮与它的光晕。sun_dir 指向太阳本身。
   float sd = max(dot(normalize(vDir), normalize(sun_dir)), 0.0);

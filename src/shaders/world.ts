@@ -66,6 +66,17 @@ export interface PatchHooks {
   normalExpr?: string;
   roughnessExpr?: string;
   metalnessExpr?: string;
+  /**
+   * 在 `#include <fog_fragment>` **之前**插一段。
+   *
+   * 位置很要紧：`fog_fragment` 自己会 `gl_FragColor.rgb = mix(色, fogColor, fogFactor)`，
+   * 所以任何"按距离做别的处理"的代码都必须插在它**之前**，
+   * 插在它之后就会被雾直接覆盖掉——而覆盖掉这件事不报错，
+   * 只是那段代码看起来完全没生效。
+   *
+   * 段内可以读到 three 声明好的 `fogColor` 与 `vFogDepth`/`vFogDepth varying`。
+   */
+  fogHint?: string;
 }
 
 export function patchStandard(
@@ -82,7 +93,7 @@ export function patchStandard(
         .replace('#include <common>', `#include <common>\n${NOISE_GLSL}\n${hooks.vertexHead ?? ''}`)
         .replace('#include <begin_vertex>', `#include <begin_vertex>\n${hooks.vertexBody ?? ''}`);
     }
-    if (hooks.fragmentHead || hooks.fragmentBody || hooks.colorExpr) {
+    if (hooks.fragmentHead || hooks.fragmentBody || hooks.colorExpr || hooks.fogHint) {
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>\n${NOISE_GLSL}\n${hooks.fragmentHead ?? ''}`)
         .replace(
@@ -109,6 +120,14 @@ ${hooks.colorExpr ?? ''}`,
         shader.fragmentShader = shader.fragmentShader.replace(
           '#include <normal_fragment_maps>',
           `#include <normal_fragment_maps>\n${hooks.normalExpr}`,
+        );
+      }
+      if (hooks.fogHint) {
+        // 必须在 fog_fragment 之前：那段自己会把颜色 mix 向雾色，
+        // 插在它后面就等于什么都没做（而且不报错）。
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <fog_fragment>',
+          `${hooks.fogHint}\n#include <fog_fragment>`,
         );
       }
     }
@@ -141,21 +160,74 @@ export const TERRAIN_PATCH: PatchHooks = {
     uniform float detail_fade_far;
     uniform float normal_strength;
     uniform float ao_strength;
+    uniform float ground_detail;
+    uniform float ground_detail_radius;
   `,
   fragmentBody: /* glsl */ `
     vec2 wp = v_world.xz;
 
     // 底色 → 低频大色块
+    // 对比度压到 0.45（原来 0.75）：真实的草田色块变化是"看得出但不抢眼"，
+    // 而 0.75 叠上去之后读成地面上一摊摊深色的水渍。
     float mottle = fbm2(wp * mottle_scale);
-    vec3 gcol = mix(ground_color, ground_dark, smoothstep(0.40, 0.95, mottle) * 0.75);
+    vec3 gcol = mix(ground_color, ground_dark, smoothstep(0.40, 0.95, mottle) * 0.45);
 
     // 中频草丛斑驳：偏黄的一层，是"草原有变化"的主要来源
     float clump = fbm3(wp * clump_scale);
-    gcol = mix(gcol, ground_dry, smoothstep(0.50, 0.95, clump) * 0.45);
+    gcol = mix(gcol, ground_dry, smoothstep(0.52, 0.95, clump) * 0.38);
 
     // 高频麻点，只在近处看得见
     float speck = fbm2(wp * 6.0);
     gcol = mix(gcol, ground_dark, smoothstep(0.55, 0.95, speck) * speckle_strength);
+
+    /**
+     * 近场草丛质感 —— 替代被移除的草皮几何体。
+     *
+     * 为什么要做进地形而不是做成卡片：草这个信号**只在近距离成立**。
+     * 12cm 宽的叶片在 30m 外小于一个像素，无论怎么排都只会混成一块颜色；
+     * 而卡片在 5m 内又会露出"一片立着的绿矩形"的底。
+     * 两个距离下都不成立，正是它被移除的原因。
+     *
+     * 换成地表纹理之后，两个距离都对：近处看到的是**成簇的短纹**
+     * （有方向、有疏密，读作被踩过的草），远处自然融进大色块。
+     * 代价是 0 个三角形、0 次 alphaTest。
+     */
+    if (ground_detail > 0.5) {
+      // 随距离淡出：半径外只剩大色块，不去硬切，避免看见一圈边界
+      float gd = 1.0 - smoothstep(ground_detail_radius * 0.45, ground_detail_radius, v_viewDist);
+      if (gd > 0.01) {
+        // 草丛斑块：中频，疏密不均
+        float tuft = fbm3(wp * 2.6 + vec2(0.0, 0.0));
+        // 方向性短纹：把坐标沿一个固定角度拉长，读作倒伏的草茎
+        float ca = 0.86, sa = 0.51;
+        vec2 rot = vec2(wp.x * ca - wp.y * sa, wp.x * sa + wp.y * ca);
+        float blade = fbm2(vec2(rot.x * 9.0, rot.y * 2.2));
+        // 草丛边界：只在斑块里长，不是均匀撒
+        float inTuft = smoothstep(0.44, 0.62, tuft);
+        gcol = mix(gcol, gcol * 0.82, inTuft * smoothstep(0.52, 0.78, blade) * 0.8 * gd);
+        // 逆光的草尖：斑块边缘提亮一点，这是"草"最强的单个线索
+        gcol = mix(gcol, gcol * 1.14, inTuft * smoothstep(0.40, 0.52, blade) * (1.0 - smoothstep(0.52, 0.66, blade)) * gd);
+        if (ground_detail > 1.5) {
+          // 高档再加一层更细的碎草，抹掉低档能看出的重复
+          float fine = fbm2(vec2(rot.x * 26.0, rot.y * 6.5));
+          gcol = mix(gcol, gcol * 0.88, smoothstep(0.55, 0.85, fine) * inTuft * 0.5 * gd);
+        }
+      }
+    }
+
+    /**
+     * 去饱和 + 提暖 —— 让它读成"照片里的草"而不是"游戏里的绿"。
+     *
+     * 现实的草地饱和度比直觉低不少：真实照片里的草大多在 sRGB (0.30, 0.36, 0.20)
+     * 附近，而且带着土黄的偏色。屏幕上那种"鲜绿"是渲染里把
+     * 色相拉到 120° 饱和度拉满的结果，一眼就假。
+     *
+     * 做法是往亮度方向拉 28%（降饱和）再往暖色偏一点，
+     * 大尺度色块变化保留——真实的草田本来就是一块一块的。
+     */
+    float lum = dot(gcol, vec3(0.2126, 0.7152, 0.0722));
+    gcol = mix(gcol, vec3(lum), 0.28);
+    gcol *= vec3(1.04, 1.0, 0.93);
 
     // 顶点明暗（0.82~1.0）。在 Godot 里是 COLOR.rgb，
     // 这里对应 three 的 color 属性，标准材质的 vColor 已经乘进 diffuseColor。
@@ -163,7 +235,38 @@ export const TERRAIN_PATCH: PatchHooks = {
     float terrainAO = mix(1.0, 1.0 - 0.45 * crevice, ao_strength);
   `,
   colorExpr: /* glsl */ `
-    diffuseColor.rgb *= gcol;
+    diffuseColor.rgb *= gcol * terrainAO;
+  `,
+  /**
+   * 大气透视 —— 让远山退进空气里。
+   *
+   * 为什么这一段值钱：`fog` 是**线性**混向雾色的，而现实里的空气散射
+   * 跟距离不是线性的——它先慢后快（近处几乎透明，越远越糊）。
+   * 而且**远山不只变糊，还变蓝、变淡**（散射把短波打散，蓝色被留在天上）。
+   * 一条线性雾做不出这个，所以远处的山在渲染里永远是"同样清晰的绿"，
+   * 一眼就出戏。
+   *
+   * 做法是在 `fog_fragment` 之前叠一层**距离平方**的雾，并把它偏向天色。
+   * 平方项让近处几乎不动（0~30m 差别不到 0.06），远处迅速吃掉对比度。
+   * 黄昏那一档用 `fog_fragment` 自己算出来的雾色来偏色，不再另取常量。
+   */
+  fogHint: /* glsl */ `
+    {
+      float dcam = v_viewDist;
+      // 8e-6：100m 处 7.7%、200m 处 27%、400m 处 72%。
+      // （第一版写的是 2.2e-6，注释却说"100m 给 0.22"——
+      //  实际只有 0.022，比自己写的意图弱十倍，近景完全看不出效果。
+      //  这一类"注释与代码对不上"的错只有把两处都写下来才抓得到。）
+      //
+      // 为什么不一步到位：linear fog 已经在 260m（高档 400m）处起作用了，
+      // 这一层叠在上面，所以要留出余量——直接上 0.22/100m 会把中景洗成一片灰。
+      float aerial = 1.0 - exp(-dcam * dcam * 0.000008);
+      float lum2 = dot(diffuseColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+      // hazeCol 用 linear fog 的结果色：白天是雾色，黄昏是暗红，两档都对
+      vec3 hazeCol = fogColor * 1.02;
+      vec3 des = mix(vec3(lum2), hazeCol, 0.55);
+      diffuseColor.rgb = mix(diffuseColor.rgb, des, clamp(aerial, 0.0, 1.0));
+    }
   `,
   normalExpr: /* glsl */ `
     // 法线扰动必须随距离淡出，而且系数要比路面小一个量级。

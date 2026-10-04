@@ -131,7 +131,7 @@ export class World {
     };
 
     // 顺序有讲究：Terrain 构造里会 planBasins()，水面与地形都依赖那三只碗
-    this.terrain = new Terrain();
+    this.terrain = new Terrain(preset);
     step('地形');
     this.road = new Road(this.terrain);
     step('路面');
@@ -201,7 +201,6 @@ export class World {
 
     const vis = game.getVisibilityFactor();
     this.veg.update(this.ride.pos.x, this.ride.pos.z, vis);
-    this.veg.tickWind(this.time);
 
     // 地标渐进加载：每 0.4s 放一座。一次性涌进来会在弱机上造成明显长卡顿。
     this.stationModelTimer += dt;
@@ -485,6 +484,7 @@ export class World {
     this.renderer.applyPreset(preset);
     this.sky.setShadowsEnabled(preset.shadowMapSize > 0);
     this.veg.setPreset(preset);
+    this.terrain.setPreset(preset);
     this.veg.invalidate();
     this.stations.setPreset(preset);
     this.water.setDetail(preset.waterDetail);

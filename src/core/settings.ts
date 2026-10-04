@@ -22,10 +22,22 @@ export interface QualityPreset {
   renderScale: number;
   /** devicePixelRatio 的上限。0.6 缩放 + DPR 2 是双重浪费 */
   pixelRatioCap: number;
-  /** 草皮铺设半径（米） */
-  grassRadius: number;
-  /** 草皮密度系数，作用在每格株数上 */
-  grassDensity: number;
+  /**
+   * 地面细节档：近处草丛质感的强度。0 = 关。
+   *
+   * **它替代了原来的 `grassEnabled` / `grassRadius` / `grassDensity`。**
+   * 草皮是几何体（有交叉卡片、有 alphaTest、有剔除半径、有风摆），
+   * 而它**读不成草**——近处是几片立着的绿矩形，远处叶片只有 12cm 宽，
+   * 在一个像素里混成一块更绿的方块。两种距离下都不像草。
+   * 草这个信号的**唯一价值就在于"像草"**，读不出来就不该留着。
+   *
+   * 现在草的质感做进地形着色器：同样的信息量，
+   * **0 个额外三角形、0 次 alphaTest、0 个 draw call**，
+   * 而且不会在近处变成纸片。低配把它降到 0 只是少算两项噪声。
+   */
+  groundDetail: 0 | 1 | 2;
+  /** 地面细节的作用半径（米）。超出就只剩大尺度色块 */
+  groundDetailRadius: number;
   /** 行道树半径 */
   treeRadius: number;
   /** 行道树密度系数 */
@@ -48,8 +60,6 @@ export interface QualityPreset {
   anisotropy: number;
   /** 远处地标是否降级成剪影（用简单的 box 代替 GLB） */
   stationSilhouette: boolean;
-  /** 是否画草地（低配下可以只留树的剪影，地面换成纯色） */
-  grassEnabled: boolean;
 }
 
 export const PRESETS: Record<Tier, QualityPreset> = {
@@ -60,8 +70,8 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     // 0.6² = 36% 的像素，帧率直接翻接近三倍，而雾把放大后的糊盖住了。
     renderScale: 0.6,
     pixelRatioCap: 1,
-    grassRadius: 46,
-    grassDensity: 0.3,
+    groundDetail: 0,
+    groundDetailRadius: 26,
     treeRadius: 52,
     treeDensity: 0.35,
     bushRadius: 40,
@@ -73,15 +83,14 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     ambientLayers: 1,
     anisotropy: 1,
     stationSilhouette: true,
-    grassEnabled: false,
   },
   [TIER_MEDIUM]: {
     shadowMapSize: 1024,
     shadowDistance: 55,
     renderScale: 0.85,
     pixelRatioCap: 1.25,
-    grassRadius: 105,
-    grassDensity: 0.7,
+    groundDetail: 1,
+    groundDetailRadius: 34,
     treeRadius: 92,
     treeDensity: 0.75,
     bushRadius: 80,
@@ -93,15 +102,14 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     ambientLayers: 2,
     anisotropy: 2,
     stationSilhouette: false,
-    grassEnabled: true,
   },
   [TIER_HIGH]: {
     shadowMapSize: 2048,
     shadowDistance: 130,
     renderScale: 1,
     pixelRatioCap: 2,
-    grassRadius: 190,
-    grassDensity: 1,
+    groundDetail: 2,
+    groundDetailRadius: 58,
     treeRadius: 160,
     treeDensity: 1,
     bushRadius: 140,
@@ -113,7 +121,6 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     ambientLayers: 3,
     anisotropy: 4,
     stationSilhouette: false,
-    grassEnabled: true,
   },
 };
 
@@ -176,11 +183,11 @@ export function clampTier(v: unknown): Tier {
 }
 
 /** 一张把"档位"翻译成人话的小表，UI 直接拿去显示。 */
-export function tierSummary(tier: Tier): { renderScale: string; shadows: string; grass: string } {
+export function tierSummary(tier: Tier): { renderScale: string; shadows: string; ground: string } {
   const p = PRESETS[tier];
   return {
     renderScale: `${Math.round(p.renderScale * 100)}%`,
     shadows: p.shadowMapSize === 0 ? 'off' : `${p.shadowMapSize}px / ${p.shadowDistance}m`,
-    grass: p.grassEnabled ? `${p.grassRadius}m · ${Math.round(p.grassDensity * 100)}%` : 'off',
+    ground: p.groundDetail === 0 ? 'off' : `${p.groundDetailRadius}m`,
   };
 }

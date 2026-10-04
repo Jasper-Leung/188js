@@ -148,7 +148,7 @@ export class TitleScreen {
     };
     add(t('hud_scale'), s.renderScale);
     add(t('tier_shadows'), s.shadows);
-    add(t('tier_grass'), s.grass);
+    add(t('tier_ground'), s.ground);
   }
 
   /** 宿主把档位改回来时（读档、它在 onQualityChange 里夹了一次之后）。 */

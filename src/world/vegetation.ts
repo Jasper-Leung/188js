@@ -28,12 +28,7 @@ import {
   Quaternion,
   Vector3,
   BufferGeometry,
-  BufferAttribute,
   MeshStandardMaterial,
-  DynamicDrawUsage,
-  InstancedBufferAttribute,
-  DoubleSide,
-  Color,
   Group,
   type Material,
 } from 'three';
@@ -42,7 +37,6 @@ import { hashGrid } from '../core/noise';
 import { clamp } from '../core/math';
 import type { Terrain } from './terrain';
 import type { QualityPreset } from '../core/settings';
-import { patchStandard } from '../shaders/world';
 
 const CHUNK_LEN = 12; // 米，按中心线弧长
 const CHUNK_COUNT = Math.ceil(TOTAL_ARCLENGTH / CHUNK_LEN);
@@ -53,20 +47,6 @@ const CHUNK_COUNT = Math.ceil(TOTAL_ARCLENGTH / CHUNK_LEN);
  */
 const TREE_SPACING = 25;
 const BUSH_SPACING = 11;
-/**
- * 草皮沿路间距（米）。
- *
- * 原来是 2.4m——每两米四一簇，全环 512 簇。这个密度下**草皮等于不存在**：
- * 视野里几十米只有七八簇，读不出"草地"，只会在近处偶尔冒出一两根，
- * 而玩家多半把它当成 bug 而不是草。
- *
- * 0.55m 是"读得出连续草层、又不至于铺成一块绿毯"的值：
- * 全环 2234 簇，按画质档抽稀后每张卡 400~800 个实例。
- * 每簇 4 个三角形，所以 800 簇也只有 3200 个面——
- * **草皮贵在填充率（卡片铺满屏幕），不在面数**，
- * 而这个数比行道树 16m/株×8000 面的开销小一个量级。
- */
-const GRASS_SPACING = 0.55;
 
 /**
  * 把模型抬到地面上所需的垂直偏移。
@@ -122,19 +102,10 @@ export class Vegetation {
   readonly group = new Group();
   readonly groupTrees = new Group();
   readonly groupBushes = new Group();
-  readonly groupGrass = new Group();
-
   private chunks: Chunk[] = [];
   private treeMesh: InstancedMesh | null = null;
   private bushMesh: InstancedMesh | null = null;
-  private grassMesh: InstancedMesh | null = null;
-
-  private grassUniforms: { uTime: { value: number }; uWindStrength: { value: number } } | null = null;
-  private grassAll: { offsets: Float32Array; params: Float32Array; start: Int32Array } | null = null;
-  private grassOffAttr: InstanceBufferLike | null = null;
-  private grassParAttr: InstanceBufferLike | null = null;
   private lastChunkIndex = -1;
-  private windFrame = 0;
   private preset: QualityPreset;
 
   /**
@@ -153,12 +124,12 @@ export class Vegetation {
   private bushOfChunk: (InstancedMesh | null)[] = [];
 
   /** 统计，给 FPS/调试面板 */
-  stats = { chunksVisible: 0, trees: 0, bushes: 0, grass: 0, drawCalls: 0 };
+  stats = { chunksVisible: 0, trees: 0, bushes: 0, drawCalls: 0 };
 
   constructor(preset: QualityPreset, terrain: Terrain) {
     this.preset = preset;
     this.group.name = 'vegetation';
-    this.group.add(this.groupTrees, this.groupBushes, this.groupGrass);
+    this.group.add(this.groupTrees, this.groupBushes);
     this.buildPlacements(terrain);
   }
 
@@ -278,29 +249,22 @@ export class Vegetation {
       chunks[chunkAt(x, z)].bush.push({ x, y, z, rotY: r1 * Math.PI * 2, scale: 0.5 + r2 * 0.5 });
     }
 
-    // ---- 草皮：只铺近路的一条带，低档整项关掉 ----
-    if (this.preset.grassEnabled) {
-      const nGrass = Math.floor(TOTAL_ARCLENGTH / GRASS_SPACING);
-      const want = Math.round(nGrass * this.preset.grassDensity);
-      let placed = 0;
-      for (let i = 0; i < nGrass && placed < want; i++) {
-        const r1 = hashGrid(i, 11, 1201);
-        const r2 = hashGrid(i, 12, 4409);
-        const r3 = hashGrid(i, 13, 9931);
-        // 用 r1 做稀疏采样：密度低时不是"均匀变稀"，而是随机跳过，
-        // 后者在视觉上更自然（均匀变稀会看出规则的条纹）
-        if (r1 > this.preset.grassDensity) continue;
-        const t = (i * GRASS_SPACING) / TOTAL_ARCLENGTH;
-        const { p, tx, tz } = this.sampleAt(t);
-        const side = r2 < 0.5 ? -1 : 1;
-        const off = 7.5 + r3 * 12;
-        const x = p.x + -tz * off * side;
-        const z = p.z + tx * off * side;
-        const y = terrain.getHeightAt(x, z);
-        chunks[chunkAt(x, z)].grass.push({ x, y, z, rotY: r2 * Math.PI * 2, scale: 0.7 + r3 * 0.8 });
-        placed++;
-      }
-    }
+    // ---- 草皮：已移除 ----
+    //
+    // 原来是一层交叉双面片（1m × 1m × 4 三角形），顶点着色器里朝相机转，
+    // 片元里程序化出三根叶片的叶形，靠 alphaTest 剔掉卡片其余部分。
+    //
+    // **移除的理由是它读不成草。** 用户实机看下来，
+    // 近处是几片**立着的绿色矩形**，远处因为叶片只有 12cm 宽，
+    // 在一次像素覆盖里混成一块更绿的方块——两种距离下都不像草，
+    // 而草这个信号的**唯一价值就在于"像草"**，读不出来就该拿掉。
+    // 留着它的代价还不止画面：铺满屏幕的半透明卡片是填充率杀手，
+    // 比树和灌木加起来还贵。
+    //
+    // 草的质感搬进了地形着色器（`TERRAIN_PATCH` 的近场草丛）。
+    // 同样的信息量，**0 个额外三角形**、0 次 alphaTest、0 个 draw call，
+    // 而且不会在近处变成纸片——那才是零贴图路线上该有的做法。
+    void 0;
   }
 
   /**
@@ -341,7 +305,6 @@ export class Vegetation {
         this.groupBushes.add(m);
       }
     }
-    if (this.preset.grassEnabled) this.buildGrass();
   }
 
   private makeInstanced(
@@ -378,205 +341,6 @@ export class Vegetation {
     m.receiveShadow = true;
     return m;
   }
-
-  /**
-   * 草皮：**一个** InstancedMesh，动态打包可见实例。
-   *
-   * 树和灌木用"每块一个 mesh"，草皮不这么做——草皮是密集小几何，
-   * 一次 draw call 的收益远大于视锥剔除的收益（它太小，剔掉的三角形本来也不多）。
-   * 做法是把可见块的实例**紧凑地填进同一份 buffer 的前段**，
-   * 玩家跨过 12m 才重打包一次；`mesh.count` 决定画多少。
-   *
-   * 注意：实例属性必须是 InstancedBufferAttribute，而且**只有这一份 geometry**。
-   * 早先按块各建一份 geometry、共用同一个 BufferGeometry 顶点的写法是错的——
-   * `setAttribute` 是往同一个 geometry 上写，第二个块会把第一个块的
-   * 偏移量覆盖掉，于是整片草皮长在最后一个块的位置上。
-   */
-  private buildGrass() {
-    const geo = new BufferGeometry();
-    const verts = new Float32Array([
-      // 十字片 A
-      -0.5, 0, 0, 0.5, 0, 0, 0.5, 1, 0,
-      -0.5, 0, 0, 0.5, 1, 0, -0.5, 1, 0,
-      // 十字片 B（转 90°）
-      0, 0, -0.5, 0, 0, 0.5, 0, 1, 0.5,
-      0, 0, -0.5, 0, 1, 0.5, 0, 1, -0.5,
-    ]);
-    const uvs = new Float32Array([
-      0, 0, 1, 0, 1, 1,
-      0, 0, 1, 1, 0, 1,
-      0, 0, 1, 0, 1, 1,
-      0, 0, 1, 1, 0, 1,
-    ]);
-    geo.setAttribute('position', new BufferAttribute(verts, 3));
-    geo.setAttribute('uv', new BufferAttribute(uvs, 2));
-    // **必须有 normal 属性。**
-    // three 的 `beginnormal_vertex` 写的是 `vec3 objectNormal = vec3(normal);`——
-    // 属性不存在时 WebGL 给默认的 (0,0,0)，于是 `vNormal = normalize(vec3(0))` 是 NaN，
-    // 阴影那一路的 `inverseTransformDirection(transformedNormal, viewMatrix)` 同样是 NaN。
-    // 结果是**通过 alphaTest 的每一个像素都算成黑色**，草皮变成一丛黑刺。
-    // 这里的值随后会被顶点着色器按"卡片朝向相机"覆写，
-    // 但它必须存在：缺失不是"用默认值"，是整条法线链路变成 NaN。
-    geo.computeVertexNormals();
-
-    // 所有块的草皮平铺成一条链，update 时按块号切片挑
-    let total = 0;
-    for (const c of this.chunks) total += c.grass.length;
-    this.grassAll = { offsets: new Float32Array(total * 3), params: new Float32Array(total * 2), start: new Int32Array(CHUNK_COUNT + 1) };
-    let k = 0;
-    for (let ci = 0; ci < CHUNK_COUNT; ci++) {
-      this.grassAll.start[ci] = k;
-      for (const p of this.chunks[ci].grass) {
-        this.grassAll.offsets[k * 3] = p.x;
-        this.grassAll.offsets[k * 3 + 1] = p.y;
-        this.grassAll.offsets[k * 3 + 2] = p.z;
-        this.grassAll.params[k * 2] = (p.rotY / (Math.PI * 2)) % 1;
-        this.grassAll.params[k * 2 + 1] = p.scale;
-        k++;
-      }
-    }
-    this.grassAll.start[CHUNK_COUNT] = k;
-
-    const offAttr = new InstancedBufferAttribute(this.grassAll.offsets, 3);
-    const parAttr = new InstancedBufferAttribute(this.grassAll.params, 2);
-    offAttr.setUsage(DynamicDrawUsage);
-    parAttr.setUsage(DynamicDrawUsage);
-    geo.setAttribute('aOffset', offAttr);
-    geo.setAttribute('aParams', parAttr);
-    this.grassOffAttr = offAttr;
-    this.grassParAttr = parAttr;
-
-    const mat = new MeshStandardMaterial({
-      side: DoubleSide,
-      roughness: 0.9,
-      metalness: 0,
-      // alphaTest 而不是 transparent：透明要排序要混合，
-      // 在铺满屏幕的草皮上是核显的噩梦；alphaTest 直接剔像素，最便宜。
-      alphaTest: 0.5,
-      dithering: true,
-    });
-    this.grassUniforms = { uTime: { value: 0 }, uWindStrength: { value: 0.22 } };
-    patchStandard(mat, {
-      vertexHead: /* glsl */ `
-        attribute vec3 aOffset;
-        attribute vec2 aParams;
-        uniform float uTime;
-        uniform float uWindStrength;
-        varying float vBlade;
-        varying vec3 vGrassWorld;
-        varying vec2 vUvG;
-      `,
-      vertexBody: /* glsl */ `
-        vUvG = uv;
-        vec3 instPos = aOffset;
-        // 让卡片朝相机转：不做的话草丛会随视角露出纸片背面
-        vec3 toCam = cameraPosition - instPos;
-        float yaw = atan(toCam.x, toCam.z);
-        float cy = cos(yaw), sy = sin(yaw);
-        vec3 local = position;
-        vec3 rotated = vec3(local.x * cy + local.z * sy, local.y, -local.x * sy + local.z * cy);
-        float h = clamp(local.y, 0.0, 1.0);
-        float wind = sin(uTime * 1.6 + aParams.x * 6.283) * uWindStrength * h * h;
-        rotated.x += wind * 0.35;
-        rotated.z += wind * 0.18;
-        rotated.y *= aParams.y;
-        vec3 world = instPos + rotated;
-        vGrassWorld = world;
-        vBlade = h;
-        transformed = world;
-
-        // 法线也必须跟着卡片转，而且**要重新算朝向**：
-        // 草皮不是"一个有正确法线的物体被旋转了"，它是每帧按相机朝向重建的，
-        // 所以几何体里那份法线只保证链路不 NaN，真正用的是下面这个。
-        //
-        // 取向规则：底部朝相机平躺（接住地面的反光），梢部逐渐朝上
-        // （叶尖受太阳直射）。一刀切的"整片朝相机"会让整片草皮是一个亮度，
-        // 而亮度渐变正是零贴图下唯一能读出"这是草不是纸板"的信号。
-        vec3 flat3 = normalize(vec3(toCam.x, 0.0, toCam.z) + vec3(0.0, 0.0001, 0.0));
-        vec3 gN = normalize(mix(flat3, vec3(0.0, 1.0, 0.0), 0.25 + 0.45 * h));
-        // transformedNormal 喂阴影，vNormal 喂主光照。两处都要写，
-        // 只写 vNormal 的话接阴影的那一路仍然是几何体里那份没转过的法线。
-        transformedNormal = gN;
-        vNormal = gN;
-      `,
-      fragmentHead: /* glsl */ `
-        varying float vBlade;
-        varying vec3 vGrassWorld;
-        varying vec2 vUvG;
-        uniform vec3 grass_color;
-        uniform vec3 grass_dry;
-      `,
-      fragmentBody: /* glsl */ `
-        // 叶形：三根偏转的窄条，末端收尖。程序化出形状而不是采贴图，
-        // 卡片就能缩到 4 个顶点两个三角形。
-        float blade = 0.0;
-        for (int i = 0; i < 3; i++) {
-          float fi = float(i);
-          float off = (fi - 1.0) * 0.30;
-          float bend = (vBlade - vBlade * vBlade * 0.55) * 0.34;
-          float cx = vUvG.x + off + bend * (fi - 1.0) * 0.25;
-          float halfW = 0.075 * (1.0 - vBlade * 0.92);
-          blade = max(blade, 1.0 - smoothstep(halfW * 0.55, halfW, abs(vUvG.x - cx)));
-        }
-        float gvar = fbm2(vGrassWorld.xz * 1.7 + vBlade * 0.6);
-        vec3 ggrass = mix(grass_color, grass_dry, smoothstep(0.35, 0.9, gvar) * 0.55);
-        ggrass *= 0.72 + 0.42 * vBlade;   // 根部暗、梢部亮
-        float galpha = clamp(blade * 1.25, 0.0, 1.0);
-      `,
-      colorExpr: /* glsl */ `
-        diffuseColor.rgb *= ggrass;
-        diffuseColor.a *= galpha;
-      `,
-    }, {
-      ...this.grassUniforms,
-      grass_color: { value: new Color(0.3, 0.5, 0.19) },
-      grass_dry: { value: new Color(0.52, 0.56, 0.27) },
-    });
-
-    const mesh = new InstancedMesh(geo, mat, Math.max(total, 1));
-    mesh.name = 'grass';
-    const ident = new Matrix4();
-    for (let i = 0; i < Math.max(total, 1); i++) mesh.setMatrixAt(i, ident);
-    mesh.instanceMatrix.needsUpdate = true;
-    mesh.count = 0;
-    mesh.castShadow = false; // 草皮不投影：省一整趟 shadow pass
-    mesh.receiveShadow = true;
-    mesh.frustumCulled = false; // 实例在动，包围球算不准，自己管可见性
-    this.grassMesh = mesh;
-    this.groupGrass.clear();
-    this.groupGrass.add(mesh);
-  }
-
-  /** 把可见块的草皮紧凑地填进 buffer 前段 */
-  private repackGrass(cur: number) {
-    if (!this.grassMesh || !this.grassAll || !this.grassOffAttr || !this.grassParAttr) return;
-    const g = this.grassAll;
-    const cap = g.offsets.length / 3;
-    let w = 0;
-    // **d === 0 时 cur 只能取一次。**
-    // 原来写的是 `[cur + d, cur - d]` 两个下标再 `if (d > 0 && idx === cur) continue`，
-    // 于是 d=0 时两个下标都是 cur，判据里的 `d > 0` 不成立，
-    // 玩家所在的那一块被塞了两遍——草皮凭空多出一倍实例，
-    // 而画面上完全看不出（两簇草长在同一个位置，一个压着一个）。
-    for (let d = 0; d <= Math.ceil(this.preset.grassRadius / CHUNK_LEN) + 1; d++) {
-      const offsets = d === 0 ? [cur] : [cur + d, cur - d];
-      for (const ci of offsets) {
-        const idx = ((ci % CHUNK_COUNT) + CHUNK_COUNT) % CHUNK_COUNT;
-        if (d > 0 && idx === cur) continue;
-        const s = g.start[idx];
-        const e = g.start[idx + 1];
-        if (w + (e - s) > cap) break;
-        g.offsets.copyWithin(w * 3, s * 3, e * 3);
-        g.params.copyWithin(w * 2, s * 2, e * 2);
-        w += e - s;
-      }
-    }
-    this.grassOffAttr.needsUpdate = true;
-    this.grassParAttr.needsUpdate = true;
-    this.grassOffAttr.updateRanges = [{ start: 0, count: w * 3 }];
-    this.grassMesh.count = w;
-  }
-
   /**
    * 每帧更新可见块。
    *
@@ -590,20 +354,17 @@ export class Vegetation {
     if (cur === this.lastChunkIndex) return;
     this.lastChunkIndex = cur;
 
-    // 心神系数**必须真的进半径**。它原来是算了 treeR/bushR/grassR 之后
+    // 心神系数**必须真的进半径**。它原来是算了 treeR/bushR 之后
     // 直接 `void` 掉，判定仍用 `preset.*Radius`——于是"心神低→看得更短"
     // 这条在整个游戏里从来没有生效过：灯笼、香囊、遮罩三样都在给一个
     // 没人读的数写账。verify_mood 守的是那条公式本身，守不到这里。
     const treeR = Math.max(this.preset.treeRadius * visibilityFactor, 1);
     const bushR = Math.max(this.preset.bushRadius * visibilityFactor, 1);
-    const grassR = Math.max(this.preset.grassRadius * visibilityFactor, 1);
 
     let visibleChunks = 0;
     let treeCount = 0;
     let bushCount = 0;
-    let grassCount = 0;
     let calls = 0;
-    let grassChunks = 0;
 
     for (const c of this.chunks) {
       // 环线是闭合的，索引要绕圈
@@ -613,14 +374,11 @@ export class Vegetation {
       const showTree = tTree <= 1.12;
       const tBush = (d * CHUNK_LEN) / bushR;
       const showBush = tBush <= 1.12;
-      const tGrass = (d * CHUNK_LEN) / grassR;
-      const showGrass = this.preset.grassEnabled && tGrass <= 1.12;
 
       const iTree = this.treeOfChunk[c.index];
       const iBush = this.bushOfChunk[c.index];
       if (iTree) iTree.visible = showTree;
       if (iBush) iBush.visible = showBush;
-      if (showGrass) grassChunks++;
 
       if (showTree) {
         visibleChunks++;
@@ -631,24 +389,9 @@ export class Vegetation {
         bushCount += c.bush.length;
         calls++;
       }
-      if (showGrass) grassCount += c.grass.length;
     }
 
-    this.repackGrass(cur);
-    void grassChunks;
-    this.stats = { chunksVisible: visibleChunks, trees: treeCount, bushes: bushCount, grass: grassCount, drawCalls: calls };
-  }
-
-  /**
-   * 风动。低档每 4 帧更新一次 uTime 就够了——
-   * 风是缓慢的正弦，30fps 的正弦和 60fps 的正弦在视觉上分不出来，
-   * 但 uniform 上传和整片草皮的顶点重算是实打实的 4 倍开销。
-   */
-  tickWind(time: number) {
-    if (!this.grassUniforms) return;
-    this.windFrame++;
-    if (this.windFrame % this.preset.windInterval !== 0) return;
-    this.grassUniforms.uTime.value = time;
+    this.stats = { chunksVisible: visibleChunks, trees: treeCount, bushes: bushCount, drawCalls: calls };
   }
 
   setPreset(preset: QualityPreset) {
@@ -664,11 +407,8 @@ export class Vegetation {
     this.group.clear();
     this.groupTrees.children.forEach((c) => (c as InstancedMesh).dispose());
     this.groupBushes.children.forEach((c) => (c as InstancedMesh).dispose());
-    this.groupGrass.children.forEach((c) => (c as InstancedMesh).dispose());
   }
 }
-
-type InstanceBufferLike = { needsUpdate: boolean; updateRanges: { start: number; count: number }[] };
 
 function defaultVegMaterial(): MeshStandardMaterial {
   return new MeshStandardMaterial({ vertexColors: true, roughness: 0.9, metalness: 0 });

@@ -881,7 +881,6 @@ class App {
     perf.vegChunks = v.chunksVisible;
     perf.vegTrees = v.trees;
     perf.vegBushes = v.bushes;
-    perf.vegGrass = v.grass;
     perf.phase = this.phase;
     // 环境声的两条输入：离水多远、天有多暗。
     // 碗的位置从 `getBasins()` 拿，不从 `Water` 上拿——水面网格只知道自己

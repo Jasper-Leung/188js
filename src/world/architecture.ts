@@ -513,8 +513,14 @@ function buildInn(mb: MeshBuilder, seg: number) {
 
   const roofY = f2y + f2h;
   mb.upturnedRoof(0, roofY, 0, 7.6, 4.9, 2.5, 1.5, seg);
-  // 正脊：一条压住屋脊的木条。少了它，双坡屋面读成两块斜板
-  mb.box([0, roofY + 2.46, 0], [15.4, 0.3, 0.5], C.tile);
+  // **这里原来有一根正脊横条，被删掉了。**
+  // 删的理由不是"不好看"，是它在几何上是错的：起翘屋顶的脊是一条**线**，
+  // 而正脊横条是一条**保持脊高走完全宽的直棱**（15.4m × 0.3m × 0.5m，
+  // 放在 roofY + 2.46）。屋面从脊往两侧按 (1−t)^1.7 陡降，
+  // 于是横条两头各悬出约 2.5m —— 画面上就是一根浮在屋顶上方的黑杠。
+  //
+  // 真正的歇山顶确实有正脊，但它只跨**中间那段平脊**，两端就收在屋面里了。
+  // 这里不做：庑殿顶本身没有平脊，脊就是一个点，加一条脊线只会更像盒子。
 }
 
 /** 茶寮 —— 四面开敞的小茶棚，一根横梁 + 竹席顶。 */
@@ -564,7 +570,7 @@ function buildTerrace(mb: MeshBuilder, seg: number) {
   mb.box([5.4, 1.1, 3.4], [1.3, 0.5, 1.3], C.stoneDark);
 }
 
-/** 神苑 —— 三级圆形祭坛 + 四根石灯柱。全部用圆形，因为它是唯一一个非矩形的。 */
+/** 神苑 —— 三级圆形祭坛 + 四根石灯柱 + 后面一座有顶的碑龛。 */
 function buildShrine(mb: MeshBuilder, seg: number) {
   const tiers: [number, number][] = [[4.6, 0.36], [3.7, 0.36], [2.8, 0.36]];
   let y = 0;
@@ -584,13 +590,30 @@ function buildShrine(mb: MeshBuilder, seg: number) {
     mb.prism([x, y + 0.22 + postH / 2, z], 0.26, 0.22, postH, 6, C.stone);
     mb.boxOnGround(x, z, y + 0.22 + postH, 0.62, 0.2, 0.62, C.stoneDark); // 柱头
   }
+
+  /**
+   * 碑龛 —— 神苑**唯一带屋顶的部分**。
+   *
+   * 上一版没有它，于是这一类在体检报告里"最高的那批顶点"其实是四根柱子的柱头
+   * （4.50~4.70，跨 0.2m），屏幕上读作"这站没有屋顶"。
+   *
+   * 为什么放在最后沿而不是正中心：正中心是祭台，四根石灯柱围着一圈，
+   * 中间塞一座 2.4m 宽的龛会把祭台堵死。放在后沿（+Z，正面是 -Z 朝路），
+   * 从正前方看过去正好在祭台背后，不挡。
+   */
+  const nicheZ = 3.3;
+  const baseY = y + 0.36;  mb.boxOnGround(0, nicheZ, baseY, 2.6, 0.45, 1.9, C.stoneDark); // 台
+  posts(mb, baseY + 0.45, 2.4, 0.95, 0.6, 2, 2, 0.14, C.wood); // 四柱
+  mb.boxOnGround(0, nicheZ, baseY + 0.45, 1.9, 1.6, 0.24, C.stone); // 碑身
+  mb.boxOnGround(0, nicheZ, baseY + 2.85, 2.2, 0.16, 1.5, C.woodDark); // 额枋
+  mb.upturnedRoof(0, baseY + 3.01, nicheZ, 1.9, 1.5, 1.15, 0.85, seg);
+
   // 外圈散石：八个不等高的小方块，给圆形轮廓加一点手工感
   for (let i = 0; i < 8; i++) {
     const a = (i / 8) * Math.PI * 2 + 0.2;
     const s = 0.5 + (i % 3) * 0.16;
     mb.boxOnGround(Math.cos(a) * 3.25, Math.sin(a) * 3.25, 0.72, s, s * 0.8, s, C.stoneDark);
   }
-  void seg;
 }
 
 /** 凉亭 —— 四角攒尖顶。底座八角、屋面四角，是亭子最好认的剪影组合。 */
@@ -616,21 +639,33 @@ function buildPavilion(mb: MeshBuilder, seg: number) {
   mb.prism([0, roofY + 2.0 + 0.28, 0], 0.34, 0.1, 0.56, 6, C.stone);
 }
 
-/** 廊 —— 五开间的带顶步道。横向拉长是这个类型唯一的辨识特征，所以柱子要密。 */
+/**
+ * 廊 —— 五开间的带顶步道。横向拉长是它唯一的辨识特征，所以柱子要密。
+ *
+ * 屋顶原来只有 1.5m 抬升、罩在 3.1m 高的柱子上，整座 4.96m 高——
+ * 从侧面看就是**一条贴着梁的平板**，读不出"屋顶"，
+ * 反而像一张浮在柱子上的桌板。现在抬到 2.4m，并让两端各挑出 1.2m。
+ */
 function buildCorridor(mb: MeshBuilder, seg: number) {
-  mb.boxOnGround(0, 0, 0, 15.0, 0.4, 4.6, C.stone);
+  // 台基 15.0 → 13.0。缩短台基**不是**为了省体积，是为了把出檐让出来：
+  // 屋面半宽卡在 `STATION_FOOT_HALF` = 8m（`verify_stations` 守着），
+  // 台基缩到 13.0 之后屋面（15.8m）比它多出 1.4m，两端各挑一截——
+  // 这才是"廊"该有的出檐，而原来 15.0 的台基配 16.0 的屋面只挑 0.5m，
+  // 加上 1.5m 的抬升，整座读出来像"柱子顶上一块板"。
+  mb.boxOnGround(0, 0, 0, 13.0, 0.4, 4.6, C.stone);
   steps(mb, -2.3, 2.0, 2, 0.2, 0.45, C.stone);
   const y0 = 0.4;
   const postH = 3.1;
   // 5 开间 = 每侧 6 根柱
-  posts(mb, y0, postH, 6.8, 1.9, 6, 2, 0.16, C.wood);
+  posts(mb, y0, postH, 5.8, 1.9, 6, 2, 0.16, C.wood);
   // 两侧座凳
   for (const sz of [-1.55, 1.55]) {
-    mb.boxOnGround(0, sz, y0 + 0.4, 13.0, 0.4, 0.55, C.woodDark);
+    mb.boxOnGround(0, sz, y0 + 0.4, 11.0, 0.4, 0.55, C.woodDark);
   }
   // 额枋
-  mb.boxOnGround(0, 0, y0 + postH - 0.3, 14.4, 0.26, 4.2, C.wood);
-  mb.upturnedRoof(0, y0 + postH - 0.04, 0, 8.0, 2.9, 1.5, 1.1, seg);
+  mb.boxOnGround(0, 0, y0 + postH - 0.3, 12.4, 0.26, 4.2, C.wood);
+  // 抬升 1.5 → 2.4（原来太浅，读成一块平板），半宽 7.9 贴着限值
+  mb.upturnedRoof(0, y0 + postH - 0.04, 0, 7.9, 3.3, 2.4, 1.5, seg);
 }
 
 /**

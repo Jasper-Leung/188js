@@ -222,7 +222,7 @@ export class PausePanel {
     };
     add(t('hud_scale'), s.renderScale);
     add(t('tier_shadows'), s.shadows);
-    add(t('tier_grass'), s.grass);
+    add(t('tier_ground'), s.ground);
   }
 
   // ---------------------------------------------------------------- 触屏

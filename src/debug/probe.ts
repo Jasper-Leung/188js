@@ -218,7 +218,7 @@ function nearbyVeg(world: World, x: number, z: number, radius: number): string[]
   const out: string[] = [];
   const stats = world.veg.stats;
   out.push(
-    `  植被 本帧可见：块=${stats.chunksVisible} 树=${stats.trees} 灌木=${stats.bushes} 草=${stats.grass} draw=${stats.drawCalls}`,
+    `  植被 本帧可见：块=${stats.chunksVisible} 树=${stats.trees} 灌木=${stats.bushes} draw=${stats.drawCalls}`,
   );
   // 逐个量最近的一株树/灌木（植被是按块实例化的，没有可枚举的实例表，
   // 所以这里量**块**而不是实例——块才是剔除的单位）

@@ -53,7 +53,7 @@ export function run() {
     return { ctx, st: stations.list };
   };
 
-  // ---- 基线：什么都��弄坏时，应该是干净的 ----
+  // ---- 基线：什么都没弄坏时，应该是干净的 ----
   {
     const { ctx } = fresh();
     const issues = auditBuildings(ctx);

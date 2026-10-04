@@ -25,6 +25,7 @@ import { TERRAIN } from '../data/raw';
 import { naturalHeightAt, basinDepthAt, heightAt, planBasins } from './basins';
 import { TERRAIN_PATCH, patchStandard } from '../shaders/world';
 import { noise2d } from '../core/noise';
+import type { QualityPreset } from '../core/settings';
 import { clamp } from '../core/math';
 
 const SIZE = TERRAIN.SIZE;
@@ -38,10 +39,12 @@ export class Terrain {
   /** 高程网格，(RES+1)² 个值 */
   private grid: Float32Array;
 
-  constructor() {
+  constructor(preset?: QualityPreset) {
     // 顺序不能反：碗深要靠自然高程算出来
     planBasins();
     this.grid = this.buildHeightGrid();
+    const gd = preset?.groundDetail ?? 0;
+    const gdr = preset?.groundDetailRadius ?? 30;
 
     this.material = new MeshStandardMaterial({
       vertexColors: true,
@@ -53,8 +56,13 @@ export class Terrain {
     base.setRGB(TERRAIN.BASE_COLOR[0], TERRAIN.BASE_COLOR[1], TERRAIN.BASE_COLOR[2]);
     const uniforms = patchStandard(this.material, TERRAIN_PATCH, {
       ground_color: { value: base.convertSRGBToLinear() },
-      ground_dark: { value: new Color(0.24, 0.39, 0.16) },
-      ground_dry: { value: new Color(0.47, 0.545, 0.245) },
+      // `BASE_COLOR` 是源项目的数据，一个数不改。
+      // 下面两个是**这里定的**辅助色，所以按"照片里的草"重新调过：
+      // 原来那组 (0.24,0.39,0.16) / (0.47,0.545,0.245) 饱和度太高，
+      // 加上底色之后整片地读成"游戏里的鲜绿"，一眼就假。
+      // 真实草地的暗部是压住饱和度的深绿偏土，枯黄层更接近麦秆。
+      ground_dark: { value: new Color(0.2, 0.28, 0.135) },
+      ground_dry: { value: new Color(0.44, 0.47, 0.255) },
       mottle_scale: { value: 0.35 },
       clump_scale: { value: 0.9 },
       speckle_strength: { value: 0.12 },
@@ -62,6 +70,8 @@ export class Terrain {
       detail_fade_far: { value: 20 },
       normal_strength: { value: 0.15 },
       ao_strength: { value: 0.5 },
+      ground_detail: { value: gd },
+      ground_detail_radius: { value: gdr },
     });
     void uniforms;
 
@@ -74,6 +84,14 @@ export class Terrain {
     this.mesh.castShadow = false;
     this.mesh.matrixAutoUpdate = false;
     this.mesh.updateMatrix();
+  }
+
+  /** 换档：把地面细节强度写进已有的 uniform，不重建材质、不重编译着色器 */
+  setPreset(preset: QualityPreset): void {
+    const shader = this.material.userData.shader as { uniforms?: Record<string, { value: number }> } | undefined;
+    const u = shader?.uniforms;
+    if (u?.ground_detail) u.ground_detail.value = preset.groundDetail;
+    if (u?.ground_detail_radius) u.ground_detail_radius.value = preset.groundDetailRadius;
   }
 
   private buildHeightGrid(): Float32Array {

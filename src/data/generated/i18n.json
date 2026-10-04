@@ -264,7 +264,8 @@
     "chapter1_done_line": "188 号环线，一趟。下一章的门开了。",
     "chapter2_unlocked": "第二章 · 已解锁",
     "touch_home_button": "回到十八驿",
-    "synthesis_home_hint": "第一章完成了。收下这份礼物，或者再骑一圈。"
+    "synthesis_home_hint": "第一章完成了。收下这份礼物，或者再骑一圈。",
+    "tier_ground": "地面细节"
   },
   "en": {
     "game_title": "Gift No.188",
@@ -531,6 +532,7 @@
     "chapter1_done_line": "The 188 loop, once through. The next chapter is open.",
     "chapter2_unlocked": "Chapter Two - Unlocked",
     "touch_home_button": "Return to the Post",
-    "synthesis_home_hint": "Chapter one is done. Take the gift, or ride one more lap."
+    "synthesis_home_hint": "Chapter one is done. Take the gift, or ride one more lap.",
+    "tier_ground": "Ground detail"
   }
 }

@@ -16,6 +16,7 @@ import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
 import { stickVector, keyToVec } from '../core/stick';
 import { groundOffsetFor } from '../world/vegetation';
+import { Box3 } from 'three';
 import { Stations } from '../world/stations';
 import { Terrain } from '../world/terrain';
 import { Road } from '../world/road';
@@ -202,11 +203,48 @@ check('verify_stations', () => {
     probs.push(`定义了 ${Object.keys(ARCH_BY_MODEL_IDX).length} 类程序化地标，实际被用到的只有 ${wantByKind.size} 类`);
   }
 
+  // 每类都必须有**真屋顶**。
+  // 会红的做法：把神苑的碑龛整段删掉——它的最高点就变成四根石灯柱的柱头
+  // （实测屋顶带厚度只剩 0.2m），屏幕上读作"这站没有屋顶"。
+  // 这不是假想：上一版的神苑真的漏了屋顶，是用户看出来的。
+  asserts++;
+  for (const r of archReport) {
+    if (r.roofVerts < 12) {
+      probs.push(`${r.name} 顶部几乎没有任何顶点（${r.roofVerts} 个），没有屋顶`);
+    } else if (r.roofBand < 0.8) {
+      probs.push(`${r.name} 屋顶带只有 ${r.roofBand.toFixed(2)}m 厚，那是一排柱头而不是屋顶`);
+    }
+  }
+
+  // 每座站的世界包围盒 Y 跨度必须等于它那一类本地几何的 Y 跨度。
+  // 站会绕 Y 转向公路，绕 Y 的刚体变换**不改变 Y 跨度**——
+  // 所以一旦对不上，就是模型被额外平移、缩放，或 attach 时出了问题。
+  // 这一条专治"屋顶位置不对"：屋顶被抬歪/被埋，Y 跨度立刻就不对了。
+  asserts++;
+  {
+    const terrain = new Terrain();
+    const road = new Road(terrain);
+    const stations = new Stations(PRESETS[1], terrain);
+    for (const st of stations.list) {
+      const kind = archKindFor(st.modelIdx);
+      if (!kind || !st.object) continue;
+      const local = archReport.find((r) => r.kind === kind);
+      if (!local) continue;
+      const box = new Box3().setFromObject(st.object);
+      const worldH = box.max.y - box.min.y;
+      if (Math.abs(worldH - local.height) > 0.05) {
+        probs.push(`#${st.index} ${st.placement.def.name}（${kind}）世界高度 ${worldH.toFixed(2)}m ≠ 本地 ${local.height.toFixed(2)}m，屋顶位置不对`);
+        break;
+      }
+    }
+    void road;
+  }
+
   return expect(
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : `16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 程序化地标 ${archReport.length} 类 ${totalArchTris} 三角面`,
+      : `16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 程序化地标 ${archReport.length} 类 ${totalArchTris} 三角面 · 7 类全有真屋顶`,
     asserts,
   );
 });
@@ -221,6 +259,10 @@ function archGeometryReport() {
     minY: number;
     triangles: number;
     labelY: number;
+    /** 顶部 30% 高度带里的顶点：屋顶 */
+    roofVerts: number;
+    /** 屋顶带的厚度。0.2m 那种是一排柱头，不是屋顶 */
+    roofBand: number;
   }[] = [];
   for (const [idxStr, kind] of Object.entries(ARCH_BY_MODEL_IDX)) {
     const idx = Number(idxStr);
@@ -245,6 +287,7 @@ function archGeometryReport() {
       minY = Math.min(minY, p[i + 1]);
       maxY = Math.max(maxY, p[i + 1]);
     }
+    const { roofVerts, roofBand } = measureRoofBand(p, minY, maxY);
     out.push({
       name: kind,
       kind,
@@ -254,9 +297,33 @@ function archGeometryReport() {
       minY,
       triangles: mb.triangleCount,
       labelY,
+      roofVerts,
+      roofBand,
     });
   }
   return out;
+}
+
+/**
+ * 屋顶带 = 顶部 30% 高度里的顶点。
+ *
+ * 为什么要单独量：起翘屋顶的**檐口低于脊**，所以这一带的厚度正好是
+ * 「檐底到脊」的高度差。而**一排柱头**（比如某次漏掉屋顶的神苑）
+ * 也会落在这条带子里——它的高度差只有 0.2m。
+ * 于是"有没有屋顶"和"那到底是屋顶还是柱头"可以用同一个数分开。
+ */
+function measureRoofBand(p: Float32Array, minY: number, maxY: number) {
+  const bandLo = minY + (maxY - minY) * 0.7;
+  let bandHi = -Infinity;
+  let bandLoY = Infinity;
+  let n = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    if (p[i + 1] < bandLo) continue;
+    n++;
+    bandHi = Math.max(bandHi, p[i + 1]);
+    bandLoY = Math.min(bandLoY, p[i + 1]);
+  }
+  return { roofVerts: n, roofBand: n > 0 ? bandHi - bandLoY : 0 };
 }
 
 function minDistToCenterline(x: number, z: number): number {
@@ -540,18 +607,24 @@ check('verify_quality', () => {
   }
   asserts++;
   if (lo.shadowMapSize !== 0) probs.push('低档没关阴影');
+
+  // 地面细节必须随档位单调下降，而且**低档必须是 0**。
+  // 它现在是着色器里的两项噪声（草丛斑块 + 方向性短纹），
+  // 比几何体草皮便宜得多，但仍然是全屏的 fbm —— 低档该省还是得省。
   asserts++;
-  if (!lo.grassEnabled) {
-    /* 这不是问题，是设计：低档把草皮的预算整个挪给渲染分辨率 */
-  } else {
-    probs.push('低档开着草皮，铺满屏幕的卡片是核显的填充率杀手');
+  if (!(lo.groundDetail < mid.groundDetail && mid.groundDetail < hi.groundDetail)) {
+    probs.push(`地面细节没有随档位单调上升：${lo.groundDetail} / ${mid.groundDetail} / ${hi.groundDetail}`);
   }
+  asserts++;
+  if (lo.groundDetail !== 0) probs.push(`低档地面细节是 ${lo.groundDetail}，应当为 0`);
 
   // 植被半径单调
   asserts++;
   if (!(lo.treeRadius < mid.treeRadius && mid.treeRadius < hi.treeRadius)) probs.push('树半径不单调');
   asserts++;
-  if (!(lo.grassRadius <= mid.grassRadius && mid.grassRadius <= hi.grassRadius)) probs.push('草半径不单调');
+  if (!(lo.groundDetailRadius < mid.groundDetailRadius && mid.groundDetailRadius < hi.groundDetailRadius)) {
+    probs.push('地面细节半径不单调');
+  }
 
   // 雾的远端必须盖过植被半径，否则会看见"从雾里长出来"的树
   asserts++;
