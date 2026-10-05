@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Typography</title>
+<style>
+  :root {
+    --parchment: #f0e6d2;
+    --ink: #26301c;
+    --rust: #b8621f;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 1920px; height: 1080px; overflow: hidden;
+    background: var(--parchment);
+    font-family: Georgia, "Times New Roman", serif;
+    color: var(--ink);
+  }
+  /* 纸纹：两层极淡的斜向噪点，纯 CSS，不依赖图片 */
+  body::before {
+    content: ''; position: absolute; inset: 0;
+    background:
+      repeating-linear-gradient(94deg, rgba(0,0,0,.014) 0 2px, transparent 2px 5px),
+      repeating-linear-gradient(2deg,  rgba(0,0,0,.010) 0 3px, transparent 3px 7px);
+    pointer-events: none;
+  }
+  .stage { position: absolute; inset: 0; display: flex;
+           align-items: center; justify-content: center; }
+  .rule { position: absolute; left: 50%; transform: translateX(-50%);
+          height: 1px; background: rgba(38,48,28,.22); }
+
+  /* ---- 单词：每个字母一个 span，便于单独位移 ---- */
+  .word { display: flex; align-items: baseline; font-size: 200px; line-height: 1; }
+  .word .ch { display: inline-block; will-change: transform; }
+  .word .cjk { font-family: "Microsoft YaHei", "SimSun", serif; }
+
+  .label {
+    position: absolute; left: 50%; transform: translateX(-50%); top: 862px;
+    font-family: "Segoe UI", Arial, sans-serif; font-size: 27px;
+    letter-spacing: .24em; text-transform: uppercase;
+    color: rgba(38,48,28,.52);
+  }
+  .caption {
+    position: absolute; left: 50%; transform: translateX(-50%); top: 50%;
+    margin-top: -40px;
+    font-size: 42px; color: rgba(38,48,28,.86); text-align: center;
+    line-height: 1.5; width: 1500px;
+  }
+  .caption .ln { display: block; opacity: 0; }
+  .sub {
+    position: absolute; left: 50%; transform: translateX(-50%); top: 912px;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 24px; letter-spacing: .12em; color: rgba(38,48,28,.5);
+  }
+  .rust { color: var(--rust); }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="label" id="label"></div>
+  <div class="rule" id="rule1" style="top:330px; width:1500px;"></div>
+  <div class="word" id="word"></div>
+  <div class="rule" id="rule2" style="top:790px; width:1500px;"></div>
+  <div class="caption" id="caption"></div>
+  <div class="sub" id="sub"></div>
+</div>
+<script>
+// 时间线以毫秒计。总长由 43000 控制，便于和 ffmpeg 对齐。
+const DURATION = 43000;
+
+// 场景：[起, 止, 类型, 内容]
+//   word     大字；可指定某个字母的位移目标
+//   caption  说明性整句
+//   sub      小字标签
+const SCENES = [[0,5500,"word",{"chars":[{"c":"S"},{"c":"m"},{"c":"i"},{"c":"l"},{"c":"e"}],"grow":[250,900]},"a name that means nothing yet"],[13500,21500,"word",{"chars":[{"c":"S"},{"c":"m"},{"c":"i"},{"c":"l"},{"c":"e"}],"grow":[13800,14200],"flip":{"from":0,"to":4,"at":15200,"dur":2000,"cases":{"0":"s","1":"M"}}},"the same letters, read differently"],[21500,29000,"caption",{"lines":["He had already quit the job he was supposed to stay in.","The family business was his to take or not take.","He had not said yes yet."],"fade":[22100,24100]},null],[29000,34000,"word",{"chars":[{"c":"L"},{"c":"u"}],"grow":[29400,30100]},"what he was called"],[34000,39000,"word",{"chars":[{"c":"L"},{"c":"u"}],"grow":[34400,34800],"swap":[35000,37200,[[0,"路",true],[1,"",false]]]},"what his family called him"],[39000,43000,"word",{"chars":[{"c":"R","cjk":true},{"c":"o"},{"c":"a"},{"c":"d"}],"grow":[39400,39900]},"what the mountain called it"]];
+
+const wordEl   = document.getElementById('word');
+const capEl    = document.getElementById('caption');
+const subEl    = document.getElementById('sub');
+const labelEl  = document.getElementById('label');
+const rule1    = document.getElementById('rule1');
+const rule2    = document.getElementById('rule2');
+
+const easeInOut = (t) => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2;
+const clamp01  = (t) => t < 0 ? 0 : t > 1 ? 1 : t;
+const smooth    = (ms, a, b) => clamp01((ms - a) / (b - a));
+
+let lastKey = '';
+let spans = [];
+
+function buildWord(spec) {
+  wordEl.innerHTML = '';
+  spans = [];
+  for (const c of spec.chars) {
+    const el = document.createElement('span');
+    el.className = 'ch' + (c.cjk ? ' cjk' : '');
+    el.textContent = c.c;
+    wordEl.appendChild(el);
+    spans.push(el);
+  }
+}
+
+// 让第 i 个字母从当前位置移动到 (dx, dy)，dur 内缓动
+function moveLetter(i, from, to, dur, ms) {
+  const el = spans[i];
+  if (!el) return;
+  const t = smooth(ms, dur[0], dur[1]);
+  const e = easeInOut(t);
+  const x = from[0] + (to[0] - from[0]) * e;
+  const y = from[1] + (to[1] - from[1]) * e;
+  const r = from[2] + (to[2] - from[2]) * e;
+  el.style.transform = `translate(${x}px, ${y}px) rotate(${r}deg)`;
+  el.style.opacity = String(1);
+}
+
+function fade(el, a, b, ms, from, to) {
+  const t = smooth(ms, a, b);
+  el.style.opacity = String(from + (to - from) * t);
+}
+
+function render(ms) {
+  const sc = SCENES.find((s) => ms >= s[0] && ms < s[1]);
+  const key = sc ? String(sc[0]) : 'none';
+
+  // 字变了才重建 DOM
+  const wordSpec = sc && sc[2] === 'word' ? sc[3] : null;
+  if (key !== lastKey) {
+    lastKey = key;
+    capEl.textContent = '';
+    subEl.textContent = '';
+    labelEl.textContent = '';
+    rule1.style.opacity = '0';
+    rule2.style.opacity = '0';
+    if (wordSpec) {
+      buildWord(wordSpec);
+      wordEl.style.opacity = '1';
+    } else {
+      wordEl.style.opacity = '0';
+      wordEl.innerHTML = '';
+      spans = [];
+    }
+    if (sc && sc[2] === 'caption' && sc[3].lines) {
+      capEl.innerHTML = sc[3].lines
+        .map((l, i) => `<span class="ln" id="line${i}">${l}</span>`).join('');
+    } else {
+      capEl.textContent = '';
+    }
+    if (sc && sc[2] === 'caption' && typeof sc[3] === 'string') capEl.textContent = sc[3];
+    if (sc && sc[2] === 'sub') subEl.textContent = sc[3];
+    if (sc && sc[2] === 'word') {
+      labelEl.textContent = sc[4] || '';
+      rule1.style.opacity = '1';
+      rule2.style.opacity = '1';
+    }
+  }
+
+  if (!sc) return;
+
+  // 场景级淡入
+  const inA = sc[0], inB = sc[0] + 320;
+  const outA = sc[1] - 320, outB = sc[1];
+  const sceneAlpha = Math.min(smooth(ms, inA, inB), 1 - smooth(ms, outA, outB));
+  wordEl.style.opacity = String(sceneAlpha);
+  capEl.style.opacity = String(sceneAlpha);
+  subEl.style.opacity = String(sceneAlpha);
+  labelEl.style.opacity = String(sceneAlpha);
+  rule1.style.opacity = String(sceneAlpha);
+  rule2.style.opacity = String(sceneAlpha);
+
+  // ---- 场景内的动画指令 ----
+
+  // 字母位移：FLIP。先量旧位置，把 span 挪到新位置再量一次，
+  // 用 transform 把它按回去，然后放开让它滑过去。
+  // 之前用硬编码的 120px 字距是不准的（'S' 比 's' 宽），
+  // 结果 "mile" 和 "s" 之间留了一道缝，而且 S 还是大写。
+  if (sc[2] === 'word' && sc[3].flip) {
+    const f = sc[3].flip;
+    if (!sc[3].__flipped) {
+      if (ms < f.at) {
+        // 到位前保持原始顺序
+      } else {
+        // 顺序要紧：必须**先量旧位置**（原字形），再改顺序和字形，最后量新位置。
+        // 反过来的话 olds 量到的是改完之后的坐标，位移量恒等于 0，字母就不动了。
+        const kids = Array.from(wordEl.children);
+        const src = kids[f.from];
+        const olds = new Map(kids.map((k) => [k, k.getBoundingClientRect().left]));
+
+        // f.to 是**最终下标**。f.to === 末位时必须 append，
+        // 用 insertBefore(src, kids[f.to]) 会插到 kids[f.to] 之前，
+        // 结果落到前一位（之前 "miles" 就变成了 "milse"）。
+        if (f.to >= kids.length - 1) wordEl.appendChild(src);
+        else wordEl.insertBefore(src, kids[f.to]);
+
+        // 换字形。Smile -> Miles 要两处改：末尾那个 S 变小写 s，
+        // 而挪到首位那个 m 变大写成 M。
+        if (f.cases) {
+          for (const [idx, ch] of Object.entries(f.cases)) {
+            const el = kids[Number(idx)];
+            if (el) el.textContent = ch;
+          }
+        }
+
+        kids.forEach((k) => {
+          const d = olds.get(k) - k.getBoundingClientRect().left;
+          k.style.transition = 'none';
+          k.style.transform = `translate(${d}px,0)`;
+        });
+        void wordEl.offsetWidth;               // 强制回流，起始 transform 才生效
+        kids.forEach((k) => {
+          k.style.transition = `transform ${f.dur}ms cubic-bezier(.65,0,.35,1)`;
+          k.style.transform = 'translate(0,0)';
+        });
+        sc[3].__flipped = true;
+      }
+    }
+  }
+
+  // 换字：在中点做交叉淡入。spec = [起, 止, [[下标, 新字, 是否CJK], ...]]
+  if (sc[2] === 'word' && sc[3].swap) {
+    const [a, b2, list] = sc[3].swap;
+    const t = smooth(ms, a, b2);
+    for (const [idx, to, cjk] of list) {
+      const el = spans[idx];
+      if (!el) continue;
+      if (t < 0.5) {
+        el.style.opacity = String(1 - t * 2);
+      } else {
+        if (el.textContent !== to) { el.textContent = to; el.className = 'ch' + (cjk ? ' cjk' : ''); }
+        el.style.opacity = String((t - 0.5) * 2);
+      }
+    }
+  }
+  if (sc[2] === 'word') {
+    // grow 会写 wordEl 的 scale；切场景时必须复位，否则上一段的缩放会带过来
+    if (!sc[3].grow) wordEl.style.transform = 'scale(1)';
+    if (sc[3].grow) {
+      const t = smooth(ms, sc[3].grow[0], sc[3].grow[1]);
+      wordEl.style.transform = `scale(${(0.9 + 0.1 * t).toFixed(4)})`;
+    }
+  } else {
+    wordEl.style.transform = 'scale(1)';
+  }
+  if (sc[2] === 'caption' && sc[3].lines && sc[3].fade) {
+    const [a, b2] = sc[3].fade;
+    const t = smooth(ms, a, b2);
+    for (let i = 0; i < sc[3].lines.length; i++) {
+      const lineA = a + i * 220, lineB = lineA + 520;
+      const lt = smooth(ms, lineA, lineB);
+      const ls = 0.97 + 0.03 * lt;
+      const lo = lt * (1 - smooth(ms, outA, outB));
+      const span = document.getElementById('line' + i);
+      if (span) { span.style.opacity = String(lo); span.style.transform = `translateY(${(1 - lt) * 16}px) scale(${ls})`; }
+    }
+  }
+}
+
+function frame() {
+  // 有锁定时钟时用它，保证「第 N 帧 == 第 N/FPS 秒」严格成立
+  const ms = (typeof window.__lock !== 'undefined' && window.__lock)
+    ? (window.__lock.i / 30) * 1000
+    : performance.now();
+  render(ms);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// 暴露给截图端：查询当前场景名，便于校验
+window.__sceneAt = (ms) => {
+  const sc = SCENES.find((s) => ms >= s[0] && ms < s[1]);
+  return sc ? sc[0] : null;
+};
+window.__DURATION = DURATION;
+</script>
+</body>
+</html>
