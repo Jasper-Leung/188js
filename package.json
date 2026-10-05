@@ -16,6 +16,8 @@
     "assets:geo": "node tools/optimize-assets.mjs",
     "assets:font": "node tools/subset-font.mjs",
     "assets:all": "npm run assets:font && npm run assets:tex && npm run assets:geo",
+    "promo:wt-probe": "node tools/wt-probe.mjs",
+    "promo:walkthrough": "node tools/walkthrough.mjs",
     "verify": "node tools/verify-all.mjs"
   },
   "dependencies": {
@@ -30,6 +32,8 @@
     "draco3dgltf": "^1.5.7",
     "esbuild": "^0.21.5",
     "meshoptimizer": "^0.22.0",
+    "playwright-core": "^1.63.0",
+    "pptxgenjs": "^4.0.1",
     "sharp": "^0.33.5",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
