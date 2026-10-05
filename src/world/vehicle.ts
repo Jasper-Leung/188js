@@ -209,39 +209,33 @@ export const FOOT_LATERAL_OFFSET = 0;
 export const CHAR_FACING_YAW = Math.PI;
 
 /**
- * 三个模型各自的**车头方向**（模型本地空间），实测自轮子 / 骑手的节点平移。
+ * 三个模型各自的**车头方向**（模型本地空间）。
  *
- * ⚠ 这一段里的自行车行**已作废**，被下面紧跟着的那段取代。留着是为了
- * 提醒：它就是被实机推翻的那一版。
- *
- * 它们**导出来是为了让 `verify_facing` 能问**：三个 `rotation.y` 是三处
- * 各自独立的常数，代码里没有任何东西把它们联系起来，所以
- * 「人正着走、车却横着跑」这种故障不会让任何一条现有断言变红。
+ * 导出来是为了让 `verify_facing` 能问：三个 `rotation.y` 是三处各自独立的常数，
+ * 代码里没有任何东西把它们联系起来，所以「人正着走、车却横着跑」这种故障
+ * 不会让任何一条现有断言变红。
  *
  * | | 车头 | 依据 |
  * |---|---|---|
  * | 人物 | **+Z** | 来源项目给角色传的 `yaw` 是 0，而那台自行车车头是 +Z |
- * | 自行车 | ~~**−X**~~ → 实为 **−Z** | 前轮节点平移 x = −0.3114（**与渲染不符**） |
- * | 摩托车 | **+Z** | 前轮节点平移 z = +0.344，后轮 z = −0.299 |
- */
-/**
- * 三个模型各自的**车头方向**（模型本地空间）。
+ * | 自行车 | **−X** | ①轮面在 XY 平面 ⇒ 轴 = 本地 Z ⇒ 车头垂直于 Z ⇒ 只剩 ±X；②前轮 x = −0.3114、后轮 x = +0.2874 ⇒ 取 −X |
+ * | 摩托车 | **+Z** | ①轮面在 YZ 平面 ⇒ 轴 = 本地 X ⇒ 只剩 ±Z；②前轮 z = +0.344、后轮 z = −0.299 ⇒ 取 +Z |
  *
- * ⚠ 自行车的这条**是被实机推翻过一次**的。
+ * ★ 判定走的是 `MODEL_AXLES` 那条**与渲染无关**的链子：
+ *   **轮面在哪个平面里 → 自转轴是哪根轴 → 车头垂直于那根轴 → 只剩两个方向，
+ *   再用轮子节点平移挑一个。**
+ *   它不需要看画面。而且它在摩托车上是**已被实机确认**的（用户报摩托车朝向正确），
+ *   所以能反过来给自行车那一行背书。
  *
- * 我原先按节点平移量出「前轮在 x = −0.311、后轮在 x = +0.287」，
- * 推出车头在 −X、于是补 −90°。渲染出来是**横着的**——车头指向画面右侧，
- * 垂直于路（`chase` 侧视图下一眼可判）。也就是说车头本来就在 **−Z**，
- * 而 −Z 正是本作的前进方向，**一个偏航都不该补**。
- *
- * 摩托车那台的节点平移（z = +0.344 / −0.299）与渲染**是自洽的**，
- * 所以被推翻的只有自行车这一条。教训：几何量测在**没验证过那一维**之前
- * 不该直接写进代码——`verify_facing` 验的是"三个数自洽"，
- * 而三个数一起错的时候它是绿的。
+ * ⚠ 别再用"我看到的画面"去推翻它。2026-10-05 曾经因为一张截图把自行车
+ *   改成 `[0,0,-1]` / `BICYCLE_YAW = 0`，理由是"chase 侧视图里车是横着的"。
+ *   而那张图是**按错了键**拍的：`V` 是切相机（`main.ts` 的 `KeyV` → `cycleCamera()`），
+ *   切载具是 `E`——所以那张图里角色还站在地上，压根没有自行车，
+ *   画面里那条窄片是别的零件。改成 0 之后实机一眼可判：车满侧影横在路上。
  */
 export const MODEL_HEADS = {
   char: [0, 0, 1] as const,
-  bicycle: [0, 0, -1] as const,
+  bicycle: [-1, 0, 0] as const,
   motorcycle: [0, 0, 1] as const,
 };
 
@@ -381,14 +375,13 @@ const BIKE_REAR_WHEELS = ['tripo_part_2'];
  * （`ride.ts` 的 `_fwd = (−sin h, 0, −cos h)`，h=0 时指向 −Z）。
  *
  * three 的 `rotation.y = θ` 把方位角 α 变成 `α − θ`：
- *   · 自行车车头在 **−Z**（方位 270°，实机 chase 侧视图判定）→ 就是 −Z → **θ = 0**
+ *   · 自行车车头在 **−X**（方位 180°）→ 要变成 −Z（方位 270°）→ **θ = −90°**
  *   · 摩托车车头在 **+Z**（方位 0°）→ 要变成 −Z（方位 180°）→ **θ = ±180°**
  *
- * ⚠ 自行车这一条是**实机推翻**过几何量测之后改的，详见 `MODEL_HEADS` 上面
- * 那段：按节点平移量出来的是 −X（要 θ = −90°），渲染出来车是横着的。
- * 节点平移与渲染在这一维上不一致，所以以渲染为准。
+ * 自行车那个 −90° 的依据见 `MODEL_HEADS` 上面的表（轮面 → 轴 → 车头），
+ * 不要因为"看起来歪"就改成 0 —— 2026-10-05 试过，实机是车横着跑。
  */
-export const BICYCLE_YAW = 0;
+export const BICYCLE_YAW = -Math.PI / 2;
 export const MOTORCYCLE_YAW = Math.PI;
 
 /** 把模型缩放到米制：按**前轮**实测半径反推。 */
@@ -699,8 +692,8 @@ export class Vehicle {
     //     写死一个数的话，换模型那天它就悄悄失配——而画面上只是"车有点大"。
     if (bike) {
       bike.scale.setScalar(bicycleScale(bike));
-      // 车头已经在本地 −Z（实机判定），正好是本作前进方向 → 不补偏航。
-      // 这里曾经补 −90°，结果是车横着走、垂直于路。
+      // 车头在本地 −X，本作车头是 −Z → 补 −90°。不补的话车横着走、
+      // 满侧影摊在路上（2026-10-05 实机确认过一次）。
       bike.rotation.y = BICYCLE_YAW;
       bike.visible = this.mode === 'bike';
       this.group.add(bike);
@@ -1050,14 +1043,31 @@ export class Vehicle {
       // 除的是**这台车自己的缩放**（1.798），不是旧的 `WORLD.BIKE_SCALE = 0.012`
       // ——那一代车模的包围盒是 65534，靠 0.012 压回米制；现在这批模型单位正常，
       // 继续除 0.012 会把人放到 87m 高空去。
+      //
+      // ★ 这里**必须用局部矩阵 `bike.matrix`，不能用 `localToWorld()`**。
+      //   `localToWorld()` 给的是**世界**坐标，而 `char.position` 是在
+      //   **父节点 `this.group` 的空间**里解读的——而 `group` 自己已经平移到
+      //   玩家位置（沿路几百米）。两者一混，角色被放到"距原点两倍"的地方：
+      //   实机症状是**载具在、骑手不见了**（滑板模式就是"滑板上没人"）。
+      //   `bike` 与 `char` 是兄弟节点，所以从 bike 本地 → group 本地
+      //   只需要乘 `bike.matrix`（含车自己的缩放与偏航）。
       const s = bike ? bike.scale.x || 1 : 1;
       const p = new Vector3(0, SADDLE_H / s, 0);
-      bike?.localToWorld(p);
-      char.position.copy(bike ? p : new Vector3(0, SADDLE_H, 0));
+      if (bike) {
+        bike.updateMatrix();
+        char.position.copy(p).applyMatrix4(bike.matrix);
+      } else {
+        char.position.set(0, SADDLE_H, 0);
+      }
     } else if (this.mode === 'skate') {
+      // 同上：车与人是兄弟节点，用局部矩阵，别用 localToWorld。
       const p = new Vector3(0, 0.12 / SKATE_SCALE, 0);
-      skate?.localToWorld(p);
-      char.position.copy(skate ? p : new Vector3(0, 0.12, 0));
+      if (skate) {
+        skate.updateMatrix();
+        char.position.copy(p).applyMatrix4(skate.matrix);
+      } else {
+        char.position.set(0, 0.12, 0);
+      }
     } else {
       // 徒步：**站在 ride 位上，不 sideways 挪。**
       //

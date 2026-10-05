@@ -2296,6 +2296,101 @@ check('verify_calib', () => {
 });
 
 /**
+ * ## 骑手必须**真的骑在车上**
+ *
+ * 这一条是被用户一句「滑板上要站人」逼出来的，而它抓到的 bug 比听上去严重：
+ * **骑手在自行车上也不见了**，只是没人提，因为滑板那一眼最容易看出来。
+ *
+ * ## 成因：把世界坐标喂进了本地字段
+ *
+ * `Vehicle.update()` 里算骑手位置时写的是
+ * `bike.localToWorld(p)` —— 它返回**世界**坐标；
+ * 而 `char.position` 是在**父节点 `this.group` 的空间**里解读的。
+ * `group` 自己已经平移到玩家位置（沿路几百米），两者一混，
+ * 角色被放到「距原点两倍」的地方，实机上就是**人不见了**。
+ *
+ * `bike` 与 `char` 是**兄弟节点**，所以从车的本地空间走到 group 本地空间
+ * 只需要乘 `bike.matrix`（含车自己的缩放与偏航），不需要任何世界坐标。
+ *
+ * ## 为什么这一族 bug 没人发现
+ *
+ * 症状是"画面里少个人"，而这一路上所有判据量的都是**别的东西**：
+ * 速度、离地、面数、离路判定、朝向——全都正常。
+ * 徒步分支用 `char.position.set()`（本来就是本地坐标）所以没事，
+ * 于是"人在徒步时可见、在车上时不可见"这件事没有留下任何数字痕迹。
+ *
+ * ## 它会红的方式
+ *
+ * 把 `applyMatrix4(bike.matrix)` 换回 `localToWorld(p)` → 距离从 1m 变成 ~470m，红。
+ */
+check('verify_rider', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const char = new Object3D();
+  const bike = new Object3D();
+  const skate = new Object3D();
+  const v = new Vehicle();
+  v.attach({ bike, skate, char, clips: collectClips([]) });
+
+  // 沿路的真实量级：路线坐标是几百米量级，所以「本地当成世界」会差出几百米。
+  const RIDE_POS = new Vector3(-412, 0, 233);
+
+  for (const mode of ['bike', 'skate'] as RideMode[]) {
+    v.set(mode);
+    v.group.position.copy(RIDE_POS);
+    v.group.updateMatrixWorld(true);
+    // 走两帧，让阻尼类的东西稳定下来。
+    for (let i = 0; i < 2; i++) {
+      v.group.position.copy(RIDE_POS);
+      v.update(1 / 60, 8, 0);
+    }
+    v.group.updateMatrixWorld(true);
+
+    asserts++;
+    const deck = (mode === 'bike' ? bike : skate).getWorldPosition(new Vector3());
+    const rider = char.getWorldPosition(new Vector3());
+    const d = rider.distanceTo(deck);
+    if (!(d <= 2)) {
+      probs.push(
+        `${mode}：骑手离车 ${d.toFixed(1)}m` +
+          `（车在 (${deck.x.toFixed(0)}, ${deck.y.toFixed(1)}, ${deck.z.toFixed(0)})，` +
+          `人在 (${rider.x.toFixed(0)}, ${rider.y.toFixed(1)}, ${rider.z.toFixed(0)})）`,
+      );
+    }
+
+    // 车换了模式之后人也必须还在车上：单独量一次"人在不在原点附近"，
+    // 能把"整体平移"这种错误和"坐标空间搞错"这种错误分开。
+    asserts++;
+    if (Math.abs(rider.z - RIDE_POS.z) > 2 || Math.abs(rider.x - RIDE_POS.x) > 2) {
+      probs.push(`${mode}：骑手被甩离 ride 位，横向偏了 ${(rider.x - RIDE_POS.x).toFixed(1)}m / ${(rider.z - RIDE_POS.z).toFixed(1)}m`);
+    }
+  }
+
+  // 徒步那条分支用 `char.position.set()`，本来就是本地坐标——
+  // 顺手钉住它，免得有人"顺手统一"成 applyMatrix4 而弄坏徒步。
+  asserts++;
+  {
+    v.set('foot');
+    v.group.position.copy(RIDE_POS);
+    v.update(1 / 60, 4, 0);
+    v.group.updateMatrixWorld(true);
+    const rider = char.getWorldPosition(new Vector3());
+    const want = RIDE_POS.clone().add(new Vector3(FOOT_LATERAL_OFFSET, 0, 0));
+    const d = rider.distanceTo(want);
+    if (d > 0.5) {
+      probs.push(`徒步：角色应在 ride 位，实际偏了 ${d.toFixed(2)}m`);
+    }
+  }
+
+  return {
+    ok: probs.length === 0,
+    detail: probs.length === 0 ? '自行车 / 滑板 / 徒步三种模式下骑手都在车上（远点 470m 量级）' : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
  * ## 三个载具的前方必须是**同一个方向**
  *
  * 这一条是被实机抓出来的：人物**倒着走**——玩家从背后看到的是他的脸。
