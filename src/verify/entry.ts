@@ -23,7 +23,7 @@ import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency 
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
 import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
-import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
+import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
@@ -34,17 +34,10 @@ import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT,
 import { canRide, isInWorld, interactAt } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
-import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXLES, facingDir, motoLeanAt, bicycleScale, localUnion, type RideMode } from '../world/vehicle';import { assertRide } from './ride';
+import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, rootBoneName, rootTrackOf, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, type RideMode } from '../world/vehicle';import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
 import { PRESETS, clampTier } from '../core/settings';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
-
-/** 把角度差折进 (−π, π]。朝向判据要用：0 与 2π 是同一个方向。 */
-function wrapPi(a: number): number {
-  let x = (a + Math.PI) % (Math.PI * 2);
-  if (x < 0) x += Math.PI * 2;
-  return x - Math.PI;
-}
 
 export interface Check {
   name: string;
@@ -1434,14 +1427,29 @@ check('verify_foot_anim', () => {
   //   · `restPoseOf()` 量不到任何骨 ⇒ `bindMissingBones()` 无从补
   //   · 根骨轨道根本不存在 ⇒ 「根骨还有没有水平位移」这一条永远绿
   // 那样的断言不测任何东西。
+  //
+  // ★★ 骨名必须是 **three 清洗之后**的 `mixamorigHips`（**没有冒号**）。
+  //   这一条本身就是这个 bug 的墓碑：原来的 fixture 写的是 `mixamorig:Hips`，
+  //   正好命中旧实现的正则 `/(^|:)hips$/`——而真实素材里 three 的
+  //   `GLTFLoader` 会把 `:` **删掉**，轨道名是 `mixamorigHips.position`，
+  //   那条正则**一条都匹配不上**。
+  //   于是：实现对真素材是失效的，判据对假名字是绿的，两边一起绿了整整一轮。
+  //   判据量自己造的数据时，必须确认那个数据**和素材一模一样**。
   const BONES = [
-    'mixamorig:Hips',
-    'mixamorig:Spine',
-    'mixamorig:LeftFoot',
-    'mixamorig:RightFoot',
-    'mixamorig:LeftToeBase',
-    'mixamorig:RightToeBase',
+    'mixamorigHips',
+    'mixamorigSpine',
+    'mixamorigLeftFoot',
+    'mixamorigRightFoot',
+    'mixamorigLeftToeBase',
+    'mixamorigRightToeBase',
   ];
+  // ★ 另加一根**零子树的顶骨**，和真模型里的 `neutral_bone` 一样。
+  //   它是「按名字猜根骨」会踩的坑：谁要是把 `rootBoneName()` 退化成
+  //   「第一根顶骨」，在这里就会选中它 —— 于是根位移根本没被剥掉，
+  //   而这一条断言**会红**。
+  const decoy = new Bone();
+  decoy.name = 'neutral_bone';
+  char.add(decoy);
   for (const b of BONES) {
     const bone = new Bone();
     bone.name = b;
@@ -1450,11 +1458,11 @@ check('verify_foot_anim', () => {
 
   const times = new Float32Array([0, 0.5, 1]);
   /** 一条位置轨道；`drift` 是水平方向的根位移（要断言它被抹成 0）。 */
-  const posTrack = (bone: string, drift: number) =>
+  const posTrack = (bone: string, drift: number, y: number) =>
     new KeyframeTrack(
       `${bone}.position`,
       times,
-      Float32Array.from([0, 0, drift, 0, 0, drift, 0, 0, drift]),
+      Float32Array.from([0, y, drift, 0, y, drift, 0, y, drift]),
     );
   /** 一条四元数轨道。三个轴一起转，用来凑满「每根骨都有归属」。 */
   const quatTrack = (bone: string) => {
@@ -1463,19 +1471,40 @@ check('verify_foot_anim', () => {
     for (let i = 0; i < n; i++) v.set([0, 0, 0, 1], i * 4);
     return new KeyframeTrack(`${bone}.quaternion`, times, v);
   };
-  /** 移动三段：覆盖全部 6 根骨（含脚与分趾），并且带 3.2m 量级的根位移。 */
-  const fullClip = (name: string, dur: number) =>
+  /**
+   * 移动三段：覆盖全部 6 根骨（含脚与分趾），并且带根位移。
+   *
+   * ★ 根位移**沿 +Z 且单调递增**，和真素材一样（`survivor.glb` 的 `walk` /
+   *   `run` / `骑自行车` 三段都是一条 z 单调上升的斜坡）。
+   *   写成「位移在 x 上」的话，「根骨是不是找对了」这条就没法用步速交叉验证。
+   *   `drift` 也就是**这一段自带的步速**（位移 ÷ 时长），
+   *   播放倍率那条断言直接拿它当基准。
+   *
+   * ★ `y` 是骨盆高度、**`bob` 是它的上下起伏**，两者分开给：
+   *   起伏留着才有走的感觉（x/z 必须清零、y 必须留着，是一对），
+   *   而骨盆高度是骑行站位的输入（站位 = 鞍面 − 骨盆高度）。
+   *   `骑自行车` 段取 `bob = 0`：`pelvisHeightOf` 取的是**均值**，
+   *   给它一个带起伏的值，断言就得写 `y + 2/3·bob` 这种没法读的数。
+   */
+  const hipsTrack = (drift: number, y: number, bob: number) => {
+    const v: number[] = [];
+    for (let i = 0; i < times.length; i++) {
+      v.push(0, y + (i % 2 === 0 ? bob : 0), drift * (i / (times.length - 1)));
+    }
+    return new KeyframeTrack('mixamorigHips.position', times, Float32Array.from(v));
+  };
+  const fullClip = (name: string, dur: number, drift: number, y: number, bob: number) =>
     new AnimationClip(name, dur, [
-      posTrack('mixamorig:Hips', 3.2),
+      hipsTrack(drift, y, bob),
       ...BONES.slice(1).map((b) => quatTrack(b)),
     ]);
   /** 待机：按合片后的真实情况——**只覆盖 4 根，脚与分趾骨没有轨道**。 */
   const idleClip = () =>
     new AnimationClip('idle', 2, [
-      posTrack('mixamorig:Hips', 0),
-      quatTrack('mixamorig:Spine'),
-      quatTrack('mixamorig:LeftFoot'),
-      quatTrack('mixamorig:RightFoot'),
+      posTrack('mixamorigHips', 0, 0.5224),
+      quatTrack('mixamorigSpine'),
+      quatTrack('mixamorigLeftFoot'),
+      quatTrack('mixamorigRightFoot'),
     ]);
 
   const v = new Vehicle();
@@ -1488,9 +1517,13 @@ check('verify_foot_anim', () => {
     // `idle` 这一段是这一版人物模型才有的（`survivor_rigged_v2_fullanim.glb`
     // 共 9 段：run · walk · 骑自行车 · clap · surf · dig · jump · idle · wait）。
     clips: collectClips([
-      fullClip('run', 0.7),
-      fullClip('walk', 1.0),
-      fullClip('骑自行车', 1.0),
+      // 位移 / 时长 = 0.7 / 0.7 = 1.0 m/s、1.5 / 1.0 = 1.5 m/s、2.0 / 1.0 = 2.0 m/s
+      // ——刻意取成三个**互不相同**的步速，好让下面「播放倍率对不对」能分辨
+      // 「倍率算的是这一段自己的步速」还是「三条轨共用一个数」。
+      // 骨盆高度取自真素材实测（walk 0.512 / 骑 0.504），`bob` 是它的起伏。
+      fullClip('run', 0.7, 0.7, 0.4616, 0.017),
+      fullClip('walk', 1.0, 1.5, 0.512, 0.011),
+      fullClip('骑自行车', 1.0, 2.0, 0.504, 0),
       idleClip(),
     ]),
   });
@@ -1553,12 +1586,19 @@ check('verify_foot_anim', () => {
 
   // 1b. ★ **动画必须在原地播**：根骨的水平位移必须是 0。
   //
-  // `walk` / `run` / `骑自行车` 都带根位移（来源项目实测约 3.2m，且位移在
-  // 骨架的祖先节点上）。不抹掉的话，动画把人往前拖、车把人往后拽，
-  // 停下的那一刻根节点弹回原位 —— 玩家看到的就是**「停止走动的时候
-  // 人就回来一段距离」**。
+  // `walk` / `run` / `骑自行车` 都带根位移（实测 1.49 / 2.91 / 5.22 m），
+  // 不抹掉的话，动画把人往前拖、车把人往后拽，停下的那一刻根节点弹回原位
+  // —— 玩家看到的就是**「停止走动的时候人就回来一段距离」**。
+  //
+  // ★ 这里**问真代码算出来的根骨名**（`rootBoneName(char)`），
+  //   不再自己写一条正则。原来的判据里那条 `/(^|:)hips$/i` 与旧实现是
+  //   同一个表达式——「判据和实现认同一个错东西」时，两边一起绿。
   asserts++;
   {
+    const rootName = rootBoneName(char);
+    if (rootName !== 'mixamorigHips') {
+      probs.push(`根骨认成了 "${rootName}"，应为 mixamorigHips —— 认错根骨就等于没剥根位移`);
+    }
     const clips = v.rideClips;
     for (const [name, clip] of [
       ['walk', clips.walk],
@@ -1570,9 +1610,7 @@ check('verify_foot_anim', () => {
         probs.push(`缺 ${name} 片段`);
         continue;
       }
-      const rootTrack = clip.tracks.find(
-        (tr) => tr.name.endsWith('.position') && /(^|:)hips$/i.test(tr.name.slice(0, -'.position'.length)),
-      );
+      const rootTrack = rootTrackOf(clip, rootName);
       if (!rootTrack) {
         probs.push(`${name} 里找不到根骨的 position 轨道`);
         continue;
@@ -1587,6 +1625,81 @@ check('verify_foot_anim', () => {
         probs.push(`${name} 的根骨仍有水平位移（x ${maxX.toFixed(3)} / z ${maxZ.toFixed(3)}），动画会拖着人走`);
       }
     }
+  }
+
+  // 1b-2. ★ **根骨的 Y 必须留着** —— 那是走路的上下起伏。
+  //
+  // 与 1b 是一对：只清 x/z 是对的，把 y 一起清成人就变成一块板。
+  // 这里量「处理后」的 y 跨度必须仍然是**非零的**，而夹具给的是 ±0.03 的 bob。
+  asserts++;
+  {
+    const tr = rootTrackOf(v.rideClips.walk!, rootBoneName(char));
+    let minY = Infinity;
+    let maxY = -Infinity;
+    if (tr) {
+      for (let i = 1; i < tr.values.length; i += 3) {
+        minY = Math.min(minY, tr.values[i]);
+        maxY = Math.max(maxY, tr.values[i]);
+      }
+    }
+    if (!(maxY - minY > 1e-3)) {
+      probs.push(`walk 根骨的 y 起伏只有 ${(maxY - minY).toExponential(1)}，走路会没有起伏（y 被一起清掉了）`);
+    }
+  }
+
+  // 1b-3. ★ **播放倍率必须按「这一段自己的步速」算**
+  //
+  // 这是「走和跑分不出来」的另一半：根位移剥掉之后，地面位移由玩家决定，
+  // 而动画仍按 1× 播 —— 地面 6 m/s 而 `walk` 自带步速只有 0.64 m/s，
+  // 脚就在地上滑行。倍率 = 当前速度 ÷ 该段步速。
+  //
+  // ★ 量的是 **Vehicle 自己存下来的那一份步速**，不是「读处理后的片段重算」：
+  //   剥离之后水平位移已清零，重算必然得 0，于是「步速在剥离之前量」
+  //   这条会永远绿 —— 而它正是这一族 bug 的根。
+  //   夹具步速：walk 1.5/1.0 = 1.5、run 0.7/0.7 = 1.0、ride 2.0/1.0 = 2.0 m/s。
+  asserts++;
+  {
+    const speeds = v.clipCadenceSpeeds;
+    if (!(Math.abs(speeds.walk - 1.5) < 1e-3)) {
+      probs.push(`walk 记下的自带步速是 ${speeds.walk.toFixed(3)} m/s，应为 1.50（量到 0 = 在剥离之后量的）`);
+    }
+    if (!(Math.abs(speeds.run - 1.0) < 1e-3)) {
+      probs.push(`run 记下的自带步速是 ${speeds.run.toFixed(3)} m/s，应为 1.00`);
+    }
+    if (!(Math.abs(speeds.ride - 2.0) < 1e-3)) {
+      probs.push(`骑行动画记下的自带步速是 ${speeds.ride.toFixed(3)} m/s，应为 2.00`);
+    }
+    // 三条轨的倍率在同一个速度下必须**互不相同**——
+    // 「三条轨共用一个倍率」的写法会让这一条红。
+    const at = (s: number) => [speeds.walk, speeds.run, speeds.ride].map((n) => cadenceScale(s, n));
+    const w1 = at(1.2);
+    if (!(w1[0] > 0.7 && w1[0] < 0.9)) {
+      probs.push(`1.2 m/s 时 walk 倍率 ${w1[0].toFixed(3)}，1.2 ÷ 1.5 应约 0.80`);
+    }
+    if (!(w1[1] > 1.1 && w1[1] < 1.3)) {
+      probs.push(`1.2 m/s 时 run 倍率 ${w1[1].toFixed(3)}，1.2 ÷ 1.0 应约 1.20（三条轨共用一个数就会错）`);
+    }
+    if (!(w1[2] > 0.5 && w1[2] < 0.7)) {
+      probs.push(`1.2 m/s 时骑行动画倍率 ${w1[2].toFixed(3)}，1.2 ÷ 2.0 应约 0.60`);
+    }
+    // 上限：再快腿就是一片糊，而 6 m/s 本来已经是冲刺。
+    if (cadenceScale(60, 1) > 2.5) {
+      probs.push(`60 m/s 时倍率 ${cadenceScale(60, 1).toFixed(2)}，没有上限，腿会糊成一片`);
+    }
+    // 车停住时骑行那条必须 0：人定在踩到一半的姿势上，而不是原地空踩。
+    if (cadenceScale(0, 2.0) !== 0) {
+      probs.push(`车停住时骑行动画倍率是 ${cadenceScale(0, 2.0)}，应为 0`);
+    }
+  }
+
+  // 1b-4. ★ **骨盆高度必须量得出来**（骑行站位的前提）
+  //
+  // 站位 = 鞍面 − 骨盆高度。少了骨盆高度就只能写死一个数，
+  // 而写死的数与这台车、与这份动画都对不上——症状是「人不在自行车上」。
+  // 夹具 ride 段取 `bob = 0`、骨盆 0.504（= 真素材实测值），所以就是 0.504。
+  asserts++;
+  if (!(Math.abs(v.pelvisHeight - 0.504) < 1e-4)) {
+    probs.push(`骑手骨盆高度量到 ${v.pelvisHeight.toFixed(4)}，应为 0.504（站位靠它相减）`);
   }
 
   // 1c. ★ **idle 必须覆盖每一根骨**（含脚 / 分趾骨）。
@@ -1639,35 +1752,60 @@ check('verify_foot_anim', () => {
     }
   }
 
-  // 5. 朝向：徒步时角色必须**朝着自己走的方向**。
-  //    原来是 `heading + π/2`（侧对路肩），用户要求方向与行走方向一致。
+  // 5. ★ **世界**朝向：角色的正面必须指着前进方向。
+  //
+  // ## 为什么必须换成「世界朝向」，局部量看不见这个 bug
+  //
+  // 原来量的是 `char.rotation.y === heading + CHAR_FACING_YAW`，而实现写的
+  // 正是 `heading + CHAR_FACING_YAW`——**判据和实现是同一个表达式**。
+  // 于是一个更深的错误完全隐形：实机里 `Vehicle.group` 挂在
+  // `ride.bikePivot` 下面，而 `bikePivot.rotation.y` **已经是 heading**，
+  // 所以角色的世界朝向是 `2·heading + π`——**航向被算了两遍**。
+  // 局部量恰好等于期望值，判据全绿；实机上 h=0 看不出任何异常，
+  // 一转弯人却往反方向转、还转得是两倍。
+  //
+  // 现在把 `group` 挂进一个**带航向的父节点**（复现真实场景图），
+  // 再量角色的**世界**正面（模型正面朝 +Z）是否等于前进方向
+  // `(−sin h, 0, −cos h)`。这一条对「航向算两遍」是**真红**。
   asserts++;
+  const pivot = new Group();
+  pivot.add(v.group);
+  const worldFacing = new Vector3();
+  const quat = new Quaternion();
+  const charFwd = (h: number) => {
+    pivot.rotation.y = h;
+    char.updateWorldMatrix(true, true);
+    char.getWorldQuaternion(quat);
+    return worldFacing.set(0, 0, 1).applyQuaternion(quat); // 人物模型正面
+  };
   for (const h of [0, 0.7, -1.3, 2.4, Math.PI]) {
     run(1.5, 0.5, h);
-    // ★ 期望值是 heading **+ CHAR_FACING_YAW**，不是 heading。
-    //   人物模型正面朝 +Z、车头约定是 -Z，差 180°。原来的判据写的是
-    //   char.rotation.y - h —— **它把 bug 写进了判据**，所以代码和判据
-    //   一起错、一起绿：实机上人一直是倒着走的。
-    const diff = Math.abs(wrapPi(char.rotation.y - (h + CHAR_FACING_YAW)));
-    if (diff > 1e-6) {
-      probs.push(`heading=${h.toFixed(2)} 时角色朝向是 ${char.rotation.y.toFixed(3)}，差 ${(diff * 57.3).toFixed(1)}°`);
+    const f = charFwd(h);
+    // 期望：世界正面 = 本作的前进方向 (−sin h, 0, −cos h)
+    const want = new Vector3(-Math.sin(h), 0, -Math.cos(h));
+    const diff = Math.acos(Math.min(1, Math.max(-1, f.dot(want))));
+    if (diff > 1e-4) {
+      probs.push(
+        `heading=${h.toFixed(2)} 时角色世界朝向差 ${((diff * 180) / Math.PI).toFixed(1)}°` +
+          `（局部 ${char.rotation.y.toFixed(3)}，父节点已带 heading —— 两者相加才是世界朝向）`,
+      );
     }
   }
 
-  // 6. 滑板也要朝前进方向（同一个 bug 的另一半）
+  // 6. 滑板同理（同一个 bug 的另一半），而且它是**唯一**会在实机上
+  //    一眼看出「航向算两遍」的模式：滑板没有车挡着，板的朝向与人一起翻。
   asserts++;
   v.set('skate');
   for (const h of [0.5, -0.9, 2.0]) {
     run(2, 0.3, h);
-    // ★ 期望值是 heading **+ CHAR_FACING_YAW**，不是 heading。
-    //   人物模型正面朝 +Z、车头约定是 -Z，差 180°。原来的判据写的是
-    //   char.rotation.y - h —— **它把 bug 写进了判据**，所以代码和判据
-    //   一起错、一起绿：实机上人一直是倒着走的。
-    const diff = Math.abs(wrapPi(char.rotation.y - (h + CHAR_FACING_YAW)));
-    if (diff > 1e-6) {
-      probs.push(`滑板 heading=${h.toFixed(2)} 时角色朝向差 ${(diff * 57.3).toFixed(1)}°`);
+    const f = charFwd(h);
+    const want = new Vector3(-Math.sin(h), 0, -Math.cos(h));
+    const diff = Math.acos(Math.min(1, Math.max(-1, f.dot(want))));
+    if (diff > 1e-4) {
+      probs.push(`滑板 heading=${h.toFixed(2)} 时角色世界朝向差 ${((diff * 180) / Math.PI).toFixed(1)}°`);
     }
   }
+  v.set('foot');
 
   run(1.2, 3);
   const walkMoving = v.footBlend.walk;
@@ -1678,7 +1816,7 @@ check('verify_foot_anim', () => {
   run(0, 2);
   const idleStanding = v.footIdleWeight;
 
-  const summary = `站定 walk/run=0 且 idle=${idleStanding.toFixed(2)} · 走 walk ${walkMoving.toFixed(2)} · 朝向 = heading + π（人物正面朝 +Z）`;
+  const summary = `站定 walk/run=0 且 idle=${idleStanding.toFixed(2)} · 走 walk ${walkMoving.toFixed(2)} · 世界朝向 = 前进方向（父节点已带航向，局部只补 π）`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -2188,6 +2326,366 @@ check('verify_phase', () => {
   return expect(probs.length === 0, probs.length ? probs.join('；') : '六个阶段 / 五个否决理由 / HUD 与可骑同源', asserts);
 });
 
+// ---------------------------------------------------------------- 自行车装配
+/**
+ * ## 自行车必须**装成一台车**，而不是一堆各自拧 `rotation` 的零件
+ *
+ * 这一族判据对应用户报的四件事：
+ * 车轮倒着转 / 人不在车上 / 脚撑该折不折 / 车把不打方向。
+ *
+ * ### 为什么夹具要照抄真素材的**结构**，而不是随便造几个球
+ *
+ * `assembleBike()` 靠三件事认出这台车：**零件名**、**每个零件的轴向**、
+ * **哪些零件够到地面**。三者错一个，装配就静默失效（`rig = null`），
+ * 而那只是「少几个功能」，不报错。
+ * 所以夹具按 `bicycle.glb` 的实测值建：
+ *
+ * | 零件 | 位置（车模本地） | 形状 |
+ * |---|---|---|
+ * | `tripo_part_0` 前轮 | (−0.305, 0.1998, 0.0737) | 圆柱，**轴 = 本地 Z**，R 0.1946 |
+ * | `tripo_part_2` 后轮 | (0.2915, 0.1997, −0.0404) | 同上 |
+ * | `tripo_part_7` 鞍面 | (0.1377, 0.5046, −0.0164) | 0.17×0.08×0.13，顶面 0.5446 |
+ * | `tripo_part_11` 脚撑 | (0.2997, 0.0983, −0.0446) | 0.05×0.197×0.17，**底端到 y=0** |
+ * | `crankAxle` / `crankArmL·R` / `pedalL·R` | 曲柄轴心 (0.0535, 0.1724, 0.005) | — |
+ * | `tripo_part_8` / `_23` / `_25` / `_5` | 前端 | — |
+ *
+ * ★ 前轮**横向**比后轮偏 0.114（实测值）**故意保留**：
+ *   判据不依赖它，但它证明装配用的是**量出来的轴心**而不是写死的数。
+ *   脚撑底端**必须到 y = 0**——它是全车唯一碰地面的零件，
+ *   「折角绕后轴」这条判据靠它成立。
+ */
+check('verify_bike_rig', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const R = 0.1946;
+  const mk = (geo: BufferGeometry, name: string, x: number, y: number, z: number) => {
+    const m = new Mesh(geo);
+    m.name = name;
+    m.position.set(x, y, z);
+    return m;
+  };
+  // 轮：圆柱默认轴是 Y，转一下让**轮面落在 XY 平面、轴指向本地 Z**。
+  // ⚠ `verify_calib` 的夹具把轴做成了 X（那是那份夹具自己的简化）；
+  //   真素材是 Z，而**自转轴写错的话轮子会横着滚**——
+  //   所以这里的夹具必须与素材一致，否则判据量的是一个不存在的轴。
+  const wheelGeo = () => {
+    const g = new CylinderGeometry(R, R, 0.089, 20);
+    g.rotateX(Math.PI / 2);
+    return g;
+  };
+  const FRONT = [-0.305, 0.1998, 0.0737] as const;
+  const REAR = [0.2915, 0.1997, -0.0404] as const;
+  const CRANK = [0.0535, 0.1724, 0.005] as const;
+
+  const buildBike = () => {
+    const root = new Group();
+    root.add(
+      mk(wheelGeo(), 'tripo_part_0', ...FRONT),
+      mk(wheelGeo(), 'tripo_part_2', ...REAR),
+      // 鞍面：顶面在 0.5446（实测 0.5441）
+      mk(new BoxGeometry(0.17, 0.08, 0.13), 'tripo_part_7', 0.1377, 0.5046, -0.0164),
+      // 脚撑：0.05 × 0.197 × 0.17，底端正好落地
+      mk(new BoxGeometry(0.05, 0.197, 0.17), 'tripo_part_11', 0.2997, 0.0983, -0.0446),
+      // 曲柄组：轴心 + 两条臂 + 两只踏板（左右相差 180°）
+      mk(new BoxGeometry(0.024, 0.024, 0.054), 'crankAxle', ...CRANK),
+      mk(new BoxGeometry(0.04, 0.198, 0.012), 'crankArmL', CRANK[0], CRANK[1] - 0.099, CRANK[2]),
+      mk(new BoxGeometry(0.04, 0.198, 0.012), 'crankArmR', CRANK[0], CRANK[1] + 0.099, CRANK[2]),
+      mk(new BoxGeometry(0.05, 0.02, 0.065), 'pedalL', CRANK[0] - 0.007, CRANK[1] - 0.083, CRANK[2] + 0.051),
+      mk(new BoxGeometry(0.05, 0.02, 0.065), 'pedalR', CRANK[0] + 0.007, CRANK[1] + 0.083, CRANK[2] - 0.051),
+      // 前端：车把 + 两只握把 + 前挡泥板（跟着前轮一起转向的那一坨）
+      mk(new BoxGeometry(0.05, 0.03, 0.37), 'tripo_part_8', -0.104, 0.619, 0.004),
+      mk(new BoxGeometry(0.08, 0.03, 0.03), 'tripo_part_23', -0.104, 0.619, 0.16),
+      mk(new BoxGeometry(0.08, 0.03, 0.03), 'tripo_part_25', -0.104, 0.619, -0.16),
+      mk(new BoxGeometry(0.1, 0.16, 0.06), 'tripo_part_5', -0.225, 0.357, 0.06),
+    );
+    return root;
+  };
+
+  // 角色：一根骨 + 一段骑行片段（骨盆高度 0.504 = 真素材实测值）
+  //
+  // ★ **必须带一个网格**，否则 `autoScaleToHeight()` 量到空盒、恒返回 1，
+  //   「缩放幂等」那条断言就变成 1 === 1 的空转。
+  //   网格高 **1.0**，与真素材归一化后的身高一致（实测包围盒 y 0..0.998），
+  //   所以缩放应当是 1.75/1.0 = 1.75。
+  const char = new Object3D();
+  const hips = new Bone();
+  hips.name = 'mixamorigHips';
+  char.add(hips);
+  const body = new Mesh(new BoxGeometry(0.4, 1.0, 0.2));
+  body.name = 'charBody';
+  body.position.set(0, 0.5, 0);
+  char.add(body);
+  const rideTimes = new Float32Array([0, 1]);
+  const rideClip = new AnimationClip('骑自行车', 1, [
+    new KeyframeTrack('mixamorigHips.position', rideTimes, Float32Array.from([0, 0.504, 0, 0, 0.504, 0])),
+  ]);
+
+  const bike = buildBike();
+  const v = new Vehicle();
+  v.attach({
+    bike,
+    motorcycle: new Object3D(),
+    skate: new Object3D(),
+    char,
+    clips: collectClips([rideClip]),
+  });
+  const ok = v.set('bike');
+
+  // 1. 装配必须成功。`rig = null` 意味着转向 / 脚撑 / 曲柄**全部静默失效**。
+  asserts++;
+  if (!ok || v.id !== 'bike') {
+    probs.push('切不到 bike 模式');
+    return expect(false, probs.join('；'), asserts);
+  }
+  if (!v.hasBikeRig) {
+    probs.push('自行车装配返回 null —— 转向 / 脚撑 / 曲柄全都静默失效');
+    return expect(false, probs.join('；'), asserts);
+  }
+
+  // 1b. ★ **角色缩放必须幂等**
+  //
+  // `attach()` 与每次 `set()` 都会 `rebuild()`，而 `rebuild()` 会把量出来的
+  // 缩放**写回同一个节点**。`Box3.setFromObject()` 量的是**世界**盒子，
+  // 于是第二次量到的是自己的产物：`1.75 / (0.998×1.753) = 1.000` ——
+  // **人矮 43%**。触发只需要按一下 `E`，或者摩托车模型晚到。
+  //
+  // 症状与「人不在车上」是同一个画面（人小一号），
+  // 而画面上分不出是站位算错还是人被缩小了。
+  asserts++;
+  {
+    const first = char.scale.x;
+    asserts++;
+    if (Math.abs(first - 1.75) > 0.01) {
+      probs.push(`角色缩放 ${first.toFixed(4)}，身高 1.0 的模型应为 1.75 —— 量不到就是量到了空盒`);
+    }
+    v.set('foot');
+    v.set('bike');
+    asserts++;
+    if (Math.abs(char.scale.x - first) > 1e-6) {
+      probs.push(
+        `角色缩放第一次 ${first.toFixed(4)}、切一轮载具后 ${char.scale.x.toFixed(4)} —— 量到了自己的产物（人缩小）`,
+      );
+    }
+  }
+
+  // 2. ★ **轮子必须往前转**（正负号）
+  //
+  // 不打滑要求 `v_中心 + ω × r = 0`：前进 −X、轴 +Z、接地点 (0,−R,0)
+  // ⇒ **ω = +v/R**。原来三个载具都写成负号，于是轮子全在倒着转，
+  // 而既有判据量的都是「转了多少」，没有一条量正负号。
+  asserts++;
+  const bikeScale = bike.scale.x;
+  {
+    for (let i = 0; i < 60; i++) v.update(1 / 60, 2, 0); // 1 秒，2 m/s
+    const ang = v.bikeWheelAngle;
+    if (!(ang > 0)) {
+      probs.push(`前进 2m/s 一秒后后轮转角是 ${ang.toFixed(3)} rad，轮子在倒着转（应为正）`);
+    }
+    asserts++;
+    // 不打滑：转过的角度 = 里程 ÷ 轮半径。半径用实测轮半径换算成车模单位。
+    const want = 2 / (0.35);
+    if (Math.abs(ang - want) > 0.02) {
+      probs.push(`转角 ${ang.toFixed(3)} rad，里程 2m ÷ 轮半径 0.35m 应为 ${want.toFixed(3)}`);
+    }
+  }
+
+  // 3. ★ **曲柄必须比轮子慢 `BIKE_GEAR_RATIO` 倍**（链盘比飞轮大）
+  //
+  // 少了传动比就是「链子在用减速把轮子往回驱」——那个机构不存在。
+  //
+  // ⚠ 判据写成 `crankAngle × gear === wheelAngle`，**不是**两者的比值：
+  //   `wheelAngle = 里程 / 轮半径(米)`、`crankAngle = 里程 / 传动比`，
+  //   两式相除会剩下一个**米**的量纲因子（0.35），而传动比是无量纲的。
+  //   我第一版就写成了「比值 = 1/2.6」，量到 0.1346 = 0.35/2.6 ——
+  //   **量出来的是对的，是判据把量纲漏了**。
+  asserts++;
+  {
+    const geared = v.bikeCrankAngle * BIKE_GEAR_RATIO;
+    if (!(v.bikeCrankAngle > 0)) {
+      probs.push('曲柄没跟着轮子转（人在踩踏板而踏板不动）');
+    }
+    asserts++;
+    if (Math.abs(geared - v.bikeWheelAngle) > 1e-3) {
+      probs.push(
+        `曲柄角×${BIKE_GEAR_RATIO} = ${geared.toFixed(3)}，轮角 ${v.bikeWheelAngle.toFixed(3)} —— 两者应相等（轮子比曲柄快 ${BIKE_GEAR_RATIO} 倍）`,
+      );
+    }
+  }
+
+  // 4. ★ **脚撑：停着放下来垂直于地面，骑起来折起**
+  //
+  // 用户明确要求的行为，而原来**没有任何**断言会红。
+  // 纯函数先问一遍（阈值边界），再问装配后的实际角度。
+  asserts++;
+  {
+    if (standFoldAt(0) !== 0) probs.push('停着时脚撑不是放下的（0 rad）');
+    asserts++;
+    if (standFoldAt(8) !== STAND_FOLD_ANGLE) {
+      probs.push(`骑起来时脚撑不是折起角 ${STAND_FOLD_ANGLE.toFixed(3)}`);
+    }
+  }
+  asserts++;
+  {
+    // 停住 3 秒（damp 收敛）
+    for (let i = 0; i < 180; i++) v.update(1 / 60, 0, 0);
+    const down = v.standAngle;
+    if (Math.abs(down) > 0.02) {
+      probs.push(`停住 3 秒后脚撑角度 ${down.toFixed(3)} rad，应为 0（垂直落地）`);
+    }
+    asserts++;
+    // 起步 3 秒
+    for (let i = 0; i < 180; i++) v.update(1 / 60, 3, 0);
+    const up = v.standAngle;
+    if (Math.abs(up - STAND_FOLD_ANGLE) > 0.05) {
+      probs.push(`骑 3 秒后脚撑角度 ${up.toFixed(3)} rad，应折起到 ${STAND_FOLD_ANGLE.toFixed(3)}`);
+    }
+  }
+
+  // 5. ★ **车把随转向打方向**，且方向要对
+  //
+  // 判据是**符号**：航向角增大 = 左转（`ride.ts` 的 `_fwd` 在 h 增大时偏向 −X，
+  // 而 −X 是左），前轮应当**朝左**打。符号反了的话车会往弯外推。
+  asserts++;
+  {
+    // 停住，先让转向角回到 0
+    for (let i = 0; i < 180; i++) v.update(1 / 60, 4, 0);
+    const straight = v.barAngle;
+    // 左转：每帧 **0.9°**（= 54°/s），4 m/s。
+    // δ = atan(ω·L / v)：ω = 0.94 rad/s、轴距 ≈ 1.10m、v = 4 ⇒ δ ≈ 14.5°，
+    // 在 `BIKE_STEER_MAX`（11.5°）处被夹住——正好压着上限。
+    // ⚠ 每帧增量是**弧度**（0.9° = 0.0157 rad），不是「度每秒」。
+    const PER_FRAME = (0.9 * Math.PI) / 180;
+    for (let i = 0; i < 60; i++) v.update(1 / 60, 4, i * PER_FRAME);
+    const left = v.barAngle;
+    asserts++;
+    if (!(left > 0.02)) {
+      probs.push(`左转 1 秒后车把角 ${left.toFixed(3)} rad（起手 ${straight.toFixed(3)}），轮子没往左打`);
+    }
+    asserts++;
+    if (left > BIKE_STEER_MAX + 1e-6) {
+      probs.push(`车把角 ${left.toFixed(3)} rad 超过上限 ${BIKE_STEER_MAX}，手会离开车把`);
+    }
+    // 右转必须反向（两倍角速度，方向相反）
+    const hEnd = 59 * PER_FRAME;
+    for (let i = 0; i < 120; i++) v.update(1 / 60, 4, hEnd - i * PER_FRAME * 2);
+    asserts++;
+    if (!(v.barAngle < left)) {
+      probs.push(`右转后车把角 ${v.barAngle.toFixed(3)} 没有比左转的 ${left.toFixed(3)} 更小（方向没反过来）`);
+    }
+  }
+
+  // 6. ★ **站位**：骨盆必须落在鞍面上方一点、稍靠后
+  //
+  // 「人不在自行车上」的直接判据。写死的 `SADDLE_H = 1.05` 与这台车的
+  // 鞍面（实测 0.979m）和动画的骨盆高度（0.504 角色单位 = 0.882m）
+  // **都对不上**，所以那一版必然坐歪。
+  asserts++;
+  {
+    const seat = v.bikeSeat;
+    if (!seat) {
+      probs.push('量不到鞍面（saddleTopOf 返回空）—— 站位会退回写死的 1.05m');
+    } else {
+      const pelvisH = v.pelvisHeight;
+      const seatWorldY = seat.y * bikeScale;
+      const gotY = char.position.y + pelvisH * char.scale.x;
+      const wantY = seatWorldY + 1.75 * 0.006; // 骨盆在鞍面上方 0.6% 身高
+      if (Math.abs(gotY - wantY) > 2e-3) {
+        probs.push(
+          `骨盆在 y=${gotY.toFixed(3)}m，鞍面 ${seatWorldY.toFixed(3)}m + 0.011m 应为 ${wantY.toFixed(3)}m —— 人不在车上`,
+        );
+      }
+      asserts++;
+      // 重心必须在坐垫**后面**一点（车模 +X 是车尾，见 `PELVIS_BEHIND_SADDLE`）。
+      //
+      // ★ 把骑手位置**变回车模空间**再比，而不是在 group 空间里比某个轴。
+      //   原来写的是「`bike.rotation.y = −90°` 把车模 x 映成 group 的 z，
+      //   所以比 z」——那只在偏航**恰好是 −90°**时成立。
+      //   偏航一旦变成实测行车基底（这台车实测 −100.71°，夹具另有 11° 歪角），
+      //   「模型 x = group z」就不成立了，而这条断言照样按老约定去比，
+      //   量到 −0.218m。
+      //
+      //   判据要么比对的轴，要么就根本不成立；而**比在模型空间里**
+      //   是唯一与偏航无关的写法——它问的是「相对鞍面往后了吗」，
+      //   而不是「相对 group 的某个轴往后了吗」。
+      const gotX = new Vector3().copy(char.position).applyMatrix4(bike.matrix.clone().invert()).x;
+      const wantX = seat.x + 0.045 / bikeScale; // 0.045m 是米制，车模单位要除缩放
+      asserts++;
+      if (Math.abs(gotX - wantX) > 0.006) {
+        probs.push(
+          `骑手重心比鞍面靠后 ${((gotX - seat.x) * bikeScale).toFixed(3)}m，应为 0.045m` +
+            `（比的是车模空间的 x，与偏航无关）`,
+        );
+      }
+    }
+  }
+
+  // 9b. ★ 自行车的自转轴同样必须**水平且垂直于前进方向**
+  asserts++;
+  {
+    for (let i = 0; i < 30; i++) v.update(1 / 60, 4, 0); // heading = 0 ⇒ 前进方向 -Z
+    const axis = v.bikeSpinAxisWorld;
+    asserts++;
+    if (!axis) {
+      probs.push('自行车没有自转层 —— 后轮压根不转');
+    } else {
+      asserts++;
+      if (Math.abs(axis.y) > 0.02) {
+        probs.push(
+          `自行车自转轴不水平（y = ${axis.y.toFixed(4)}，${((Math.asin(Math.abs(axis.y)) * 180) / Math.PI).toFixed(2)}°）` +
+            ' —— 轮子会一边滚一边蹭',
+        );
+      }
+      asserts++;
+      if (Math.hypot(axis.x, axis.z) < 0.99) {
+        probs.push(
+          `自行车自转轴是 (${axis.x.toFixed(3)}, ${axis.y.toFixed(3)}, ${axis.z.toFixed(3)})，` +
+            '它没有垂直于前进方向 —— 轮子横着滚',
+        );
+      }
+    }
+  }
+
+  // 10. 骑行轨的播放倍率：停住必须 0（人定住，不是原地空踩踏板）
+  asserts++;
+  {
+    for (let i = 0; i < 60; i++) v.update(1 / 60, 0, 0);
+    if (Math.abs(v.rideTimeScale) > 1e-6) {
+      probs.push(`车停住时骑行动画倍率 ${v.rideTimeScale.toFixed(3)}，应为 0`);
+    }
+    asserts++;
+    for (let i = 0; i < 60; i++) v.update(1 / 60, 3, 0);
+    if (!(v.rideTimeScale > 0.5)) {
+      probs.push(`骑 3 m/s 时骑行动画倍率 ${v.rideTimeScale.toFixed(3)}，踏板不动`);
+    }
+  }
+
+  // 8. ★ **反复切载具不许堆积空节点**
+  //
+  // `attach()` 不重新加载模型，枢轴却每次新建。
+  // 不清就会在车里一层层堆空 Group——每次切换泄漏几个，
+  // 而「多几个空节点」没有任何症状，只有这条判据看得见。
+  asserts++;
+  {
+    const count = () => bike.children.filter((c) => c.name.startsWith('rig:')).length;
+    const before = count();
+    v.set('foot');
+    v.set('bike');
+    v.set('foot');
+    v.set('bike');
+    asserts++;
+    if (count() !== before || before === 0) {
+      probs.push(`切 4 次载具后装配节点从 ${before} 变成 ${count()}（空节点在累积）`);
+    }
+  }
+
+  const summary =
+    `轮角 +${(2 / 0.35).toFixed(2)} rad/2m（不打滑）· 曲柄 = 轮角/${BIKE_GEAR_RATIO} · ` +
+    `脚撑 0 ⇄ ${((STAND_FOLD_ANGLE * 180) / Math.PI).toFixed(0)}° · 车把 ≤ ${((BIKE_STEER_MAX * 180) / Math.PI).toFixed(1)}° · ` +
+    `骨盆 = 鞍面 + 0.011m`;
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
 // ---------------------------------------------------------------- 骑行
 check('verify_ride', () => {
   const r = assertRide();
@@ -2458,8 +2956,8 @@ check('verify_facing', () => {
   // 这两件事叠起来，轴在自转时恒为水平。少任何一半都不成立。
   asserts++;
   const axles: [string, readonly number[], number][] = [
-    ['自行车', MODEL_AXLES.bicycle, BICYCLE_YAW],
-    ['摩托车', MODEL_AXLES.motorcycle, MOTORCYCLE_YAW],
+    ['自行车', MODEL_AXES.bicycle, BICYCLE_YAW],
+    ['摩托车', MODEL_AXES.motorcycle, MOTORCYCLE_YAW],
   ];
   for (const [name, axle, yaw] of axles) {
     const c = Math.cos(yaw);
@@ -2483,13 +2981,348 @@ check('verify_facing', () => {
   asserts++;
   if (motoLeanAt(0) === 0) probs.push('静止时摩托车没有侧倾，停着看起来是扶正的');
   asserts++;
-  if (motoLeanAt(0) >= 0) probs.push('侧倾方向为正 —— 侧撑在车的左边，符号反了就是往右倒');
+  // ★ 符号判据随**倾角挂在哪个节点上**翻转过一次，这里记着为什么。
+  //
+  //   旧：倾角写 `moto.rotation.z`，绕的是**模型本地 Z**。
+  //       绕 +Z 转正角把车顶推向模型 +X，而模型 +X = 车的左 ⇒ 要**负**角。
+  //   新：倾角写 `motoSlot.rotation.z`（`moto` 的父节点，基底之外），
+  //       绕的是**真正的、水平的前后轴**。绕 +Z 转正角把车顶推向行驶的 −X，
+  //       而行驶基底 +X 是**右**（`ride.ts` 的 `_right`）⇒ **正**角才是往左倒。
+  //
+  //   两次的**视觉结果一致**（都往左倒），但中间隔着一次「倾角绕的轴从
+  //   偏 63.84° 的假轴换成真轴」的重构，符号必须跟着换，否则会悄悄倒向右边。
+  if (motoLeanAt(0) <= 0) {
+    probs.push(
+      '侧倾方向不是正的 —— 倾角现在挂在 motoSlot 上（绕真正的前后轴），正角才是往左倒；' +
+        '侧撑在左边，符号反了就是往右倒',
+    );
+  }
 
   return {
     ok: probs.length === 0,
     detail:
       probs.length === 0
-        ? `人物 +π / 自行车 −90° / 摩托车 +180° → 三者同为 (0, 0, −1)`
+        ? `人物 +π / 自行车 ${((BICYCLE_YAW * 180) / Math.PI).toFixed(2)}° / 摩托车 ${((MOTORCYCLE_YAW * 180) / Math.PI).toFixed(2)}°（实测车头 + 行走基底）→ 三者同为 (0, 0, −1)`
+        : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
+ * ## 行车基底：车头与**自转轴**必须同时被纠回来
+ *
+ * 用户报的是两件事——「车轮乱滚」+「摩托车车头没对齐行走方向」——
+ * 量下来它们是**同一个原因**：两个模型都相对自己的坐标轴歪着
+ * （自行车 10.71°/10.67°，摩托车 26.59°/26.16°），
+ * 而原来那套判据**只用包围盒**，分不出「轮面在那个平面里」和
+ * 「轮面在那个平面里、但整台车又歪了 26°」。
+ *
+ * ### 为什么判据是**合成的已知歪角**，而不是钉那两个常数
+ *
+ * 钉常数只能证明「没人改过这两个数」，证不了「量法对不对」——
+ * 而量法错了常数照样是绿的（它们是从错的量法里抄出来的）。
+ * 所以这里造一台**歪 25°** 的合成车，答案已知，
+ * 然后问 `measureDriveBasis` 能不能把它纠回 (−Z 车头、±X 车轴)。
+ * 量法一旦回退到包围盒，这条立刻红。
+ *
+ * ### 它会红的方式
+ *
+ * · `measureWheel` 改回用 `geometry.boundingBox` 估轴 → 合成车的歪角量成 0，红
+ * · 忘了对 `axle` 取「指向左侧」的符号 → 第 3 条红（自转会整体倒转）
+ * · `quat` 用 `M` 而不是 `Mᵀ` → 第 1 条红（车头落到 +Z）
+ */
+check('verify_drive_basis', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  /**
+   * 一台**已知歪角**的合成车：真车 + 绕 Y 歪 skewY，再加一点外倾。
+   *
+   * ★ 歪角挂在**子 Group** 上，不能挂在 `root` 自己身上：
+   *   `measureWheel` 量的是「零件相对 root 的局部变换」（`root.matrixWorld⁻¹ · part.matrixWorld`），
+   *   所以 **root 自己的旋转会被约掉**——歪在 root 上的车在它眼里是 perfectly 直的。
+   *   真模型之所以歪，正是因为 Tripo 把歪烘进了**零件节点的变换**里，
+   *   夹具必须复现同一件事，否则它量的是一台并不歪的车、然后"通过"。
+   */
+  const buildSkewed = (skewY: number, camber = 0) => {
+    const root = new Group();
+    // 名义上前轮在 −X、后轮在 +X、车轴沿 Z（与 bicycle.glb 的名义一致）。
+    // 轮子用**实心圆柱**：协方差的最小特征向量必须落在轴上，
+    // 而空心环在两个方向上的方差更接近、更容易看错。
+    const wheelGeo = (R: number) => {
+      const g = new CylinderGeometry(R, R, 0.09, 24);
+      g.rotateX(Math.PI / 2); // 轴 → 本地 Z
+      return g;
+    };
+    const tilt = new Group();
+    tilt.rotation.y = skewY;
+    tilt.rotateX(camber);
+    const f = new Mesh(wheelGeo(0.195));
+    f.name = 'tripo_part_0';
+    f.position.set(-0.3, 0.2, 0);
+    const r = new Mesh(wheelGeo(0.195));
+    r.name = 'tripo_part_2';
+    r.position.set(0.29, 0.2, 0);
+    tilt.add(f, r);
+    root.add(tilt);
+    root.updateMatrixWorld(true);
+    return root;
+  };
+
+  for (const [skew, camber] of [
+    [0, 0],
+    [(25 * Math.PI) / 180, 0],
+    [(25 * Math.PI) / 180, (8 * Math.PI) / 180],
+  ] as const) {
+    const tag = `歪 ${((skew * 180) / Math.PI).toFixed(0)}° / 外倾 ${((camber * 180) / Math.PI).toFixed(0)}°`;
+
+    // 1. ★ 车头必须被纠到 **−Z**
+    asserts++;
+    {
+      const b = measureDriveBasis(buildSkewed(skew, camber), ['tripo_part_0'], ['tripo_part_2']);
+      if (!b) {
+        probs.push(`${tag}：量不到行车基底`);
+      } else {
+        const after = b.head.clone().applyQuaternion(b.quat);
+        const err = Math.hypot(after.x, after.z + 1);
+        asserts++;
+        if (err > 1e-3) {
+          probs.push(
+            `${tag}：基底转完车头落在 (${after.x.toFixed(4)}, ${after.y.toFixed(4)}, ${after.z.toFixed(4)})，应为 (0, 0, -1)`,
+          );
+        }
+      }
+    }
+
+    // 2. ★ 自转轴必须被纠到**水平**且**垂直于车头**（不平行于地面才不打滑）
+    asserts++;
+    {
+      const b = measureDriveBasis(buildSkewed(skew, camber), ['tripo_part_0'], ['tripo_part_2']);
+      if (b) {
+        const after = b.axle.clone().applyQuaternion(b.quat);
+        asserts++;
+        // 水平：y ≈ 0。不打滑要求接地点速度为零，轴不水平就必然在蹭。
+        if (Math.abs(after.y) > 1e-3) {
+          probs.push(`${tag}：基底转完自转轴的 y 分量是 ${after.y.toFixed(4)}，车轴不水平`);
+        }
+        asserts++;
+        // 垂直于车头：轴指向车头的话轮子会横着滚（最典型的「轮子乱滚」画面）
+        const along = Math.hypot(after.x, after.z);
+        asserts++;
+        if (along < 0.5) {
+          probs.push(`${tag}：自转轴转成了 (${after.x.toFixed(3)}, 0, ${after.z.toFixed(3)})，它指向车头方向`);
+        }
+      }
+    }
+
+    // 3. ★ 自转轴的符号必须统一成**指向左侧** —— 不打滑条件给出 ω = +v/R
+    asserts++;
+    {
+      const b = measureDriveBasis(buildSkewed(skew, camber), ['tripo_part_0'], ['tripo_part_2']);
+      if (b) {
+        const left = new Vector3(0, 1, 0).cross(b.head);
+        asserts++;
+        if (b.axle.dot(left) <= 0) {
+          probs.push(
+            `${tag}：自转轴符号反了（点乘左侧 = ${b.axle.dot(left).toFixed(4)}）—— 轮子会整体倒着转`,
+          );
+        }
+      }
+    }
+
+    // 4. ★ 轮心必须落在两个轮子零件各自的轴心上（不能是两个轮子同心）
+    asserts++;
+    {
+      const b = measureDriveBasis(buildSkewed(skew, camber), ['tripo_part_0'], ['tripo_part_2']);
+      if (b) {
+        asserts++;
+        if (b.wheelbase < 0.3 || b.wheelbase > 1.5) {
+          probs.push(`${tag}：轴距量成 ${b.wheelbase.toFixed(3)}，合成车是 0.59`);
+        }
+      }
+    }
+  }
+
+  // 5. ★ 「量不到就返回 null」而不是抛错 / 返回垃圾值
+  asserts++;
+  {
+    const root = new Group();
+    root.add(new Mesh(new BoxGeometry(0.4, 0.4, 0.4)));
+    const bad = measureDriveBasis(root, ['没有这个零件'], ['也没有那个']);
+    asserts++;
+    if (bad !== null) probs.push('零件不存在时 measureDriveBasis 没有返回 null');
+  }
+
+  // 6. ★ 真实模型的基底必须能被**公开常数**复现
+  //
+  //   `MODEL_HEADS` / `BICYCLE_YAW` 是抄进代码的常数，而运行时用实测四元数。
+  //   两边必须指向同一个车头——否则「改常数」和「改量法」会各走各的。
+  asserts++;
+  {
+    const pairs: [string, readonly [number, number, number], number][] = [
+      ['自行车', MODEL_HEADS.bicycle, BICYCLE_YAW],
+      ['摩托车', MODEL_HEADS.motorcycle, MOTORCYCLE_YAW],
+    ];
+    for (const [name, head, yaw] of pairs) {
+      asserts++;
+      const d = facingDir(head, yaw);
+      const err = Math.hypot(d[0], d[2] + 1);
+      if (err > 1e-6) {
+        probs.push(
+          `${name}：公开常数算出的车头是 (${d[0].toFixed(6)}, 0, ${d[2].toFixed(6)})，应为 (0, 0, -1)（偏 ${((err * 180) / Math.PI).toFixed(4)}°）`,
+        );
+      }
+    }
+  }
+
+  // 7. ★ 公开的实测自转轴必须**垂直于**公开的实测车头
+  //
+  //   两者都是从真模型量出来的同一个量（`measureDriveBasis` 的 head 与 axle），
+  //   所以「互相垂直」是它们本该有的性质。写反一个符号就会红。
+  asserts++;
+  {
+    const pairs: [string, readonly number[], readonly number[]][] = [
+      ['自行车', MODEL_HEADS.bicycle, MODEL_AXES.bicycle],
+      ['摩托车', MODEL_HEADS.motorcycle, MODEL_AXES.motorcycle],
+    ];
+    for (const [name, head, axle] of pairs) {
+      asserts++;
+      const d = head[0] * axle[0] + head[2] * axle[2];
+      // 容差 0.03（≈1.7°）不是放水：**真车的两个轮子本来就对不齐**。
+      // `motorcycle.glb` 实测前后轮轴方向差 **1.758°**，而 `MODEL_AXES`
+      // 装的是**两者的平均**，所以它与车头的点积天然带着这个量级的残差。
+      // 真正要拦的是「把竖直方向当成车轴」或「用车头方向当车轴」，
+      // 那些错法的点积是 1 或 0，不是 0.008。
+      if (Math.abs(d) > 0.03) {
+        probs.push(
+          `${name}：车头与自转轴的点积是 ${d.toFixed(5)}，两者应当垂直` +
+            `（残差来自两个轮轴自身 1.76° 的不一致，不是这里放宽的）`,
+        );
+      }
+    }
+  }
+
+  // 8. ★ **摩托车的轮子必须绕**实测车轴**转**（用户报的那两件事之一）
+  //
+  //   这是整条链子的**最后一环**：上面 1~3 条问的是「量得对不对」，
+  //   这一条问的是「摆出来的**轮子真的绕着它转**」。
+  //   中间隔着「基底下基底 + 轴对齐层 + 自转层」三层，任何一层写错
+  //   （比如在带对齐的节点上写 `rotation`，把对齐冲掉）都只在这里现形：
+  //   转角照样是正的、里程照样对，只有**轴**歪了——画面上就是「轮子乱滚」。
+  asserts++;
+  {
+    const root = new Group();
+    const tilt = new Group();
+    // 复现那 26.59°：车头与车轴**同时**相对模型轴歪这么多
+    tilt.rotation.y = (26.59 * Math.PI) / 180;
+    const wheelGeo = (R: number) => {
+      // 薄盘，厚度只有直径的 1/7。★ 别把厚度做到接近半径——
+      // 那样它是个**球**而不是轮子，协方差的三个特征值几乎相等，
+      // 「最小特征向量 = 自转轴」就不再成立，量出来的是噪声。
+      // （真模型的 `tripo_part_0` 厚度/直径 = 0.19/0.34 = 0.56，
+      //   已经很接近球了——那正是它实测轴带 0.46° 外倾的原因之一。）
+      const g = new CylinderGeometry(R, R, 0.05, 24);
+      g.rotateZ(Math.PI / 2); // 轴 → 本地 X（摩托车的名义轴）
+      return g;
+    };
+    const f = new Mesh(wheelGeo(0.171));
+    f.name = 'tripo_part_0';
+    f.position.set(0, 0.18, 0.34);
+    const r = new Mesh(wheelGeo(0.162));
+    r.name = 'tripo_part_1';
+    r.position.set(0, 0.16, -0.29);
+    tilt.add(f, r);
+    root.add(tilt);
+    root.updateMatrixWorld(true);
+
+    const mv = new Vehicle();
+    mv.attach({ motorcycle: root, bike: null, skate: null, char: null, clips: {} });
+    mv.set('motorcycle');
+    for (let i = 0; i < 30; i++) mv.update(1 / 60, 5, 0); // heading = 0 ⇒ 前进方向 -Z
+    const axis = mv.motoSpinAxisWorld;
+    asserts++;
+    if (!axis) {
+      probs.push('摩托车没有自转层 —— 轮子压根不转（collectMotorcycle 量不到基底或零件）');
+    } else {
+      // 水平：不水平就必然横向蹭（接地点画出来是椭圆）
+      //
+      // 容差 0.02（≈1.15°）**不是放水**：真模型实测带 0.46° 外倾
+      // （`motorcycle.glb` 的自转轴 y 分量是 -0.0056），
+      // 而「轮子只在移动时转、侧撑倾角只在静止时非零」这两件事
+      // 叠起来已经把残余蹭地压到 0。要拦的是「把竖直当车轴」
+      // （y ≈ ±1）和「明显外倾」（y > 0.05 ≈ 2.9°）。
+      asserts++;
+      if (Math.abs(axis.y) > 0.02) {
+        probs.push(
+          `摩托车自转轴不水平（y = ${axis.y.toFixed(4)}，${((Math.asin(Math.abs(axis.y)) * 180) / Math.PI).toFixed(2)}°）` +
+            ' —— 轮子会一边滚一边蹭',
+        );
+      }
+      // 垂直于前进方向：前进方向是 (0,0,-1)，所以轴必须落在 ±X
+      asserts++;
+      if (Math.hypot(axis.x, axis.z) < 0.99) {
+        probs.push(
+          `摩托车自转轴是 (${axis.x.toFixed(3)}, ${axis.y.toFixed(3)}, ${axis.z.toFixed(3)})，` +
+            '它没有垂直于前进方向 —— 轮子横着滚',
+        );
+      }
+      // 转角仍然是「正号 + 按里程」，不能因为换了轴就把方向弄反
+      asserts++;
+      if (!(mv.motoWheelAngle > 0)) {
+        probs.push(`摩托车前进 2.5m 后后轮转角是 ${mv.motoWheelAngle.toFixed(3)} rad，轮子在倒着转`);
+      }
+    }
+  }
+
+  // 9. ★ 滑板的轮子必须**真的被找到并转起来**
+  //
+  //   `skateboard.glb` 的轮子节点名是 `wheel_FL_1` / `wheel_FL_2`，
+  //   而且**每个名字重复 4 次**（8 个轮子网格只有 6 个名字）。
+  //   原来的 `getObjectByName('wheel_FL')` 这种名字一个都不存在
+  //   ⇒ 滑板的轮子**从来没转过**。
+  //
+  //   症状安静到没有任何工具会报错：轮子不转在画面上只是「看不出在滚」，
+  //   而速度、离地、站位、面数、离路判定全都正常。
+  //   夹具刻意复现「同名 + 后缀」——只测「能找到 wheel 前缀」是不够的，
+  //   补成 `wheel_FL_1` 之后 `getObjectByName` 也只会返回 8 个里的 1 个。
+  asserts++;
+  {
+    const board = new Group();
+    const mk = (name: string, x: number, z: number) => {
+      const g = new CylinderGeometry(0.036, 0.036, 0.03, 12);
+      g.rotateX(Math.PI / 2); // 轴 → 本地 Z（滑板实测自转轴就是本地 Z，偏差 0.37°）
+      const m = new Mesh(g);
+      m.name = name;
+      m.position.set(x, 0.036, z);
+      return m;
+    };
+    board.add(
+      mk('wheel_FL_1', 0.3, 0.1),
+      mk('wheel_FL_2', 0.3, -0.1),
+      mk('wheel_RL_1', -0.3, 0.1),
+      mk('wheel_RL_2', -0.3, -0.1),
+    );
+    const sv = new Vehicle();
+    sv.attach({ bike: null, motorcycle: null, skate: board, char: null, clips: {} });
+    sv.set('skate');
+    for (let i = 0; i < 60; i++) sv.update(1 / 60, 5, 0); // 1 秒，5 m/s
+    const angs = sv.skateWheelAngles;
+    asserts++;
+    if (angs.length !== 4) {
+      probs.push(`滑板只找到 ${angs.length} 个轮子，应为 4 —— 节点名带后缀且重名，必须遍历而不是按名取`);
+    } else {
+      asserts++;
+      if (!angs.every((a) => a > 0)) {
+        probs.push(`滑板轮子转角 [${angs.map((a) => a.toFixed(2)).join(', ')}]，有一个没正着转`);
+      }
+    }
+  }
+
+  return {
+    ok: probs.length === 0,
+    detail:
+      probs.length === 0
+        ? `歪 0°/25°、外倾 0°/8° 四种组合下车头都被纠到 -Z、自转轴被纠到水平且指向左侧 · 摩托车 26.58° 歪角下车轴垂直于前进方向、轮子正转 · 滑板 4 个轮子都被找到且正转 · 公开常数与实测基底一致`
         : probs.join('；'),
     asserts,
   };
@@ -2798,6 +3631,439 @@ check('verify_offslow', () => {
     asserts,
   };
 });
+
+
+// ---------------------------------------------------------------- 真模型回归
+//
+// ★ 这一条是补上「合成夹具量不到的那一半」，它的存在理由是一次实机打脸：
+//   上一轮把两台车的行车基底与自转轴都改成逐顶点实测，31 条回归全绿，
+//   **而实机更偏了**。原因是所有判据都跑在合成夹具上，而夹具：
+//   ① 零件只有纯平移，没有真模型那些自带平移/缩放的 `tripo_part_N`；
+//   ② 前后轮完全一样，没有真模型那 0.97°/1.76° 的轴向不一致；
+//   ③ 行车基底在夹具上近似恒等，于是 `alignLocalX` 的父空间换算错了也量不出；
+//   ④ **转向输入是假的**——既有判据只在「heading 每帧变 0.9°」时问车把角，
+//      从没问过「完全不转向���车把角是多少」。
+//
+// 而摩托车那个 `steerAngleFor(speed)` 恰恰只在第 ④ 种情况下现形：
+//
+// | 速度 | 零转向输入时的车把角 |
+// |---|---|
+// | 8 m/s | 14.86° |
+// | 24 m/s | **20.80°** |
+//
+// 那 20.8° 一直被「车头本身偏 26.59°」部分抵消；车头纠准之后它全部暴露，
+// 于是「车头对齐了、车却恒定往右偏，前轮被拖着横蹭」——
+// 而速度、朝向、离地、站位、面数全部正常，既有断言一条都不红。
+//
+// 所以这里**读真 GLB**：真解析（meshopt）、真装配、真世界矩阵。
+// 判据是「实机世界空间里该是什么」，不是「某个常数是不是那几个数」。
+//
+// 它会红的方式：
+//   · 把 `steerFromYawRate` 换回任何只看速度的公式 → 「零输入直行车把归零」红
+//   · `measureWheel` 改回用包围盒估轴 → 「自转轴水平且垂直行驶方向」红
+//   · `alignLocalX` 少做一次父空间换算 → 同上（真模型才触发，夹具不会）
+//   · 换模型却不重量 → 「车头落在 -Z」与「轴距 / 轮心高 / 骑手高差」红
+
+/** 读真 GLB。返回 null = 模型不在盘上（只跑源码的 CI）。 */
+async function loadRealModels(): Promise<{
+  bicycle: Object3D;
+  motorcycle: Object3D;
+  char: Object3D;
+} | null> {
+  // Node 里没有 DOM，而 GLTFLoader 走材质时会去建 ImageBitmap。
+  // 这里只关心**几何**，但那几个入口必须先糊上。
+  const g = globalThis as unknown as Record<string, unknown>;
+  g.self = g;
+  if (!g.createImageBitmap) g.createImageBitmap = async () => ({});
+
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { GLTFLoader } = await import('three/examples/jsm/loaders/GLTFLoader.js');
+  const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+  if (!existsSync('public/models/bicycle.glb')) return null;
+  await MeshoptDecoder.ready;
+  const ld = new GLTFLoader();
+  (ld as unknown as { setMeshoptDecoder(d: unknown): void }).setMeshoptDecoder(MeshoptDecoder);
+  const read = async (name: string) => {
+    const p = `public/models/${name}`;
+    if (!existsSync(p)) return null;
+    const bytes = readFileSync(p);
+    const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    return (await ld.parseAsync(ab, '')).scene as Object3D;
+  };
+  const [bicycle, motorcycle, char] = await Promise.all([
+    read('bicycle.glb'),
+    read('motorcycle.glb'),
+    read('survivor.glb'),
+  ]);
+  if (!bicycle || !motorcycle || !char) return null;
+  char.name = 'char';
+  return { bicycle, motorcycle, char };
+}
+
+/** 数一棵子树有多少节点。给回归量「切载具不许漏枢轴」用。 */
+function countTree(o: Object3D): number {
+  let n = 0;
+  o.traverse(() => n++);
+  return n;
+}
+
+/** 一段假的骑行片段：根骨 y = 0.504（真素材实测值），水平位移 0。 */
+function realRideClip(): AnimationClip {
+  const t = new Float32Array([0, 1]);
+  return new AnimationClip('骑自行车', 1, [
+    new KeyframeTrack('mixamorigHips.position', t, Float32Array.from([0, 0.504, 0, 0, 0.504, 0])),
+  ]);
+}
+
+const realModels = await loadRealModels();
+
+if (!realModels) {
+  results.push({
+    name: 'verify_vehicle_real',
+    run: () => ({
+      ok: true,
+      // **不是通过**，是没量到。仍然打一条断言，免得这条变成 NO-ASSERT。
+      detail: 'public/models 里没有 bicycle.glb / motorcycle.glb —— 本条**没量到**，不是通过',
+      asserts: 1,
+    }),
+  });
+} else {
+  const { bicycle, motorcycle, char } = realModels;
+  const probs: string[] = [];
+  let asserts = 0;
+  const notes: string[] = [];
+
+  for (const mode of ['bike', 'motorcycle'] as const) {
+    const v = new Vehicle();
+    v.attach({ bike: bicycle, motorcycle, skate: null, char, clips: collectClips([realRideClip()]) });
+    if (!v.set(mode)) {
+      asserts++;
+      probs.push(`${mode}: 切不进去`);
+      continue;
+    }
+    const basis = v.driveBasis[mode === 'bike' ? 'bike' : 'moto'];
+    const front = () => v.barAngle;
+    const steer = () => (mode === 'bike' ? v.barAngle : v.motoSteerAngle);
+    const wheel = () => (mode === 'bike' ? v.bikeWheelAngle : v.motoWheelAngle);
+    const axis = () => (mode === 'bike' ? v.bikeSpinAxisWorld : v.motoSpinAxisWorld);
+    void front;
+
+    // 1. ★ 车头必须落在行驶方向（-Z）上
+    asserts++;
+    if (!basis) {
+      probs.push(`${mode}: 量不到行车基底`);
+    } else {
+      const head = basis.head.clone().applyQuaternion(basis.quat);
+      const errDeg = (Math.acos(Math.max(-1, Math.min(1, -head.z))) * 180) / Math.PI;
+      asserts++;
+      if (errDeg > 0.5 || Math.abs(head.x) > 0.01 || Math.abs(head.y) > 0.01) {
+        probs.push(
+          `${mode}: 实测车头经基底后是 (${head.x.toFixed(3)}, ${head.y.toFixed(3)}, ${head.z.toFixed(3)})，` +
+            `偏离行驶方向 ${errDeg.toFixed(2)}°（应为 0）`,
+        );
+      }
+    }
+
+    // 2. ★★ **零转向输入时，前端偏转必须收敛到 0**
+    //
+    //    本条最要紧的一条：给到极速、heading 恒为 0（完全没有转向输入），
+    //    偏转角必须归零。摩托车原来这里是 **20.80°**。
+    for (let i = 0; i < 240; i++) v.update(1 / 60, 24, 0); // 极速直行 4 秒
+    asserts++;
+    {
+      const s = steer();
+      asserts++;
+      if (Math.abs(s) > 1e-3) {
+        probs.push(
+          `${mode}: 零转向输入、24 m/s 直行 4 秒后前端仍偏 ${((s * 180) / Math.PI).toFixed(2)}° —— ` +
+            '车会恒定往一边偏，前轮被拖着横蹭',
+        );
+      }
+    }
+
+    // 3. ★★ 自转层的世界 +X 必须**水平且垂直于行驶方向**
+    asserts++;
+    {
+      const ax = axis();
+      if (!ax) {
+        probs.push(`${mode}: 没有自转层 —— 轮子压根不转`);
+      } else {
+        asserts++;
+        if (Math.abs(ax.y) > 0.02) {
+          probs.push(
+            `${mode}: 自转轴不水平（y = ${ax.y.toFixed(4)}，` +
+              `${((Math.asin(Math.min(1, Math.abs(ax.y))) * 180) / Math.PI).toFixed(2)}°）—— 轮子一边滚一边蹭`,
+          );
+        }
+        asserts++;
+        if (Math.hypot(ax.x, ax.z) < 0.99) {
+          probs.push(
+            `${mode}: 自转轴 (${ax.x.toFixed(3)}, ${ax.y.toFixed(3)}, ${ax.z.toFixed(3)}) ` +
+              '没有垂直于行驶方向 —— 轮子横着滚',
+          );
+        }
+      }
+    }
+
+    // 4. ★ 轮角必须是正号且等于「里程 ÷ 轮半径」（不打滑）
+    asserts++;
+    {
+      const before = wheel();
+      v.update(1 / 60, 0, 0);
+      v.update(1 / 60, 10, 0);
+      const d = wheel() - before;
+      const r = mode === 'bike' ? 0.35 : v.motorcycleWheelRadius;
+      asserts++;
+      if (d <= 0) {
+        probs.push(`${mode}: 前进 1/6 秒后轮角增量 ${d.toFixed(4)} rad，轮子在倒着转`);
+      } else {
+        asserts++;
+        const want = (10 / 60) / r;
+        if (Math.abs(d - want) > 0.02) {
+          probs.push(`${mode}: 轮角增量 ${d.toFixed(4)} rad，${(10 / 60).toFixed(4)}m ÷ R${r.toFixed(3)}m 应为 ${want.toFixed(4)}`);
+        }
+      }
+    }
+
+    // 5. ★ 真转向时前端**要真的打方向**（别把第 2 条修成「永远 0」）
+    asserts++;
+    {
+      const PER = (1.2 * Math.PI) / 180; // 每帧 1.2° = 72°/s，heading 单调增 = 左转
+      for (let i = 0; i < 90; i++) v.update(1 / 60, 6, i * PER);
+      const left = steer();
+      asserts++;
+      if (!(left > 0.02)) {
+        probs.push(`${mode}: 左转 1.5 秒后前端偏转 ${left.toFixed(4)} rad，车不跟方向走`);
+      }
+      asserts++;
+      if (Math.abs(left) > (mode === 'bike' ? BIKE_STEER_MAX : 0.46) + 1e-6) {
+        probs.push(`${mode}: 前端偏转 ${((left * 180) / Math.PI).toFixed(1)}° 超过机械极限`);
+      }
+    }
+
+    // 6. ★ 自行车 rig 的装配尺寸 ——「看起来歪」最直接的能量法
+    if (mode === 'bike') {
+      asserts++;
+      const f = bicycle.getObjectByName('rig:frontSteer')?.getWorldPosition(new Vector3());
+      const r = bicycle.getObjectByName('rig:rearHub')?.getWorldPosition(new Vector3());
+      if (!f || !r) {
+        probs.push('自行车：找不到前后轮枢轴 —— 转向 / 自转 / 脚撑 / 曲柄全部静默失效');
+      } else {
+        notes.push(`轴距 ${f.distanceTo(r).toFixed(3)}m`);
+        asserts++;
+        if (f.distanceTo(r) < 1.0 || f.distanceTo(r) > 1.2) {
+          probs.push(`自行车轴距 ${f.distanceTo(r).toFixed(3)}m，应为 1.05~1.10m`);
+        }
+        asserts++;
+        if (Math.abs(f.y - 0.35) > 0.04 || Math.abs(r.y - 0.35) > 0.04) {
+          probs.push(`自行车轮心高度 ${f.y.toFixed(3)}/${r.y.toFixed(3)}m，应 ≈ 轮半径 0.35m`);
+        }
+        // 车头在 -Z 一侧 ⇒ 前轮枢轴的 z 必须小于后轮的
+        asserts++;
+        if (f.z >= r.z) probs.push(`前轮 z=${f.z.toFixed(3)} 不小于后轮 z=${r.z.toFixed(3)}，前后装反了`);
+        asserts++;
+        const seat = v.bikeSeat;
+        if (seat && v.hasBikeRig) {
+          const sw = new Vector3(seat.x, seat.y, seat.z).applyMatrix4(bicycle.matrixWorld);
+          const rp = char.getWorldPosition(new Vector3());
+          const drop = sw.y - rp.y;
+          const wantDrop = v.pelvisHeight * char.scale.x;
+          asserts++;
+          if (Math.abs(drop - wantDrop) > 0.06) {
+            probs.push(
+              `骑手原点比鞍面低 ${drop.toFixed(3)}m，应 ≈ 骨盆高度 ${wantDrop.toFixed(3)}m —— 人不在车上`,
+            );
+          }
+          asserts++;
+          if (Math.hypot(rp.x - sw.x, rp.z - sw.z) < 0.005) {
+            probs.push('骑手与鞍面水平距离为 0 —— 重心没有落在坐垫后面一点');
+          }
+        }
+      }
+    }
+    // 6. ★★★ **滚动方向**：相位无关的三条
+    //
+    //   前面几条问的是「轴对不对」，而轴对了**方向仍可能反**。
+    //
+    //   ⚠ 这里**不能**问「轮顶这一帧往 −Z 走了多少」：轮顶上取的是
+    //   **一个固定的局部点**，它随自转角绕圈走，z 位移在 ±v·dt 之间**周期性地
+    //   变号**——判据就成了掷硬币。上一版就写成了那样，它只是碰巧一直绿。
+    //   （压力测试里同一台车量出 −0.109 / −0.018 / +0.374 三个 z 位移，
+    //   全都是「正常」的，只是自转相位不同。）
+    //
+    //   换成三条**与相位无关**的：
+    //
+    //   1. **车轴指向车的左侧**（世界 −X，行进方向 −Z 时）。绕它正向自转 = 前进。
+    //      这是「方向」的充要条件，而且是常量，不随自转角变。
+    //   2. **轮缘位移的模 ≈ v·dt**。小于它 = 没在转；大于它 = 转过头 / 在平移。
+    //   3. **轮顶与轮底的位移相反**（模相等、方向相反）。两点同向就是零件在平移，
+    //      不是在滚。
+    asserts++;
+    {
+      const model: Object3D = mode === 'bike' ? bicycle : motorcycle;
+      const spin = model.getObjectByName(mode === 'bike' ? 'rig:rearSpin' : 'rig:motoRearSpin');
+      const ax = mode === 'bike' ? v.bikeSpinAxisWorld : v.motoSpinAxisWorld;
+      if (!spin) {
+        probs.push(`${mode}: 找不到后轮自转层（rig:*Spin）`);
+      } else {
+        // 1. 车轴必须指向左侧（行进方向 −Z、行驶基底 +X 为右 ⇒ 左侧是 −X）
+        asserts++;
+        if (ax && ax.x > -0.99) {
+          probs.push(
+            `${mode}: 自转层本地 +X 指向世界 (${ax.x.toFixed(3)}, ${ax.y.toFixed(3)}, ${ax.z.toFixed(3)})，` +
+              '车轴必须指向**左**（-X）—— 指向右侧时正向自转就是倒着滚',
+          );
+        }
+        // 2 & 3. 轮缘的切向速度
+        const R = mode === 'bike' ? 0.1946 : 0.1712; // 车模本地单位的轮半径（实测）
+        const dt = 1 / 60;
+        const v0 = 10;
+        for (let i = 0; i < 120; i++) v.update(dt, v0, 0); // 先稳定
+        // ⚠ Node 里没有渲染器，`matrixWorld` 不会自动刷新 —— 必须自己刷
+        spin.updateWorldMatrix(true, false);
+        const top0 = new Vector3(0, R, 0).applyMatrix4(spin.matrixWorld);
+        const bot0 = new Vector3(0, -R, 0).applyMatrix4(spin.matrixWorld);
+        v.update(dt, v0, 0);
+        spin.updateWorldMatrix(true, false);
+        const dTop = new Vector3(0, R, 0).applyMatrix4(spin.matrixWorld).sub(top0);
+        const dBot = new Vector3(0, -R, 0).applyMatrix4(spin.matrixWorld).sub(bot0);
+
+        const want = v0 * dt; // 静止轮心下，轮缘的线速度 = v
+        asserts++;
+        if (Math.abs(dTop.length() - want) > want * 0.15) {
+          probs.push(
+            `${mode}: 轮缘位移 ${dTop.length().toFixed(4)}m，应 ≈ ${want.toFixed(4)}m` +
+              '（= v·dt）—— 没在转或转过头',
+          );
+        }
+        asserts++;
+        if (dTop.clone().add(dBot).length() > want * 0.15) {
+          probs.push(
+            `${mode}: 轮顶与轮底同向移动（和 ${dTop.clone().add(dBot).length().toFixed(4)}m）—— ` +
+              '那不是滚动，是零件在平移',
+          );
+        }
+      }
+    }
+
+    // 7. ★★★ **连按 E 不得改变车的朝向与自转轴**
+    //
+    //   用户报的是「每一次按 E，自行车摩托车的位置都会变化一次，
+    //   只有第一次使用的时候是正常的朝向」。而轮子的滚动方向不对
+    //   **是同一个原因**：行车基底每次 `rebuild` 都重新量一次，
+    //   而轮子零件在第一次装配时已经被 `attach` 进 rig（带着自转角、
+    //   曲柄角、转向角），所以第二次量到的不是模型的原始姿态。
+    //
+    //   实测漂移（连按 5 次 E，每骑 2 秒）：
+    //
+    //   | 第几次 | 量到的车头方位 | 量到的车轴 y 分量 |
+    //   |---|---|---|
+    //   | 1（真值） | -79.33° | 0.0016 |
+    //   | 2 | **-107.65°** | **0.509** |
+    //   | 4 | -79.02° | **0.981** |
+    //
+    //   车头每按一次漂一次 ⇒ 「位置会变化」；车轴一路歪到接近**竖直**
+    //   ⇒ 轮子绕竖直轴转 ⇒ 「滚得像球」。**一个原因，两个症状。**
+    //
+    //   这条断言问的是**幂等性**：上车 → 骑 → 下车，循环 4 次，
+    //   车头方位与自转轴都必须和第一次完全一致。
+    asserts++;
+    {
+      const model = mode === 'bike' ? bicycle : motorcycle;
+      const wq = () => {
+        const x = new Quaternion();
+        model.getWorldQuaternion(x);
+        return x;
+      };
+      // ★ 采样必须在**侧撑倾角阻尼收敛之后**，否则量到的是「刚上车那一瞬的
+      //   停放倾角」（摩托车 0.2 rad = 11.46°），而不是行车基底。
+      //   上车瞬间重建 `motoSlot` 会把倾角重置回停放值，这本身是合理的
+      //   （停着的车就该侧着），它不是这条要守的东西。
+      const settle = () => {
+        for (let i = 0; i < 240; i++) v.update(1 / 60, 12, 0);
+      };
+      settle();
+      const w0 = wq();
+      const nodes0 = countTree(model);
+      const a0 = (mode === 'bike' ? v.bikeSpinAxisWorld : v.motoSpinAxisWorld)?.clone() ?? null;
+      // 骑 2 秒（让轮子真的转起来、把零件变换改掉），再下车、上车，循环 4 次
+      for (let k = 0; k < 30; k++) {
+        for (let i = 0; i < 120; i++) v.update(1 / 60, 12, 0);
+        v.set('foot');
+        v.set(mode);
+      }
+      settle();
+      const wN = wq();
+      const dot = Math.abs(w0.dot(wN));
+      asserts++;
+      if (dot < 0.99999) {
+        const deg = (Math.acos(Math.min(1, 2 * (dot * dot) - 1)) * 180) / Math.PI;
+        probs.push(
+          `${mode}: 上下车循环 30 次后模型朝向变了 ${deg.toFixed(3)}°` +
+            `（${w0.toArray().map((x) => x.toFixed(4)).join(',')} → ` +
+            `${wN.toArray().map((x) => x.toFixed(4)).join(',')}）—— ` +
+            '行车基底被重复测量，而轮子已经带着自转角进过 rig 了',
+        );
+      }
+      const aN = (mode === 'bike' ? v.bikeSpinAxisWorld : v.motoSpinAxisWorld)?.clone() ?? null;
+      asserts++;
+      if (a0 && aN && a0.distanceTo(aN) > 1e-3) {
+        probs.push(
+          `${mode}: 上下车循环 30 次后自转轴变了 ${a0.distanceTo(aN).toFixed(4)}` +
+            `（${a0.toArray().map((x) => x.toFixed(3)).join(',')} → ` +
+            `${aN.toArray().map((x) => x.toFixed(3)).join(',')}）`,
+        );
+      }
+      // ★★ **不许漏节点**：切载具不重新加载模型，枢轴却每次新建
+      //
+      //   实测摩托车 677 → 1877 → 2177 → 2477 → 3083（每按一次 E 涨 6 个
+      //   `steer` + `rearHub` + 2×`axis` + 2×`spin`）。
+      //   画面上看不出来 —— `attach` 保留世界变换，轮子的角度**看起来**是对的 ——
+      //   于是它一路泄漏到退出游戏为止。
+      //
+      //   成因是守卫写在了会被 `rebuild()` 清空的实例字段上
+      //   （`rebuild()` 里有 `this.motoSteer = null`），所以「已建过」永远不成立。
+      //   自行车没这个问题：`assembleBike` 走 `BIKE_RIGS` 这个 `WeakMap`。
+      asserts++;
+      {
+        const nodesN = countTree(model);
+        asserts++;
+        if (nodesN !== nodes0) {
+          probs.push(
+            `${mode}: 上下车循环 30 次后节点数 ${nodes0} → ${nodesN}` +
+              `（平均每按一次 E 涨 ${((nodesN - nodes0) / 30).toFixed(1)} 个）—— 枢轴在泄漏`,
+          );
+        }
+      }
+      // 车头仍要落在行驶方向上（这一条把「幂等」和「朝向正确」串起来）
+      asserts++;
+      {
+        const b = v.driveBasis[mode === 'bike' ? 'bike' : 'moto'];
+        if (!b) {
+          probs.push(`${mode}: 量不到行车基底`);
+        } else {
+          const head = b.head.clone().applyQuaternion(b.quat);
+          asserts++;
+          if (Math.abs(head.z + 1) > 0.01 || Math.abs(head.x) > 0.01) {
+            probs.push(`${mode}: 循环后车头偏出行驶方向 (${head.x.toFixed(3)}, 0, ${head.z.toFixed(3)})`);
+          }
+        }
+      }
+    }
+  }
+
+  results.push({
+    name: 'verify_vehicle_real',
+    run: () => ({
+      ok: probs.length === 0,
+      detail:
+        probs.length === 0
+          ? `真模型：车头落在 -Z · 零输入直行（24 m/s）车把归零 · 真转弯前端跟方向 · 自转轴水平且垂直于行驶方向 · 轮角不打滑 · 自行车${notes.join(' / ')} / 骑手高差 = 骨盆高度`
+          : probs.join('；'),
+      asserts,
+    }),
+  });
+}
 
 // ---------------------------------------------------------------- 跑
 export function runAll(): { name: string; ok: boolean; detail: string; asserts: number }[] {

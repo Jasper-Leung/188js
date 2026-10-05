@@ -17,8 +17,8 @@
  * 路面外返回 -Infinity，调用方用 `Number.isFinite` 判——这条判据不能省，
  * 忘了判就会在 `lerp` 里把车一路吸到 -Infinity 去。
  */
-import { Group, Vector3, MathUtils, type PerspectiveCamera } from 'three';
-import { RIDE, WORLD } from '../data/raw';
+import { Group, Vector3, type PerspectiveCamera } from 'three';
+import { RIDE } from '../data/raw';
 import { CENTERLINE, nearestArcParam } from '../data/route';
 import { Terrain } from './terrain';
 import { Road, ROAD } from './road';
@@ -145,7 +145,17 @@ export class Ride {
   private position = new Vector3(0, 0, 0);
   private lastPos = new Vector3();
   private hasLastPos = false;
-  private wheelAngle = 0;
+  /**
+   * 轮子角度**不在这里**。
+   *
+   * 原来这里还有一份 `wheelAngle += speed·dt / WORLD.WHEEL_RADIUS`，
+   * 配一个没人读的 `get wheelRotation()`。它是**第二个真相来源**，
+   * 而且半径是 `WORLD.WHEEL_RADIUS = 0.34`——既不是自行车的实测
+   * 0.35，也不是滑板的 0.021，更不是摩托的 0.36。
+   * 真正拧轮子的是 `Vehicle`（它按各自载具的实测半径算），
+   * 所以这份积分只是躺在那儿，等哪天有人去读它就会拿到一个错的数。
+   * 已删。
+   */
   private boundaryIntensity = 0;
   /**
    * 当前路面系数：1 = 在路上，`OFFROAD.FACTOR` = 吃满离路惩罚。
@@ -264,8 +274,6 @@ export class Ride {
     this.applyCollisions(dt);
     this.applyOffRoad(dt, tune);
     this.position.y = this.groundHeight(this.position.x, this.position.z);
-
-    this.wheelAngle += (this.speed * dt) / WORLD.WHEEL_RADIUS;
   }
 
   /**
@@ -372,6 +380,13 @@ export class Ride {
   /** 每帧：姿态、轮子、相机 */
   render(dt: number) {
     const p = this.position;
+    // 第一视角要把角色藏起来。`first` 机位在 `back: 0.15 / up: 1.62`，
+    // 也就是**贴在头后面**——而 `FOOT_LATERAL_OFFSET` 现在是 0，角色就坐在
+    // 相机正前方。结果整个画面被后脑勺和背包挡死，骑手视角反而最没法看。
+    //
+    // 这一句必须在 `vehicle.update()` **之前**：update() 每帧都会重算
+    // `char.visible`，晚一步写就被它覆盖回去。
+    this.vehicle.setSelfHidden(this.camMode === 'first');
     // 载具动画与轮子。**在这里而不是 render() 里**：固步长下才是稳定的转速。
     this.vehicle.update(dt, this.speed, this.heading);
 
@@ -383,7 +398,6 @@ export class Ride {
     const hB = this.groundHeight(p.x - this._fwd.x * 1.2, p.z - this._fwd.z * 1.2);
     const pitch = Math.atan2(hF - hB, 2.4);
     this.bikePivot.rotation.x = -pitch;
-    this.wheelAngle = this.wheelAngle % (Math.PI * 2);
 
     if (this.cameraLocked) return;
 
@@ -526,8 +540,5 @@ export class Ride {
   }
   get headingValue() {
     return this.heading;
-  }
-  get wheelRotation() {
-    return MathUtils.euclideanModulo(this.wheelAngle, Math.PI * 2);
   }
 }

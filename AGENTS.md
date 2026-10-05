@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：22 条 / 237 条断言 + 文案死字扫描
+npm run verify     # 无头回归：32 条 / 468 条断言 + 文案死字扫描
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 22 / FAIL 0 / 没跑成 0`，
-断言 237 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 32 / FAIL 0 / 没跑成 0`，
+断言 468 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -96,7 +96,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 22 条 / 237 断言
+npm run verify      # 32 条 / 468 断言
 ```
 
 三条都过再提交。`dist/` 与 `package-lock.json` 不进版本库；
