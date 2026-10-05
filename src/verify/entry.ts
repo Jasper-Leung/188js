@@ -1448,6 +1448,107 @@ check('verify_minigame_playable', () => {
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
+// ---------------------------------------------------------------- 剧情送达
+/**
+ * 剧情「送达」的规则——**不是它长什么样，是它什么时候不该出现**。
+ *
+ * ## 为什么这一族只能靠判据守
+ *
+ * 「黑底文字卡好不好看」是审美，判据管不了。
+ * 但这一族里有几条是**明确的硬要求**，而且违反之后的症状
+ * 全部是「玩家说不出哪里不对，只是不想玩了」：
+ *
+ *   · 序章**只能播一次**——读档重进再放一遍，玩家会觉得游戏在重复自己；
+ *   · 路边的东西**不许锁操作**——过弯时被按住不能转向，是最容易招骂的一种打断；
+ *   · 反派引子**不许结束乐事**——一局打了一半的茶没了，玩家不会说是引子的错，
+ *     他会说是这个游戏做不完；
+ *   · 结算屏**必须等它落幕**再走下一步——面板和下一步同时在屏幕上，
+ *     玩家点到的和看到的不是同一件事。
+ *
+ * 这些都不需要浏览器：无头环境里 GameStateManager 是纯逻辑，
+ * 判据可以直接量"播了几次""锁没锁"。
+ */
+check('verify_story', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 1. 序章只播一次：标记写进存档，第二次进世界必须看见它已经是 true
+  asserts++;
+  {
+    const g = new GameStateManager();
+    if (g.prologueDone) probs.push('新档的 prologueDone 竟然一开始就是 true');
+    g.markPrologueDone();
+    asserts++;
+    if (!g.prologueDone) probs.push('markPrologueDone() 没有把标记置上');
+    // 再调一次必须是幂等的——enterWorld() 的那条路径本来就会被走两次
+    g.markPrologueDone();
+    asserts++;
+    if (!g.prologueDone) probs.push('重复 markPrologueDone() 把标记弄丢了');
+  }
+
+  // 2. 重开必须把序章重新放一遍，否则新玩家永远看不到它
+  asserts++;
+  {
+    const g = new GameStateManager();
+    g.markPrologueDone();
+    g.reset();
+    if (g.prologueDone) probs.push('reset() 没有清掉 prologueDone，重开就看不到序章');
+  }
+
+  // 3. 反派场景**一次性**：claim 第二次必须失败，否则同一场戏会重复播
+  asserts++;
+  {
+    const g = new GameStateManager();
+    if (!g.claimVillainScene(1)) probs.push('第一次 claimVillainScene(1) 失败了');
+    asserts++;
+    if (g.claimVillainScene(1)) probs.push('同一场反派戏被 claim 了两次');
+    asserts++;
+    if (g.seenVillain !== 1) probs.push(`claim 之后 seenVillain 是 ${g.seenVillain}，应为 1`);
+  }
+
+  // 4. 走到最后一集之后不再 claim
+  asserts++;
+  {
+    const g = new GameStateManager();
+    for (let i = 1; i <= ECON.VILLAIN_SCENE_COUNT; i++) g.claimVillainScene(i);
+    asserts++;
+    if (g.claimVillainScene(ECON.VILLAIN_SCENE_COUNT + 1)) {
+      probs.push('反派戏演完之后仍然能 claim 下一场');
+    }
+  }
+
+  // 5. 小游戏期间**不许锁操作**：这是"一局茶被顶掉"的根
+  asserts++;
+  {
+    // canRide 只认 phase / checkInPressed / narrativeBusy / checkInStage 四项。
+    // 小游戏期间 phase 就是 'minigame'，它自己已经让车不动了；
+    // 所以引子**不能**再去置 narrativeBusy —— 那会在乐事结束后仍然锁着。
+    const ride = canRide({
+      phase: 'minigame',
+      checkInPressed: false,
+      narrativeBusy: false,
+      checkInStage: 'none',
+    });
+    if (ride) probs.push('小游戏进行中 canRide 竟然放行（说明阶段机没兜住）');
+  }
+
+  // 6. 反过来：`narrativeBusy` 一旦为真就必须挡住骑行
+  asserts++;
+  {
+    const ok = canRide({
+      phase: 'roaming',
+      checkInPressed: false,
+      narrativeBusy: true,
+      checkInStage: 'none',
+    });
+    if (ok) probs.push('narrativeBusy 为真时竟然还能骑——路边字一旦锁上就解不开了');
+  }
+
+  const summary =
+    `序章一次性 · 反派 ${ECON.VILLAIN_SCENE_COUNT} 集各一次 · 小游戏不锁操作`;
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
 check('verify_chapter', () => {
   let asserts = 0;
   const probs: string[] = [];

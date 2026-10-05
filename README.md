@@ -533,7 +533,7 @@ npm install
 npm run dev        # 开发服务器
 npm run typecheck  # strict + noUnusedLocals + noUnusedParameters
 npm run build      # 产物进 dist/
-npm run verify     # 无头回归 21 条 / 226 断言 + 文案死字扫描
+npm run verify     # 无头回归 22 条 / 237 断言 + 文案死字扫描
 ```
 
 **一个不明显的坑**：`git push` 在这台机器上第一次报
