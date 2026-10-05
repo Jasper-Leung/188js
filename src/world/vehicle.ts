@@ -118,7 +118,7 @@
 import { Group, Object3D, Vector3, Quaternion, Box3, Matrix4, Mesh, AnimationMixer, AnimationClip, KeyframeTrack, InterpolateDiscrete, LoopRepeat, type AnimationAction } from 'three';
 import { RIDE } from '../data/raw';
 import { clamp, clamp01, damp } from '../core/math';
-import { stancePoseOf, loopSeamOf, trimToSeam, footOrbitOf, type StancePose, type LoopSeam } from './pose';
+import { stancePoseOf, loopSeamOf, trimToSeam, footOrbitOf, bakeRideToPedals, type StancePose, type LoopSeam } from './pose';
 
 export type RideMode = 'foot' | 'bike' | 'motorcycle' | 'skate';
 export const RIDE_MODES: readonly RideMode[] = ['foot', 'bike', 'motorcycle', 'skate'];
@@ -140,6 +140,15 @@ export const RIDE_MODES: readonly RideMode[] = ['foot', 'bike', 'motorcycle', 's
  */
 function preroll(a: AnimationAction, clip: AnimationClip): void {
   a.time = Math.min(clip.duration * 0.18, 0.35);
+}
+
+/**
+ * `preroll` 会把起播时间挪到多少秒。**单独抽出来**是因为烘焙算相位时
+ * 也要用同一个数——两处各写一遍「时长 × 18%，上限 0.35」的话，
+ * 改了一处忘了另一处，脚↔踏板就会差一个固定相位（实测 0.125 ↔ 0.327m 来回扫）。
+ */
+export function prerollSeconds(duration: number): number {
+  return Math.min(duration * 0.18, 0.35);
 }
 
 
@@ -1854,6 +1863,8 @@ export class Vehicle {
    * 自行车摆位靠它把脚圈中心对准曲柄轴心；`null` 时退回鞍面摆法。
    */
   private rideFootOrbit: Vector3 | null = null;
+  /** 已经烘焙过腿的那条片段（按对象认，模型换了自然失效）。 */
+  private rideBakedFor: AnimationClip | null = null;
   /** 自行车的装配节点。`null` = 没装（不是 bike 模式，或模型没到）。 */
   private rig: BikeRig | null = null;
   /** 车把当前偏转（弧度），由航向变化率推出来（见 `bikeSteerTarget`）。 */
@@ -2095,7 +2106,158 @@ export class Vehicle {
       // 否则两个骑手叠在一起：一个摆腿的，一个焊在车上的。
       char.visible = this.mode !== 'motorcycle';
       this.group.add(char);
+      // ★ 烘焙在 `startClips` **之前**：它要同时用到角色缩放（刚设好）
+      //   与曲柄 rig（`assembleBike` 更早装好），两头齐了才能算出相位。
+      this.bakeRideLegs(char);
       if (this.mode !== 'motorcycle') this.startClips(char);
+    }
+  }
+
+  /**
+   * ## 把骑行片段的**两条腿**重烘到这台车的踏板圆上（两骨 IK）
+   *
+   * ### 为什么必须重烘，而不是调摆位或缩放
+   *
+   * `骑自行车` 的脚圈与踏板圈对不上，而且**缩放调和不了**：
+   * 动画的「腿长 ÷ 曲柄半径」= 3.93，这台车是 7.23（见 `pedalCadence` 的注释）。
+   * 所以唯一的真修法是换掉那两条腿的旋转轨道。
+   *
+   * ### 烘出来的效果（实测）
+   *
+   * | | 原素材 | 烘焙后 |
+   * |---|---|---|
+   * | 脚踝到圆心 | 0.1486（脚圈半径） | **0.05589**（= 踏板轨道，误差 0） |
+   * | 循环首尾相位差 | 11°（接缝残留 2.9cm） | **0.00°** |
+   * | 骨盆离鞍面 | 13.6cm（悬着） | ≈1.6cm（坐上了） |
+   *
+   * 整圈数取 1，所以**接缝天然为 0**；半径取**实测踏板轨道**，
+   * 于是脚与踏板**同心同半径**，剩下的只有相位。
+   *
+   * ### 相位是**量出来的**，不是猜的
+   *
+   * 踏板在 crankAngle = 0 时的世界位置 → 换到角色本地 → 读它的方位角。
+   * 少这一步，脚会整体偏一个固定角差，而两圈是**同心**的所以看不出来——
+   * 症状就是「脚在踏板旁边画同样大的圈」。
+   */
+  private bakeRideLegs(char: Object3D): void {
+    const c = this.models.clips;
+    const bike = this.models.bike;
+    if (!c?.ride || !bike || !this.rig) return;
+    if (this.rideBakedFor === c.ride) return;
+    this.rideBakedFor = c.ride;
+
+    const cs = char.scale.x || 1;
+    if (cs < 1e-6) return;
+
+    // ★ 摆位由**鞍面**决定，而不是沿用原动画的脚圈中心。
+    //
+    //   原来的做法拿原动画的 `footOrbit` 当 `centre`，那等于把「骑手悬空
+    //   13.3cm」这个 B 方案的取舍**固化进动画**——骨盆再也落不回鞍面。
+    //   这里是反过来推：先按鞍面算出角色原点，再问「曲柄轴心在角色本地是哪」。
+    //   那个点才是新动画该绕着转的圆心。
+    const sBike = bike.scale.x || 1;
+    const seat = this.rig.seat ?? new Vector3(0, SADDLE_H / sBike, 0);
+    const pelvisY = seat.y * sBike + CHAR_HEIGHT * PELVIS_ABOVE_SADDLE;
+    const saddlePos = new Vector3(
+      seat.x + PELVIS_BEHIND_SADDLE / sBike,
+      (pelvisY - this.pelvisH * cs) / sBike,
+      seat.z,
+    );
+    bike.updateMatrix();
+    saddlePos.applyMatrix4(bike.matrix); // → group 空间，这就是角色原点该在的位置
+    const orbitCentre = this.rig.crank.position
+      .clone()
+      .applyMatrix4(bike.matrix)
+      .sub(saddlePos)
+      .applyAxisAngle(AXIS_Y, CHAR_FACING_YAW)
+      .divideScalar(cs);
+    if (orbitCentre.lengthSq() < 1e-12) return;
+    this.rideFootOrbit = orbitCentre;
+    const centre = orbitCentre;
+
+    // 踏板轨道半径：⚠ **不是** `orbit.length()`。
+    //
+    //   `orbit` 是踏板到**车轴**的三维距离，而车轴是 `crankAxis` 的本地 +X，
+    //   所以那个长度里**含着横向的半个 Q 间距**（实测 4.85cm 车模单位 = 8.71cm）。
+    //   踏板**绕圈**的半径只有 y-z 那个分量：hypot(0.0583, 0.0617) = 0.0849
+    //   （车模本地）= 0.1527m → 角色本地 0.0871 模型单位。
+    //   拿三维长度当半径，脚会画出**大 15%** 的圈（实测 0.1000 vs 0.0871）。
+    const orbitL = this.rig.pedals[0]?.orbit;
+    const orbitR = this.rig.pedals[1]?.orbit;
+    if (!orbitL) return;
+    const radius = (Math.hypot(orbitL.y, orbitL.z) * bike.scale.x) / cs;
+    if (radius < 1e-6) return;
+
+    // 曲柄轴心：车模本地 → group
+    bike.updateMatrix();
+    const charPos = saddlePos;
+
+    // crankAxis 本地 → 角色本地。★ 照 `updateBikeRig` 的写法**直接转轨道向量**——
+    //   踏板挂在不转的 `crankAxis` 上、位置每帧手动重算，转 `crankSpin` 根本
+    //   动不了它们（我第一版就那么探测的，读到 0 → 默认成 +1，转向整个反了）。
+    const axisNode = this.rig.pedals[0].node.parent;
+    if (!axisNode) return;
+    const toCharLocal = (orbitVec: Vector3, crankAng: number): Vector3 =>
+      orbitVec
+        .clone()
+        .applyAxisAngle(AXIS_X, crankAng)
+        .applyQuaternion(axisNode.quaternion)
+        .add(this.rig!.crank.position)
+        .applyMatrix4(bike.matrix)
+        .sub(charPos)
+        .applyAxisAngle(AXIS_Y, CHAR_FACING_YAW)
+        .divideScalar(cs);
+
+    const pl = toCharLocal(orbitL, 0);
+    const pr = orbitR ? toCharLocal(orbitR, 0) : new Vector3(pl.x, centre.y, centre.z - radius);
+    const phase = Math.atan2(pl.y - centre.y, pl.z - centre.z);
+
+    // 转向：把轨道转一个小正角，看方位角是增是减。**必须实测**——
+    //   手推过一次（认为递减），实测是递增，差 180°。
+    const sense = (() => {
+      const a0 = phase;
+      const q = toCharLocal(orbitL, 0.05);
+      let d = Math.atan2(q.y - centre.y, q.z - centre.z) - a0;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      return d >= 0 ? 1 : -1;
+    })();
+
+    const baked = bakeRideToPedals(char, c.ride, {
+      centre: centre.clone(),
+      lateralX: [pl.x, pr.x],
+      radius,
+      // ★ 扣掉 **preroll**：动画不是从 t=0 起播的，`startClips` 会把它挪到
+      //   `min(时长×18%, 0.35s)`（见 `preroll`）——为的是第一帧不是 bind pose。
+      //   而曲柄是从 `wheelSpin = 0` 起转的，于是动画一开播就比踏板**超前**
+      //   整整一段相位。实测不扣的话，脚↔踏板距离在 0.125 ↔ 0.327m 之间来回扫。
+      //   段数 18% 是 `preroll` 自己的约定，这里必须与它一致。
+      phase: phase - sense * 2 * Math.PI * (prerollSeconds(c.ride.duration) / c.ride.duration),
+      turns: 1,
+      sense,
+    });
+    if (!baked) {
+      console.warn('[vehicle] 骑行腿烘焙失败（骨名对不上？）—— 骑手会踩在踏板旁边画圈');
+      return;
+    }
+    c.ride = baked;
+    // 认成**烘完之后那一条**：不认的话下次 `rebuild` 会拿烘焙品再烘一遍
+    // （`footOrbitOf` / `loopSeamOf` 都重算，数值虽稳，但白做一次活）。
+    this.rideBakedFor = baked;
+    // ★ 烘完之后**全部重量一遍**：脚圈中心、接缝、步速都可能变。
+    //   烘焙把 1.012 圈改成整 1 圈，`pedalRate` 必然变——
+    //   沿用烘焙前的那个数就等于脚与曲柄差 1.2% 的转速，
+    //   几十秒后相位飘开，又变成「脚在旁边空踩」。
+    this.rideFootOrbit = footOrbitOf(char, baked);
+    this.rideSeam = loopSeamOf(char, baked, this.rootBone);
+    this.ridePedalRate =
+      this.rideSeam && this.rideSeam.time > 1e-6
+        ? (2 * Math.PI * this.rideSeam.turns) / this.rideSeam.time
+        : 0;
+    if (this.rideSeam && Math.abs(this.rideSeam.footGapAtEnd) > 0.02) {
+      console.warn(
+        `[vehicle] 烘焙后的骑行片段首尾仍有 ${this.rideSeam.footGapAtEnd.toFixed(4)} 的姿势差 —— 循环会跳`,
+      );
     }
   }
 

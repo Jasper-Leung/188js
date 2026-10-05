@@ -33,12 +33,14 @@ import {
   Bone,
   Group,
   InterpolateDiscrete,
+  InterpolateLinear,
   KeyframeTrack,
   LoopRepeat,
   Object3D,
   Quaternion,
   Vector3,
   type AnimationAction,
+  type InterpolationModes,
 } from 'three';
 
 function isBone(o: Object3D): boolean {
@@ -226,6 +228,30 @@ export class PoseSampler {
     r.getWorldPosition(this.c);
     b.getWorldPosition(out);
     out.sub(this.c);
+    return true;
+  }
+
+  /**
+   * 某根骨的**局部**变换（相对它的父骨）。
+   *
+   * 烘焙趾骨时要的是这个而不是世界变换：脚掌的世界朝向已经被冻成常量了，
+   * 趾骨只要**相对脚掌**不动，整个「脚掌 + 脚趾」就是刚体，循环必然闭合。
+   */
+  localOf(name: string, pos: Vector3, quat: Quaternion): boolean {
+    const b = this.bones.get(name);
+    const p = b?.parent;
+    if (!b || !p) return false;
+    const wq = new Quaternion();
+    const pq = new Quaternion();
+    const wp = new Vector3();
+    const pp = new Vector3();
+    b.getWorldQuaternion(wq);
+    b.getWorldPosition(wp);
+    p.getWorldQuaternion(pq);
+    p.getWorldPosition(pp);
+    quat.copy(pq).invert().multiply(wq).normalize();
+    pq.invert();
+    pos.copy(wp.sub(pp).applyQuaternion(pq));
     return true;
   }
 
@@ -485,6 +511,10 @@ function rotAngle(a: Quaternion, b: Quaternion): number {
   return 2 * Math.acos(Math.min(1, Math.abs(a.dot(b))));
 }
 
+/** 圈数的比较容差（1e-6 圈 = 0.00036°）。**守卫与候选过滤必须用同一个**，
+ *  否则会出现「守卫放过了、过滤又筛掉」⇒ 一个候选都没有 ⇒ 返回 null。 */
+const TURN_EPS = 1e-6;
+
 export interface LoopSeam {
   /** 循环该在这里断开（秒）。播 `[0, time]`。 */
   time: number;
@@ -577,15 +607,21 @@ export function loopSeamOf(
   }
   const totalTurns = Math.abs(turns[times.length - 1]);
   // 一圈都没踩满就没有「踩了一圈之后」可选——不裁，别把循环裁成一个残段。
-  if (totalTurns < 1) return null;
+  //
+  // ⚠ 容差见 `TURN_EPS`。**整整一圈**的片段解缠累加出来是 0.99999997 而不是 1.0，
+  //   写死 `< 1` 会把「完美循环」判成「不循环」，接缝与步速全成 null——
+  //   而循环其实一点问题都没有（这正是两骨 IK 烘焙出来的片段）。
+  if (totalTurns < 1 - TURN_EPS) return null;
 
   // ---- ② 只在「已踩 ≥1 圈」的关键帧里找差距最小的那一帧 ----
+  // ⚠ 这里必须用**同一个** `TURN_EPS`：守卫放过了 0.99999997 而过滤按 1e-9 筛掉它，
+  //   就会「一个候选都没有」直接返回 null——比守卫更早、更难看出原因。
   const p0Foot = snap(times[0], footBones);
   const p0Body = snap(times[0], bodyBones);
   let at = -1;
   let best = Infinity;
   for (let i = 0; i < times.length; i++) {
-    if (Math.abs(turns[i]) < 1 - 1e-9) continue;
+    if (Math.abs(turns[i]) < 1 - TURN_EPS) continue;
     const g = gap(p0Foot, snap(times[i], footBones));
     if (g < best) {
       best = g;
@@ -728,4 +764,397 @@ export function footOrbitOf(
   if (!n) return null;
   // 两踝中点的平均：两踝之和 ÷ (2 × 帧数)
   return sum.divideScalar(2 * n);
+}
+
+/* ------------------------------------------------------------------ *
+ * ## 把骑行片段的脚**解到踏板圆上**（两骨 IK 烘焙）
+ * ------------------------------------------------------------------ *
+ *
+ * `骑自行车` 的脚圈与这台车的踏板圈对不上，而且**缩放调和不了**：
+ * 实测动画的「腿长 ÷ 曲柄半径」= 3.93，这台车是 7.23。
+ * 所以真正的修法不是摆位也不是缩放，而是**重烘一条腿**。
+ *
+ * 做法：根骨 / 躯干 / 手臂的轨道**原样保留**，只把两条腿的
+ * `UpLeg`（大腿）与 `Leg`（小腿）旋转轨道换成两骨 IK 解出来的值。
+ * 脚踝沿一个半径等于**踏板轨道**的圆走，每循环**整 N 圈**——
+ * 于是循环接缝**精确为 0**（原素材因为踩 3.417 圈，残留 2.9cm）。
+ *
+ * ## ★ 为什么循环必须整圈
+ *
+ * `loopSeamOf` 的判据是「脚相对曲柄中心转过几圈」。新片段的脚圈
+ * **与踏板圈同心同半径**，所以只要首尾相位一致，接缝就是 0。
+ * 取整圈数（默认 1）不是为了好看，是为了让相位能对上。
+ *
+ * ## 两骨 IK 的三个量
+ *
+ * ```
+ * 目标   target   脚踝该在的位置（角色本地、模型单位）
+ * 极向量 pole      膝盖朝哪边弯 —— **取自原动画的膝盖方向**，
+ *                  这样烘出来的腿弯法与原片一致，不会有「膝盖反了」
+ * 长度   a, b     大腿 / 小腿，量自 bind 位姿（不是写死）
+ * ```
+ */
+
+const _dir = new Vector3();
+const _perp = new Vector3();
+const _thigh = new Vector3();
+const _kneePos = new Vector3();
+const _shin = new Vector3();
+const _pole = new Vector3();
+const _up = new Vector3(0, 1, 0);
+/** 烘焙时用来闭合 bob 的根骨名。Mixamo 系的根骨名就是它。 */
+const ROOT_BONE = 'mixamorigHips';
+
+/**
+ * 两骨 IK：给定髋、目标、极向量，求**大腿**与**小腿**的骨向。
+ *
+ * 解析解（余弦定理）：
+ *
+ * ```
+ * d = |目标 − 髋|                      两骨张开的总长
+ * x = (a² − b² + d²) / 2d              髋到「沿目标方向的投影点」
+ * h = √(a² − x²)                       垂直分量
+ * 弯曲平面法线 = 极向量在 ⊥ 目标方向 上的投影
+ * 膝 = 髋 + (dir·x + 法线·h)·a
+ * ```
+ *
+ * 骨骼的**本地 +Y 指向子骨**（实测：大腿→小腿的本地位移是 (0, 0.2152, 0)），
+ * 所以「世界 +Y = 骨向」就是一条完整的求解——`setFromUnitVectors` 给的是
+ * 最小旋转，腿的轴向扭转由子骨自己的本地旋转接着，够用。
+ *
+ * @param out 写回 { a: 大腿骨向, b: 小腿骨向 }（**单位向量**，不是四元数）
+ * @returns 目标超出可达范围时返回 false（长度被夹到 `[|a−b|, a+b]`）
+ */
+export function solveTwoBone(
+  hip: Vector3,
+  target: Vector3,
+  pole: Vector3,
+  a: number,
+  b: number,
+  out: { a: Vector3; b: Vector3 },
+): boolean {
+  _dir.subVectors(target, hip);
+  const raw = _dir.length();
+  if (raw < 1e-9) return false;
+  _dir.divideScalar(raw);
+  const d = Math.min(a + b - 1e-6, Math.max(Math.abs(a - b) + 1e-6, raw));
+
+  const x = (a * a - b * b + d * d) / (2 * d);
+  const h = Math.sqrt(Math.max(0, a * a - x * x));
+  // 弯曲平面法线 = 极向量投到 ⊥ 目标方向
+  _pole.copy(pole).addScaledVector(_dir, -pole.dot(_dir));
+  if (_pole.lengthSq() < 1e-12) {
+    // 极向量与目标共线 ⇒ 弯曲平面定不下来。给一个确定的兜底，
+    // 而不是把一个 NaN 姿势混进片段里。
+    _perp.set(1, 0, 0).addScaledVector(_dir, -_dir.x);
+    if (_perp.lengthSq() < 1e-12) _perp.set(0, 0, 1).addScaledVector(_dir, -_dir.z);
+  } else {
+    _perp.copy(_pole);
+  }
+  _perp.normalize();
+
+  _thigh.copy(_dir).multiplyScalar(x).addScaledVector(_perp, h).normalize();
+  _kneePos.copy(hip).addScaledVector(_thigh, a);
+  _shin.subVectors(target, _kneePos);
+  if (_shin.lengthSq() < 1e-18) return false;
+  _shin.normalize();
+  out.a.copy(_thigh);
+  out.b.copy(_shin);
+  return true;
+}
+
+export interface PedalBakeOptions {
+  /**
+   * 曲柄轴心在**角色本地**的 (y, z)。**x 不在这里**——
+   * 左右两个踏板横向相差整整一个 Q 间距（实测 0.35m），各自在自己的平面里转，
+   * 共用一个圆是错的（那样两只脚会挤到中线上）。
+   */
+  centre: Vector3;
+  /** 每条腿的踏板平面在角色本地的 **x**（顺序：左、右）。 */
+  lateralX: readonly [number, number];
+  /** 圆半径（**角色本地、模型单位**）—— 由实测踏板轨道换算。 */
+  radius: number;
+  /** t = 0 时**左**踏板的方位角（弧度，约定 `atan2(y, z)`）。右脚自动 +π。 */
+  phase: number;
+  /**
+   * 转向：`+1` 让方位角随时间**递增**，`−1` 递减。
+   *
+   * ⚠ 真车上曲柄**正转**时踏板的 `atan2(y, z)` 是**递减**的——
+   *   绕横向轴 +X 转正角，按右手法则把 +Y 转向 +Z，于是 (y,z) 平面上的
+   *   方位角 `atan2(y, z)` 反而在减。烘焙照「递增」写就会与曲柄**反向**，
+   *   症状是两圈**同心**所以半径完全对得上、看着像没问题，只有
+   *   脚↔踏板的距离在以**两倍速来回扫**（实测 0.125 ↔ 0.327m 摆）。
+   *
+   *   递减同时也是**前踩**的正确方向：脚在最低点时向后退、推着踏板走。
+   *   调用方应当**从 rig 实测**而不是照抄常数（`bakeRideLegs` 就是那么做的）。
+   */
+  sense: number;
+  /** 一条循环踩几圈。**必须是整数**，否则接缝对不上。 */
+  turns: number;
+  /** 两条腿的骨名，默认 Mixamo 命名。 */
+  legs?: readonly [{ hip: string; knee: string; ankle: string; toe: string }, { hip: string; knee: string; ankle: string; toe: string }];
+}
+
+const DEFAULT_LEGS: NonNullable<PedalBakeOptions['legs']> = [
+  { hip: 'mixamorigLeftUpLeg', knee: 'mixamorigLeftLeg', ankle: 'mixamorigLeftFoot', toe: 'mixamorigLeftToeBase' },
+  { hip: 'mixamorigRightUpLeg', knee: 'mixamorigRightLeg', ankle: 'mixamorigRightFoot', toe: 'mixamorigRightToeBase' },
+];
+
+const _hipW = new Vector3();
+const _kneeW = new Vector3();
+const _ankleW = new Vector3();
+const _poleW = new Vector3();
+const _tgtW = new Vector3();
+const _dirs = { a: new Vector3(), b: new Vector3() };
+const _qP = new Quaternion();
+const _qWant = new Quaternion();
+const _qInv = new Quaternion();
+const _qOut = new Quaternion();
+const _thighWorld = new Quaternion();
+const _shinWorld = new Quaternion();
+
+/**
+ * 把一条骑行片段的**两条腿**重烘到指定的踏板圆上，其余轨道原样保留。
+ *
+ * ## 逐帧做什么
+ *
+ * 1. 用 `PoseSampler` 把原片段摆到 `t`（根骨 / 躯干 / 手臂的姿势**都取自这里**）；
+ * 2. 量出髋、膝、踝的**角色本地**位置（scratch 根即角色原点）；
+ * 3. 目标踝 = `centre + radius · (sin θ, cos θ)`，`θ` 随 `t` 线性转 `turns` 圈；
+ * 4. `solveTwoBone` 解出大腿 / 小腿的骨向；
+ * 5. **骨向 → 本地四元数**：`q_local = q_父的世界朝向⁻¹ · q_骨的世界朝向`。
+ *
+ * ★ 第 5 步是这个函数唯一容易错的地方：解出来的是**骨向**（世界空间），
+ *   而要写进轨道的是**本地**旋转。少做这一次父朝向换算，腿就会在
+ *   骨盆一转身时整体拧一下——而单看一帧完全正常。
+ *
+ * @returns 骨名对不上时返回 `null`（换模型时不该把半成品写进播放链）。
+ */
+export function bakeRideToPedals(
+  char: Object3D,
+  clip: AnimationClip,
+  opts: PedalBakeOptions,
+): AnimationClip | null {
+  const legs = opts.legs ?? DEFAULT_LEGS;
+  const probe = new PoseSampler(char, clip);
+  for (const l of legs) {
+    for (const n of [l.hip, l.knee, l.ankle, l.toe]) {
+      if (!probe.has(n)) return null;
+    }
+  }
+  const times = keyTimesOf(clip);
+  if (times.length < 2) return null;
+
+  // 大腿 / 小腿长度：量自 **bind 位姿**（不写死，换模型自动跟上）
+  probe.seek(0);
+  let a = 0;
+  let b = 0;
+  for (const l of legs) {
+    if (!probe.originPos(l.hip, _hipW) || !probe.originPos(l.knee, _kneeW) || !probe.originPos(l.ankle, _ankleW)) {
+      return null;
+    }
+    const ta = _hipW.distanceTo(_kneeW);
+    const tb = _kneeW.distanceTo(_ankleW);
+    a += ta;
+    b += tb;
+  }
+  a /= legs.length;
+  b /= legs.length;
+  if (a < 1e-6 || b < 1e-6) return null;
+
+  // 逐帧解，写出每条腿三根骨的本地四元数
+  const solved = legs.map(() => ({
+    hip: new Float32Array(times.length * 4),
+    knee: new Float32Array(times.length * 4),
+    foot: new Float32Array(times.length * 4),
+  }));
+  let ok = true;
+  // 脚掌的**世界朝向**：整条循环保持同一个值。
+  //
+  // ★ 为什么脚掌也要烘：不烘的话循环首尾的脚掌旋转差 0.0644（≈37°），
+  //   而踏板平台在真车上**始终水平**（`updateBikeRig` 就是这么摆的），
+  //   所以「脚掌朝向恒定」既是循环闭合的要求，也正是物理上对的那一个。
+  const footWorld = new Quaternion();
+  // 脚趾骨（`ToeBase` 及其子骨）也冻成常量。
+  //
+  // ★ 为什么：原动画的趾骨有**自己的** position / quaternion 轨道，
+  //   而那条轨道踩 1.012 圈、首尾不闭合。脚掌已经冻住了，趾骨却还在动，
+  //   于是接缝上左脚趾差 3.5cm。踩踏时脚趾本来就不需要屈伸，
+  //   冻住既是循环闭合的要求，也是物理上无害的。
+  const toeBones = legs.map((l) => {
+    const out: { name: string; pos: Float32Array; quat: Float32Array }[] = [];
+    const walk = (n: string) => {
+      if (!probe.has(n)) return;
+      out.push({ name: n, pos: new Float32Array(3), quat: new Float32Array(4) });
+      const b = (probe as unknown as { bones: Map<string, { children: { name: string }[] }> }).bones;
+      for (const c of b.get(n)?.children ?? []) walk(c.name);
+    };
+    walk(l.toe);
+    return out;
+  });
+  const toesReady = legs.map(() => false);
+  // 极向量**每条腿只取 t = 0 那一次**，整条循环保持不变。
+  //
+  // ★ 为什么不能逐帧取：极向量决定膝盖往哪边弯，取自原动画的话，
+  //   原动画首尾的膝盖方向本身就不一样（它踩 1.012 圈，不是整圈）——
+  //   于是烘出来的腿在循环接缝处膝位不同，实测残留 **0.0626**。
+  //   固定极向量让整条腿的姿势成为 θ 的**纯函数**，首尾必然重合。
+  //   代价是膝盖的弯向不随踩踏摆动；对一个固定的踏板平面来说这正合适。
+  const poles = legs.map(() => new Vector3());
+  const polesReady = legs.map(() => false);
+  // 末帧要用的髋位置修正量（把 bob 闭合，见下面）
+  const rootTrack0 = clip.tracks.find((tr) => tr.name === `${ROOT_BONE}.position`);
+  const yFix = rootTrack0 ? rootTrack0.values[1] - rootTrack0.values[(rootTrack0.values.length / 3 - 1) * 3 + 1] : 0;
+  for (let i = 0; i < times.length && ok; i++) {
+    const t = times[i];
+    const theta = opts.phase + opts.sense * 2 * Math.PI * opts.turns * (i / (times.length - 1));
+    for (let li = 0; li < legs.length; li++) {
+      const l = legs[li];
+      probe.seek(t);
+      if (!probe.originPos(l.hip, _hipW) || !probe.originPos(l.knee, _kneeW) || !probe.originPos(l.ankle, _ankleW)) {
+        ok = false;
+        break;
+      }
+      // 末帧：髋被抬/压到与首帧一致（bob 闭合），腿必须按**改过之后**的髋解
+      if (i === times.length - 1) _hipW.y += yFix;
+      // 极向量 = 原动画的**膝盖方向**（只取 t = 0 这一次，见上面），弯法与原片一致
+      if (!polesReady[li]) {
+        _poleW.subVectors(_kneeW, _hipW);
+        if (_poleW.lengthSq() < 1e-12) _poleW.set(0, 0, 1);
+        poles[li].copy(_poleW);
+        polesReady[li] = true;
+      }
+      // 两只脚差半个圈（脚踏板本来就是 180° 对置）。
+      // ★ x 用**各自踏板平面的**横向位置：左右踏板横向差 0.35m，
+      //   共用一个 x 等于把两只脚挤到中线上，腿会整个张开。
+      const th = theta + li * Math.PI;
+      _tgtW.set(
+        opts.lateralX[li] ?? opts.centre.x,
+        opts.centre.y + opts.radius * Math.sin(th),
+        opts.centre.z + opts.radius * Math.cos(th),
+      );
+      if (!solveTwoBone(_hipW, _tgtW, poles[li], a, b, _dirs)) {
+        ok = false;
+        break;
+      }
+      // 骨向 → 世界朝向 → 本地朝向：`q_local = q_父的世界朝向⁻¹ · q_骨的世界朝向`
+      //
+      // ★ 小腿的父朝向必须用**刚算出来的新大腿**世界朝向，不能用原片段的：
+      //   probe 上装的是**原**片段，而大腿这一步已经把它的世界朝向改掉了。
+      //   用原朝向换算，小腿的本地旋转就挂在了错的父骨上——
+      //   实测踝会飞到 0.42 之外（大腿完全正确，因为它的父骨是骨盆、没动过）。
+      //
+      //   这三行**必须顺序写、不能抽成一个函数**：抽出来的版本里
+      //   「取父朝向」和「写 thighWorld」共用一个临时量，第二步会把父朝向
+      //   覆盖成小腿自己的世界朝向 ⇒ `q_local` 恒等于单位四元数 ⇒ 腿完全伸直。
+      probe.worldQuat('mixamorigHips', _qP);
+      _qWant.setFromUnitVectors(_up, _dirs.a);
+      _thighWorld.copy(_qWant);
+      _qInv.copy(_qP).invert().multiply(_qWant);
+      _qOut.copy(_qInv).normalize();
+      solved[li].hip.set([_qOut.x, _qOut.y, _qOut.z, _qOut.w], i * 4);
+
+      _qWant.setFromUnitVectors(_up, _dirs.b);
+      _shinWorld.copy(_qWant);
+      _qInv.copy(_thighWorld).invert().multiply(_qWant);
+      _qOut.copy(_qInv).normalize();
+      solved[li].knee.set([_qOut.x, _qOut.y, _qOut.z, _qOut.w], i * 4);
+
+      // 脚掌：取 t = 0 的世界朝向当常量，整条循环不变
+      //
+      // ★ 父朝向用**小腿**（`_shinWorld`），不是大腿——脚掌挂在小腿下面。
+      //   拿大腿当父朝向时局部旋转整体拧了 46°，而右腿那条因为大腿小腿
+      //   恰好同向所以看不出来（实测右腿只差 1.8°、左腿差 46°）。
+      if (i === 0) probe.worldQuat(l.ankle, footWorld);
+      _qInv.copy(_shinWorld).invert().multiply(footWorld);
+      _qOut.copy(_qInv).normalize();
+      solved[li].foot.set([_qOut.x, _qOut.y, _qOut.z, _qOut.w], i * 4);
+
+      // 脚趾：局部变换冻成 t = 0 那一次（见上面）
+      if (!toesReady[li]) {
+        for (const t of toeBones[li]) {
+          const p0 = new Vector3();
+          const q0 = new Quaternion();
+          if (probe.localOf(t.name, p0, q0)) {
+            t.pos.set([p0.x, p0.y, p0.z]);
+            t.quat.set([q0.x, q0.y, q0.z, q0.w]);
+          }
+        }
+        toesReady[li] = true;
+      }
+    }
+  }
+  if (!ok) return null;
+
+  // 根骨（骨盆）的 y 轨道：**把末帧改成首帧的值**，让上下起伏也闭合。
+  //
+  // ★ 为什么必须动它：整条腿是挂在髋上解出来的，而髋的 bob 首尾差 1.11cm
+  //   （原素材踩 1.012 圈，bob 自然没对上）。髋一低，同样的目标解出来的
+  //   骨向就不同——实测左脚在接缝上差 22.8°，而右腿 0.00°。
+  //   只改**末帧一个关键帧**，bob 其余部分原样保留。
+  //
+  // ⚠ 所以**末帧的腿必须用改过之后的髋位置重解**（见下面的 `yFix`）：
+  //   改完轨道却不重解，末帧的腿就与那个新的髋位置不自洽，
+  //   踝位差从 0.000001 涨到 0.0063。
+  const rootTrack = rootTrack0;
+  const closedRoot = rootTrack
+    ? new KeyframeTrack(
+        rootTrack.name,
+        rootTrack.times.slice(),
+        rootTrack.values.slice(),
+        rootTrack.getInterpolation(),
+      )
+    : null;
+  if (closedRoot) {
+    const n = closedRoot.values.length / 3;
+    closedRoot.values[(n - 1) * 3 + 1] = closedRoot.values[1];
+  }
+
+  // 组装：替换三条腿的旋转轨道 + 冻住脚趾 + 闭合根骨 bob，其余**原样保留**
+  const replaced = new Set<string>();
+  for (const l of legs) {
+    replaced.add(`${l.hip}.quaternion`);
+    replaced.add(`${l.knee}.quaternion`);
+    replaced.add(`${l.ankle}.quaternion`);
+  }
+  for (const list of toeBones) {
+    for (const t of list) {
+      replaced.add(`${t.name}.position`);
+      replaced.add(`${t.name}.quaternion`);
+    }
+  }
+  const times32 = Float32Array.from(times);
+  const tracks: KeyframeTrack[] = [];
+  for (const tr of clip.tracks) {
+    if (replaced.has(tr.name)) continue;
+    if (closedRoot && tr === rootTrack) {
+      tracks.push(closedRoot);
+      continue;
+    }
+    tracks.push(tr);
+  }
+  legs.forEach((l, li) => {
+    tracks.push(new KeyframeTrack(`${l.hip}.quaternion`, times32, solved[li].hip, tr_getInterp(clip, `${l.hip}.quaternion`)));
+    tracks.push(new KeyframeTrack(`${l.knee}.quaternion`, times32, solved[li].knee, tr_getInterp(clip, `${l.knee}.quaternion`)));
+    tracks.push(new KeyframeTrack(`${l.ankle}.quaternion`, times32, solved[li].foot, tr_getInterp(clip, `${l.ankle}.quaternion`)));
+    // 趾骨：常量轨道（同一个值写满所有帧）
+    for (const t of toeBones[li]) {
+      const n = times.length;
+      const pv = new Float32Array(n * 3);
+      const qv = new Float32Array(n * 4);
+      for (let i = 0; i < n; i++) {
+        pv.set(t.pos, i * 3);
+        qv.set(t.quat, i * 4);
+      }
+      tracks.push(new KeyframeTrack(`${t.name}.position`, times32, pv, tr_getInterp(clip, `${t.name}.position`)));
+      tracks.push(new KeyframeTrack(`${t.name}.quaternion`, times32, qv, tr_getInterp(clip, `${t.name}.quaternion`)));
+    }
+  });
+  return new AnimationClip(`${clip.name}·pedal`, clip.duration, tracks);
+}
+
+/** 取原轨道用的插值方式；轨道不存在时退回线性。 */
+function tr_getInterp(clip: AnimationClip, name: string): InterpolationModes {
+  for (const tr of clip.tracks) if (tr.name === name) return tr.getInterpolation();
+  return InterpolateLinear;
 }

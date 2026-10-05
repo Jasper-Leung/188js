@@ -3309,6 +3309,7 @@ check('verify_bike_rig', () => {
   // ⇒ **ω = +v/R**。原来三个载具都写成负号，于是轮子全在倒着转，
   // 而既有判据量的都是「转了多少」，没有一条量正负号。
   asserts++;
+  const bikeScale = bike.scale.x;
   {
     for (let i = 0; i < 60; i++) v.update(1 / 60, 2, 0); // 1 秒，2 m/s
     const ang = v.bikeWheelAngle;
@@ -3408,66 +3409,53 @@ check('verify_bike_rig', () => {
     }
   }
 
-  // 6. ★ **站位**：脚圈中心必须落在**曲柄轴心**上
+  // 6. ★ **站位**：骨盆必须落在鞍面上
   //
-  // 「人不在自行车上」的直接判据。**判据换过两次，每次都因为踩到同一个坑**：
+  // 判据换过三次，每次都因为踩到同一个坑：
   //
   // ① 写死的 `SADDLE_H = 1.05` 与这台车的鞍面（实测 0.979m）和动画的骨盆高度
   //    （0.504 角色单位 = 0.882m）**都对不上**，所以那一版必然坐歪。
-  // ② 改成「骨盆 = 鞍面 + 1.1cm」之后，骑手坐上去了，可是**脚离踏板 11–17cm**：
-  //    脚在旁边画圈，够不着踏板。根因是这套骑行动画的「腿长 ÷ 曲柄半径」
-  //    之比是 3.93，而这台车是 7.23——动画的腿**相对**这台车太短，
-  //    而缩放保持比值，调角色身高调和不了。
+  // ② 「脚圈中心 = 曲柄轴心」让脚够得着踏板了，可是这套骑行动画的腿**相对**
+  //    这台车太短（腿长/曲柄半径 3.93 vs 7.23），骑手被迫悬空 13.6cm——
+  //    那是个**取舍**，画面上读作「车对 rider 偏小」。
+  // ③ 现在两条腿的旋转轨道被**两骨 IK 重烘**过（`bakeRideToPedals`）：
+  //    脚踝真的落在踏板圆上、整圈闭合，而烘焙的圆心由**鞍面**反推，
+  //    于是骨盆同时落回鞍面——②那个取舍没有了。
   //
-  // 现在判据直接问**该对上的那个点**：骑手的脚踩在踏板上，而踏板绕曲柄轴心转，
-  // 所以「脚圈中心 = 曲柄轴心」就是唯一正确的落点。
-  //
-  // ★ 这一条与偏航无关：两端都在 group 空间里量，而 `bikeCrankCentre` 与
-  //   脚的中点都已经带着车自己的偏航走过了矩阵。原来那条判据是
-  //   「变回车模空间比 x」的（因为它比的是鞍面，而鞍面是车模空间的量），
-  //   现在不比鞍面了，所以**不需要**再变回去——这是换判据顺带消掉的一个坑。
+  // ★ 这里问**骨盆**而不是「脚在踏板上」：夹具角色的双脚是**静止**的
+  //   （只有 quaternion 轨道，没有 position 轨道），它压根没有踏板圆可落。
+  //   问「脚踩在踏板上」只能对**真素材**问——`verify_vehicle_real` 第 5 条在问。
+  //   这里能问、也该问的是「人坐在车上了没有」。
   asserts++;
   {
-    const axis = v.bikeCrankCentre;
-    const orbit = v.rideFootOrbitLocal;
-    if (!axis) {
-      probs.push('量不到曲柄轴心 —— 站位会退回鞍面摆法');
-    } else if (!orbit) {
-      probs.push('量不到脚圈中心（骨架里没有左右踝）—— 站位会退回鞍面摆法');
+    const seat = v.bikeSeat;
+    if (!seat) {
+      probs.push('量不到鞍面（saddleTopOf 返回空）—— 站位会退回写死的 1.05m');
     } else {
-      // 判据自己算一遍，别信实现的输出：用同一条式子推出应有的角色位置。
-      const cs = char.scale.x || 1;
-      const want = axis.clone().sub(orbit.clone().multiplyScalar(cs).applyAxisAngle(new Vector3(0, 1, 0), CHAR_FACING_YAW));
-      const got = new Vector3().copy(char.position).applyMatrix4(v.group.matrixWorld.clone().invert());
+      const pelvisH = v.pelvisHeight;
+      const seatWorldY = seat.y * bikeScale;
+      // ★ 比的是**骨盆**，不是角色原点：原点在骨盆**下方** `pelvisHeight × 缩放`
+      //   （实测 0.882m）处，拿它跟鞍面比量到的是 −0.75m 这种毫无意义的数。
+      const pelvisY = char.position.y + pelvisH * char.scale.x;
       asserts++;
-      if (got.distanceTo(want) > 2e-3) {
+      if (Math.abs(pelvisY - (seatWorldY + 1.75 * 0.006)) > 0.03) {
         probs.push(
-          `角色位置算到 (${got.toArray().map((x) => x.toFixed(3)).join(', ')})，` +
-            `按「脚圈中心对准曲柄轴心」应为 (${want.toArray().map((x) => x.toFixed(3)).join(', ')})`,
+          `骨盆在 y=${pelvisY.toFixed(3)}m，鞍面 ${seatWorldY.toFixed(3)}m 上方 1.1cm 应为 ${(seatWorldY + 0.0105).toFixed(3)}m —— 人不在车上`,
         );
       }
-      // ★ 再量**真的脚**：角色的两踝中点（世界）必须落在轴心上。
-      //   上面那条量的是「位置算对了没有」，这条量的是「脚真的在那儿」——
-      //   中间隔着角色的朝向、缩放、以及 `char.rotation.y`，任何一处写反都会红。
+      notes.push(`骨盆高于鞍面 ${((pelvisY - seatWorldY) * 100).toFixed(1)}cm`);
+      // 重心必须在坐垫**后面**一点（车模 +X 是车尾，见 `PELVIS_BEHIND_SADDLE`）。
+      // ★ 把骑手位置**变回车模空间**再比，而不是在 group 空间里比某个轴——
+      //   「模型 x = group z」只在偏航**恰好是 −90°** 时成立，而实测行车基底
+      //   是 −100.71°，按老约定去比会量到 −0.218m。
+      const gotX = new Vector3().copy(char.position).applyMatrix4(bike.matrix.clone().invert()).x;
+      const wantX = seat.x + 0.045 / bikeScale;
       asserts++;
-      {
-        const lf = char.getObjectByName('mixamorigLeftFoot');
-        const rf = char.getObjectByName('mixamorigRightFoot');
-        if (!lf || !rf) {
-          probs.push('角色骨架里没有左右踝骨');
-        } else {
-          const mid = new Vector3()
-            .add(lf.getWorldPosition(new Vector3()))
-            .add(rf.getWorldPosition(new Vector3()))
-            .multiplyScalar(0.5);
-          const d = mid.distanceTo(axis);
-          if (d > 0.03) {
-            probs.push(
-              `两踝中点离曲柄轴心 ${d.toFixed(3)}m（应 ≤ 0.03m）—— 脚够不着踏板，骑手读作在旁边空踩`,
-            );
-          }
-          notes.push(`两踝中点 → 曲柄轴心 ${(d * 100).toFixed(1)}cm`);
-        }
+      if (Math.abs(gotX - wantX) > 0.006) {
+        probs.push(
+          `骑手重心比鞍面靠后 ${((gotX - seat.x) * bikeScale).toFixed(3)}m，应为 0.045m` +
+            `（比的是车模空间的 x，与偏航无关）`,
+        );
       }
     }
   }
@@ -5475,6 +5463,63 @@ check('verify_pedal_sync', () => {
           }
           asserts++;
           if (r.ts <= 0) probs.push(`${speed} m/s 的播放倍率是 ${r.ts}，动起来必须有倍率`);
+        }
+        // ②c ★★ **脚真的踩在踏板上**：真跑 6 秒，量世界空间里「脚踝 → 最近踏板」
+        //   的距离。这是整条链路的终点判据——上面那些量的是倍率与接缝，
+        //   而这一条量的是玩家**看见**的东西。
+        //
+        //   老值（没烘腿、摆位指曲柄轴心）是 **0.171m 均值**，
+        //   闸门取 0.06m：差着 3 倍，而素材本身的噪声（接缝残留约 0.01m）
+        //   远在下面，所以这个闸门既挡得住那一族、又不被噪声顶穿。
+        asserts++;
+        {
+          const lfB = realModels.char.getObjectByName('mixamorigLeftFoot');
+          const rfB = realModels.char.getObjectByName('mixamorigRightFoot');
+          const pl = (realModels.bicycle as unknown as { getObjectByName(n: string): Object3D | undefined });
+          const pL = pl.getObjectByName('pedalL');
+          const pR = pl.getObjectByName('pedalR');
+          if (!lfB || !rfB || !pL || !pR) {
+            probs.push('量不到脚或踏板 —— 「脚踩在踏板上」这条没量到');
+          } else {
+            const a = new Vector3();
+            const b = new Vector3();
+            const d: number[] = [];
+            for (let i = 0; i < 360; i++) {
+              v.update(1 / 60, 8, 0);
+              realModels.char.updateMatrixWorld(true);
+              realModels.bicycle.updateMatrixWorld(true);
+              pL.getWorldPosition(a);
+              pR.getWorldPosition(b);
+              for (const f of [lfB, rfB]) {
+                const p = f.getWorldPosition(new Vector3());
+                d.push(Math.min(p.distanceTo(a), p.distanceTo(b)));
+              }
+            }
+            const mean = d.reduce((x, y) => x + y, 0) / d.length;
+            if (mean > 0.06) {
+              probs.push(`脚离最近踏板均值 ${mean.toFixed(3)}m（应 ≤ 0.06m）—— 骑手读作在旁边空踩`);
+            }
+            notes.push(`脚→踏板均值 ${(mean * 100).toFixed(1)}cm（烘焙前 17.1cm）`);
+            // ②d ★ **骑手坐回鞍面**：烘焙的圆心由鞍面反推，所以骨盆同时落回。
+            //     烘焙之前这里是 13.6cm 的悬空（B 方案那个取舍）。
+            asserts++;
+            const seat = v.bikeSeat;
+            const axis = v.bikeCrankCentre;
+            const hips = realModels.char.getObjectByName('mixamorigHips');
+            if (seat && axis && hips) {
+              const sw = new Vector3(seat.x, seat.y, seat.z).applyMatrix4(
+                (realModels.bicycle as unknown as { matrixWorld: import('three').Matrix4 }).matrixWorld,
+              );
+              const hy = hips.getWorldPosition(new Vector3()).y;
+              const gap = hy - sw.y;
+              if (gap < -0.02 || gap > 0.08) {
+                probs.push(`骑手骨盆高于鞍面 ${(gap * 100).toFixed(1)}cm（应在 −2…8cm）—— 人没坐在车上`);
+              }
+              notes.push(`骨盆高于鞍面 ${(gap * 100).toFixed(1)}cm（烘焙前 13.6cm 悬空）`);
+            } else {
+              probs.push('量不到鞍面或曲柄轴心');
+            }
+          }
         }
         notes.push(rows.join(' · '));
       }
