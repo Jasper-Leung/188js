@@ -229,11 +229,30 @@ export class PoseSampler {
     return true;
   }
 
-  /** 某根骨的**世界**姿态（四元数，可能带双覆盖的符号——比较时务必看 `rotAngle`）。 */
+  /**
+   * 某根骨的**世界**姿态（四元数，可能带双覆盖的符号——比较时务必看 `rotAngle`）。 */
   worldQuat(name: string, out: Quaternion): boolean {
     const b = this.bones.get(name);
     if (!b) return false;
     b.getWorldQuaternion(out);
+    return true;
+  }
+
+  /**
+   * 某根骨相对 **scratch 根**（也就是**角色原点**）的位置，**模型单位**。
+   *
+   * ★ 与 `relPos` 的区别就是参考点：那个减掉**根骨**（骨盆），这个不减。
+   *   摆位要用的是后者——角色原点才是 `char.position` 所在的那个点，
+   *   而角色的原点**不在骨盆上**（它在骨盆正下方 `pelvisH` 处，见
+   *   `vehicle.ts` 的自行车站位注释）。
+   *
+   * ★ 返回的是**模型单位**，调用方要自己乘角色缩放。
+   *   scratch 根是新建的空 `Group`（无缩放），所以这里的「世界」就是角色本地。
+   */
+  originPos(name: string, out: Vector3): boolean {
+    const b = this.bones.get(name);
+    if (!b) return false;
+    b.getWorldPosition(out);
     return true;
   }
 
@@ -650,4 +669,63 @@ export function trimToSeam(clip: AnimationClip, seam: LoopSeam): AnimationClip {
     tracks.push(new KeyframeTrack(tr.name, times, values, tr.getInterpolation()));
   }
   return new AnimationClip(`${clip.name}·loop`, end, tracks);
+}
+
+/**
+ * 骑行片段的「**脚圈中心**」——两踝中点绕着它转的那个点，
+ * expressed 在**角色本地**（模型单位，参考点是角色原点而非骨盆）。
+ *
+ * ## 为什么要量它，而不是继续用「骨盆钉鞍面」
+ *
+ * 骑手真正该对上的不是鞍面，是**踏板**。而脚踩在踏板上这件事，
+ * 在动画里就是「两踝中点绕某个点转圈」——那个点就是曲柄轴心。
+ * 于是摆位可以直接写成一句话：
+ *
+ * ```
+ * 角色位置 = 曲柄轴心 − 脚圈中心（角色本地 × 角色缩放）
+ * ```
+ *
+ * 这条式子**不含任何写死的常数**，两个量都是实测的，所以换角色模型、
+ * 换车、换动画都不用改代码。
+ *
+ * ## ★ 为什么取整段的**平均**，而不是某一帧
+ *
+ * 两只脚的**圈心并不重合**（实测左右相差 8.5cm），所以中点自己在小幅游走；
+ * 而且 `骑自行车` 一圈踩 1.012 圈，采样起止相位不同。
+ * 取**整段循环上的平均**得到的是稳定值，回归才钉得住。
+ * 残留的游走幅度（≈4cm）就是「把脚放到踏板上」这件事的精度上限——
+ * 也就是说无论怎么摆位，脚与踏板之间都至少还差这么多。
+ *
+ * @returns 量不到双脚时返回 `null`。
+ */
+export function footOrbitOf(
+  char: Object3D,
+  clip: AnimationClip,
+  feet: readonly string[] = FOOT_BONES,
+): Vector3 | null {
+  const left = feet.find((n) => /leftfoot$/i.test(n));
+  const right = feet.find((n) => /rightfoot$/i.test(n));
+  if (!left || !right) return null;
+  const probe = new PoseSampler(char, clip);
+  if (!probe.has(left) || !probe.has(right)) return null;
+
+  const times = keyTimesOf(clip);
+  const l = new Vector3();
+  const r = new Vector3();
+  const sum = new Vector3();
+  let n = 0;
+  for (const t of times) {
+    probe.seek(t);
+    if (!probe.originPos(left, l) || !probe.originPos(right, r)) continue;
+    // ★ **必须累加**（`add`），不能写 `sum.addVectors(l, r)`——
+    //   `addVectors` 是**覆盖**，而循环里每次都覆盖的话，循环结束后
+    //   `sum` 里只剩**最后一帧**，再除以帧数就得到一个「最后一帧 ÷ 帧数」
+    //   的残值。实测那个残值是 (0.0002, 0.0045, 0.0013)——几乎为零，
+    //   于是摆位把角色原点当成了脚圈中心，整台骑手被摆到曲柄轴心正下方。
+    sum.addVectors(sum, l).add(r);
+    n++;
+  }
+  if (!n) return null;
+  // 两踝中点的平均：两踝之和 ÷ (2 × 帧数)
+  return sum.divideScalar(2 * n);
 }

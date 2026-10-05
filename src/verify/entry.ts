@@ -14,7 +14,9 @@ import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD, WATER } f
 import {
   createMiniGame,
   MINI_GAME_IDS,
+  type MiniGame,
   type MiniGameContext,
+  type MiniGameId,
   type MiniGameResult,
 } from '../game/minigames';
 import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
@@ -31,13 +33,14 @@ import { Terrain } from '../world/terrain';
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
 import { Road, ROAD as ROAD_GEOM } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { canRide, isInWorld, interactAt } from '../game/phase';
+import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
 import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSeam } from '../world/pose';
 import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
+import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
 import { readingMs, StoryCards, setNarrativeQuiet } from '../ui/storyCard';
 import { PRESETS, clampTier } from '../core/settings';
 import { DEFAULT_LANG, setLang, t } from '../i18n';
@@ -2224,6 +2227,55 @@ function worldOf(root: Object3D, name: string): Vector3 {
 
 // ---------------------------------------------------------------- 小游戏能玩
 /**
+ * 假 canvas ctx：只要记录调用、不真的画。五个小游戏都不读像素。
+ *
+ * 提成共用是因为**判据里最容易出的错就是环境不真**：第一版 `verify_minigame_playable`
+ * 用的 ctx 在 `measureText` 上返回固定宽度，于是"这一句有多长"永远算错；
+ * 而这类假 ctx 复制两份，就会有一个测试在假环境里绿、另一个不是。
+ */
+function fakeCtx(w = 960, h = 540): CanvasRenderingContext2D {
+  return new Proxy({} as Record<string, unknown>, {
+    get(_t, k: string) {
+      if (k === 'canvas') return { width: w, height: h };
+      if (k === 'measureText') return () => ({ width: 10 });
+      if (k === 'createLinearGradient' || k === 'createRadialGradient') {
+        return () => ({ addColorStop() {} });
+      }
+      if (k === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
+      return () => undefined; // 所有绘制指令都是 no-op
+    },
+    set() {
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+}
+
+/**
+ * 造一个小游戏实例，外加一个收集终局的盒子。
+ *
+ * 假的是 canvas，**真的是状态机、计时、命中判定与随机种子**——
+ * 所以"玩家这么按会不会卡住"这类问题在这里是问得到真答案的。
+ */
+function newMiniGame(id: MiniGameId, w = 960, h = 540) {
+  let result: MiniGameResult | null = null;
+  const g: MiniGame = createMiniGame(id, {
+    ctx: fakeCtx(w, h),
+    width: w,
+    height: h,
+    lang: 'zh',
+    palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+    audio: { sfx() {}, note() {}, duckAmbient() {} },
+    t: (k: string) => k,
+    seed: 12345,
+    onDone: (r: MiniGameResult) => {
+      result = r;
+    },
+  } as unknown as MiniGameContext);
+  g.resize(w, h);
+  return { g, result: () => result };
+}
+
+/**
  * **五件乐事真的能跑起来**。
  *
  * ## 为什么必须单独一条
@@ -2248,21 +2300,7 @@ check('verify_minigame_playable', () => {
   let asserts = 0;
   const probs: string[] = [];
 
-  // 假 ctx：只要记录调用、不真的画。游戏不会去读像素。
-  const ctx = new Proxy({} as Record<string, unknown>, {
-    get(_t, k: string) {
-      if (k === 'canvas') return { width: 960, height: 540 };
-      if (k === 'measureText') return () => ({ width: 10 });
-      if (k === 'createLinearGradient' || k === 'createRadialGradient') {
-        return () => ({ addColorStop() {} });
-      }
-      if (k === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
-      return () => undefined; // 所有绘制指令都是 no-op
-    },
-    set() {
-      return true;
-    },
-  }) as unknown as CanvasRenderingContext2D;
+  const ctx = fakeCtx();
 
   const W = 960;
   const H = 540;
@@ -3139,6 +3177,7 @@ check('verify_phase', () => {
 check('verify_bike_rig', () => {
   let asserts = 0;
   const probs: string[] = [];
+  const notes: string[] = [];
 
   const R = 0.1946;
   const mk = (geo: BufferGeometry, name: string, x: number, y: number, z: number) => {
@@ -3194,6 +3233,19 @@ check('verify_bike_rig', () => {
   const hips = new Bone();
   hips.name = 'mixamorigHips';
   char.add(hips);
+  // ★ **必须带左右踝骨**：自行车的摆位判据量的是「脚圈中心落在曲柄轴心上」
+  //   （见下面第 6 条），而脚圈中心就是两踝中点绕着转的那个点。
+  //   只挂一根髋骨的话量不到脚圈中心，摆位会退回鞍面法，那条断言就测不到
+  //   它本来要测的东西了——**测不到 ≠ 通过**，所以这里要补上。
+  //   位置取自真素材实测（角色本地、模型单位）。
+  const lf = new Bone();
+  lf.name = 'mixamorigLeftFoot';
+  lf.position.set(0.1, 0.15, 0.06);
+  char.add(lf);
+  const rf = new Bone();
+  rf.name = 'mixamorigRightFoot';
+  rf.position.set(-0.07, 0.24, 0.06);
+  char.add(rf);
   const body = new Mesh(new BoxGeometry(0.4, 1.0, 0.2));
   body.name = 'charBody';
   body.position.set(0, 0.5, 0);
@@ -3257,7 +3309,6 @@ check('verify_bike_rig', () => {
   // ⇒ **ω = +v/R**。原来三个载具都写成负号，于是轮子全在倒着转，
   // 而既有判据量的都是「转了多少」，没有一条量正负号。
   asserts++;
-  const bikeScale = bike.scale.x;
   {
     for (let i = 0; i < 60; i++) v.update(1 / 60, 2, 0); // 1 秒，2 m/s
     const ang = v.bikeWheelAngle;
@@ -3357,47 +3408,66 @@ check('verify_bike_rig', () => {
     }
   }
 
-  // 6. ★ **站位**：骨盆必须落在鞍面上方一点、稍靠后
+  // 6. ★ **站位**：脚圈中心必须落在**曲柄轴心**上
   //
-  // 「人不在自行车上」的直接判据。写死的 `SADDLE_H = 1.05` 与这台车的
-  // 鞍面（实测 0.979m）和动画的骨盆高度（0.504 角色单位 = 0.882m）
-  // **都对不上**，所以那一版必然坐歪。
+  // 「人不在自行车上」的直接判据。**判据换过两次，每次都因为踩到同一个坑**：
+  //
+  // ① 写死的 `SADDLE_H = 1.05` 与这台车的鞍面（实测 0.979m）和动画的骨盆高度
+  //    （0.504 角色单位 = 0.882m）**都对不上**，所以那一版必然坐歪。
+  // ② 改成「骨盆 = 鞍面 + 1.1cm」之后，骑手坐上去了，可是**脚离踏板 11–17cm**：
+  //    脚在旁边画圈，够不着踏板。根因是这套骑行动画的「腿长 ÷ 曲柄半径」
+  //    之比是 3.93，而这台车是 7.23——动画的腿**相对**这台车太短，
+  //    而缩放保持比值，调角色身高调和不了。
+  //
+  // 现在判据直接问**该对上的那个点**：骑手的脚踩在踏板上，而踏板绕曲柄轴心转，
+  // 所以「脚圈中心 = 曲柄轴心」就是唯一正确的落点。
+  //
+  // ★ 这一条与偏航无关：两端都在 group 空间里量，而 `bikeCrankCentre` 与
+  //   脚的中点都已经带着车自己的偏航走过了矩阵。原来那条判据是
+  //   「变回车模空间比 x」的（因为它比的是鞍面，而鞍面是车模空间的量），
+  //   现在不比鞍面了，所以**不需要**再变回去——这是换判据顺带消掉的一个坑。
   asserts++;
   {
-    const seat = v.bikeSeat;
-    if (!seat) {
-      probs.push('量不到鞍面（saddleTopOf 返回空）—— 站位会退回写死的 1.05m');
+    const axis = v.bikeCrankCentre;
+    const orbit = v.rideFootOrbitLocal;
+    if (!axis) {
+      probs.push('量不到曲柄轴心 —— 站位会退回鞍面摆法');
+    } else if (!orbit) {
+      probs.push('量不到脚圈中心（骨架里没有左右踝）—— 站位会退回鞍面摆法');
     } else {
-      const pelvisH = v.pelvisHeight;
-      const seatWorldY = seat.y * bikeScale;
-      const gotY = char.position.y + pelvisH * char.scale.x;
-      const wantY = seatWorldY + 1.75 * 0.006; // 骨盆在鞍面上方 0.6% 身高
-      if (Math.abs(gotY - wantY) > 2e-3) {
+      // 判据自己算一遍，别信实现的输出：用同一条式子推出应有的角色位置。
+      const cs = char.scale.x || 1;
+      const want = axis.clone().sub(orbit.clone().multiplyScalar(cs).applyAxisAngle(new Vector3(0, 1, 0), CHAR_FACING_YAW));
+      const got = new Vector3().copy(char.position).applyMatrix4(v.group.matrixWorld.clone().invert());
+      asserts++;
+      if (got.distanceTo(want) > 2e-3) {
         probs.push(
-          `骨盆在 y=${gotY.toFixed(3)}m，鞍面 ${seatWorldY.toFixed(3)}m + 0.011m 应为 ${wantY.toFixed(3)}m —— 人不在车上`,
+          `角色位置算到 (${got.toArray().map((x) => x.toFixed(3)).join(', ')})，` +
+            `按「脚圈中心对准曲柄轴心」应为 (${want.toArray().map((x) => x.toFixed(3)).join(', ')})`,
         );
       }
+      // ★ 再量**真的脚**：角色的两踝中点（世界）必须落在轴心上。
+      //   上面那条量的是「位置算对了没有」，这条量的是「脚真的在那儿」——
+      //   中间隔着角色的朝向、缩放、以及 `char.rotation.y`，任何一处写反都会红。
       asserts++;
-      // 重心必须在坐垫**后面**一点（车模 +X 是车尾，见 `PELVIS_BEHIND_SADDLE`）。
-      //
-      // ★ 把骑手位置**变回车模空间**再比，而不是在 group 空间里比某个轴。
-      //   原来写的是「`bike.rotation.y = −90°` 把车模 x 映成 group 的 z，
-      //   所以比 z」——那只在偏航**恰好是 −90°**时成立。
-      //   偏航一旦变成实测行车基底（这台车实测 −100.71°，夹具另有 11° 歪角），
-      //   「模型 x = group z」就不成立了，而这条断言照样按老约定去比，
-      //   量到 −0.218m。
-      //
-      //   判据要么比对的轴，要么就根本不成立；而**比在模型空间里**
-      //   是唯一与偏航无关的写法——它问的是「相对鞍面往后了吗」，
-      //   而不是「相对 group 的某个轴往后了吗」。
-      const gotX = new Vector3().copy(char.position).applyMatrix4(bike.matrix.clone().invert()).x;
-      const wantX = seat.x + 0.045 / bikeScale; // 0.045m 是米制，车模单位要除缩放
-      asserts++;
-      if (Math.abs(gotX - wantX) > 0.006) {
-        probs.push(
-          `骑手重心比鞍面靠后 ${((gotX - seat.x) * bikeScale).toFixed(3)}m，应为 0.045m` +
-            `（比的是车模空间的 x，与偏航无关）`,
-        );
+      {
+        const lf = char.getObjectByName('mixamorigLeftFoot');
+        const rf = char.getObjectByName('mixamorigRightFoot');
+        if (!lf || !rf) {
+          probs.push('角色骨架里没有左右踝骨');
+        } else {
+          const mid = new Vector3()
+            .add(lf.getWorldPosition(new Vector3()))
+            .add(rf.getWorldPosition(new Vector3()))
+            .multiplyScalar(0.5);
+          const d = mid.distanceTo(axis);
+          if (d > 0.03) {
+            probs.push(
+              `两踝中点离曲柄轴心 ${d.toFixed(3)}m（应 ≤ 0.03m）—— 脚够不着踏板，骑手读作在旁边空踩`,
+            );
+          }
+          notes.push(`两踝中点 → 曲柄轴心 ${(d * 100).toFixed(1)}cm`);
+        }
       }
     }
   }
@@ -3464,7 +3534,8 @@ check('verify_bike_rig', () => {
   const summary =
     `轮角 +${(2 / 0.35).toFixed(2)} rad/2m（不打滑）· 曲柄 = 轮角/${BIKE_GEAR_RATIO} · ` +
     `脚撑 0 ⇄ ${((STAND_FOLD_ANGLE * 180) / Math.PI).toFixed(0)}° · 车把 ≤ ${((BIKE_STEER_MAX * 180) / Math.PI).toFixed(1)}° · ` +
-    `骨盆 = 鞍面 + 0.011m`;
+    `脚圈中心 = 曲柄轴心` +
+    (notes.length ? ` · ${notes.join(' · ')}` : '');
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -4710,19 +4781,50 @@ if (!realModels) {
         asserts++;
         const seat = v.bikeSeat;
         if (seat && v.hasBikeRig) {
-          const sw = new Vector3(seat.x, seat.y, seat.z).applyMatrix4(bicycle.matrixWorld);
-          const rp = char.getWorldPosition(new Vector3());
-          const drop = sw.y - rp.y;
-          const wantDrop = v.pelvisHeight * char.scale.x;
+          // ★ 这里问的**不再是**「骑手原点比鞍面低多少」——
+          //   摆位已经换成「脚圈中心对准曲柄轴心」，而那套骑行动画的腿
+          //   相对这台车太短（腿长/曲柄半径 3.93 vs 7.23），于是骑手
+          //   会**故意**悬在鞍面上方 13cm，好让脚够得着踏板。
+          //   问鞍面的话量到的就是那 13cm，判据会一直红，而且红得没道理。
+          //
+          //   该问的是**脚**：两踝中点（世界）必须落在曲柄轴心上。
+          const axis = v.bikeCrankCentre;
+          const lfB = char.getObjectByName('mixamorigLeftFoot');
+          const rfB = char.getObjectByName('mixamorigRightFoot');
           asserts++;
-          if (Math.abs(drop - wantDrop) > 0.06) {
-            probs.push(
-              `骑手原点比鞍面低 ${drop.toFixed(3)}m，应 ≈ 骨盆高度 ${wantDrop.toFixed(3)}m —— 人不在车上`,
+          if (!axis || !lfB || !rfB) {
+            probs.push('量不到曲柄轴心或左右踝骨 —— 摆位退回鞍面法，脚够不着踏板');
+          } else {
+            const mid = new Vector3()
+              .add(lfB.getWorldPosition(new Vector3()))
+              .add(rfB.getWorldPosition(new Vector3()))
+              .multiplyScalar(0.5);
+            const d = mid.distanceTo(axis);
+            if (d > 0.06) {
+              probs.push(
+                `两踝中点离曲柄轴心 ${(d * 100).toFixed(1)}cm（应 ≤ 6cm）—— 脚够不着踏板，骑手读作在旁边空踩`,
+              );
+            }
+            const sw = new Vector3(seat.x, seat.y, seat.z).applyMatrix4(bicycle.matrixWorld);
+            const rp = char.getWorldPosition(new Vector3());
+            // ★ 比的必须是**骨盆**，不是角色原点：原点在骨盆**下方**
+            //   `pelvisHeight × 缩放`（实测 0.884m）处，拿它跟鞍面比
+            //   量到的是 −0.75m 这种毫无意义的数——原版那条也是加了
+            //   `wantDrop` 才对的，我第一版把那一步漏了。
+            const pelvisY = rp.y + v.pelvisHeight * char.scale.x;
+            asserts++;
+            // 骑手不许掉到鞍面**以下**（那是「人陷进车架里」），
+            // 但允许悬在上面——见上面的取舍说明。
+            if (pelvisY < sw.y - 0.02) {
+              probs.push(`骑手骨盆 y=${pelvisY.toFixed(3)} 低于鞍面 ${sw.y.toFixed(3)} —— 人陷进车架里了`);
+            }
+            asserts++;
+            if (Math.hypot(rp.x - sw.x, rp.z - sw.z) < 0.005) {
+              probs.push('骑手与鞍面水平距离为 0 —— 重心没有落在坐垫后面一点');
+            }
+            notes.push(
+              `两踝中点 → 曲柄轴心 ${(d * 100).toFixed(1)}cm · 骨盆高于鞍面 ${((pelvisY - sw.y) * 100).toFixed(1)}cm`,
             );
-          }
-          asserts++;
-          if (Math.hypot(rp.x - sw.x, rp.z - sw.z) < 0.005) {
-            probs.push('骑手与鞍面水平距离为 0 —— 重心没有落在坐垫后面一点');
           }
         }
       }
@@ -5383,6 +5485,246 @@ check('verify_pedal_sync', () => {
     `脚与踏板同一条时钟：倍率 = 曲柄角速度/${RATE}，上限 ${PEDAL_CADENCE_MAX}，静止为 0 · ` +
     (notes.length ? notes.join(' · ') : '真素材未量到');
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+// ---------------------------------------------------------------- 终局抉择
+/**
+ * 结局那个二选一，要真的落到**玩家带走的那张图**上。
+ *
+ * ## 它凭什么会红
+ *
+ * 把 `endingOf` 退回成 `saved === 'break' ? 'let_go' : 'leave_door'` 就红：
+ * 存档里存的是 `'let_go'`，`'break'` 永远不等于它，于是三元的假分支恒中，
+ * **选了「放手」的玩家导出的背面照样预填「留门」那一句**。
+ * 而屏幕上一切正常（结算面板那侧用的是另一个判据），回归当时全绿。
+ *
+ * 同一个 bug 还留下两个同伙，所以这里量的是三件事而不只是转换：
+ * 预填只给留门、背面说明两个结局互斥、以及这三个 key 真的在文案表里。
+ * 最后一条是防"引用了一个不存在的 key"——那会在界面上显示成 `⟨key⟩`。
+ */
+check('verify_ending', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 合法值必须原样往返。空串（未竟）按留门处理，与 UI 层"没选"的约定一致。
+  asserts++;
+  if (endingOf('leave_door') !== 'leave_door') probs.push("endingOf('leave_door') 不是 leave_door");
+  asserts++;
+  if (endingOf('let_go') !== 'let_go') probs.push("endingOf('let_go') 不是 let_go —— 放手被当成了留门");
+  asserts++;
+  if (endingOf('') !== 'leave_door') probs.push("endingOf('') 应按未竟处理成 leave_door");
+
+  // 预填只给留门。放手必须留白——"留白 + 掰开的蜡封"是这个抉择的产物。
+  asserts++;
+  if (prefilledBackKey('leave_door') !== 'back_keep') probs.push('留门不预填背面那一句');
+  asserts++;
+  if (prefilledBackKey('let_go') !== null) probs.push('放手仍然预填了背面 —— 抉择没有落到产物上');
+
+  // 背面那一行说明：两个结局必须读到不同的 key，否则"留白是故意的"这句话不会出现。
+  asserts++;
+  const capKeep = backCaptionKey('leave_door');
+  const capGo = backCaptionKey('let_go');
+  if (capKeep === capGo) probs.push('两个结局的背面说明是同一句');
+  asserts++;
+  if (capGo !== 'back_break_blank') probs.push(`放手读的是 ${capGo}，应为 back_break_blank`);
+
+  // 三个 key 必须中英都在表里，否则界面显示 ⟨key⟩
+  asserts++;
+  for (const k of ['back_keep', 'back_break_blank', 'back_preview_caption', 'result_cancel']) {
+    if (!(k in I18N.zh) || !(k in I18N.en)) probs.push(`文案表缺 ${k}`);
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : '留门预填 / 放手留白 · 三个 key 都在表里',
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 世界 HUD 可见性
+/**
+ * 冷启动时 HUD 必须**真的**被藏起来。
+ *
+ * ## 它凭什么会红
+ *
+ * 原来是 `private worldVisible = false` 加 `if (this.worldVisible === v) return;`，
+ * 而 DOM 里的 HUD 构造出来就可见——于是 `showTitle()` 里的
+ * `setWorldVisible(false)` 撞上同值直接返回，**一次都没隐藏过**。
+ * 整套顶栏、碎片栏、小地图就那么透在标题卡后面，玩家第一眼像"这游戏已经开始了"。
+ *
+ * 把它退回 `private visible = false; private applied = true;` 就红——
+ * 那正是原来那个 bug 的字面写法。
+ */
+check('verify_ui_visibility', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const v = new WorldVisibility();
+  asserts++;
+  if (v.value !== true) probs.push('初值应当是"可见"——DOM 里的 HUD 构造出来就在');
+  asserts++;
+  if (v.hasApplied) probs.push('刚构造出来就声称已经落过 DOM');
+
+  // **第一次请求必须执行**，哪怕请求值与初值相同。这是整条判据的核心。
+  asserts++;
+  if (!v.set(false)) probs.push('冷启动的第一次 set(false) 没有执行 —— HUD 会透在标题页后面');
+  asserts++;
+  if (v.value !== false) probs.push('set(false) 之后当前值仍是 true');
+  asserts++;
+  if (!v.hasApplied) probs.push('set(false) 之后没有落到 DOM');
+
+  // 同值第二次才允许早退：每帧路径上不能白跑 setShown。
+  asserts++;
+  if (v.set(false)) probs.push('同值第二次仍然执行了 —— 每帧都会白跑一次 setShown');
+
+  // 进出世界一轮
+  asserts++;
+  if (!v.set(true) || v.value !== true) probs.push('进世界没有显示 HUD');
+
+  return expect(probs.length === 0, probs.length ? probs.join('；') : '首次必生效 · 同值才早退', asserts);
+});
+
+// ---------------------------------------------------------------- 结算三态
+/**
+ * **取消不是失败。**
+ *
+ * ## 它凭什么会红
+ *
+ * 退回 `o === 'win' ? 'mg_success' : 'mg_failed'` 就红：玩家按 Esc 退出，
+ * 屏幕上弹的是「这次没有完成」。他没做错任何事，却读到了"我失败了"——
+ * 而这一条曾经以注释的形式**声称自己已经修好了**（"中性的一句：它在被跳过"），
+ * 传进去的却是 `false`。注释描述的意图和代码做的事不一致，没有任何判据问过。
+ */
+check('verify_settle', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  asserts++;
+  if (settleTextKey('win') !== 'mg_success') probs.push('成的那一局读的不是 mg_success');
+  asserts++;
+  if (settleTextKey('lose') !== 'mg_failed') probs.push('玩法失败读的不是 mg_failed');
+  asserts++;
+  if (settleTextKey('cancel') === 'mg_failed') probs.push('**取消被判成失败** —— 玩家按 Esc 退出会读到"我失败了"');
+  asserts++;
+  if (settleTextKey('cancel') !== 'result_cancel') probs.push(`取消读的是 ${settleTextKey('cancel')}，应为 result_cancel`);
+
+  // 三个 key 互不相同，且都在表里（否则界面上是 ⟨key⟩）
+  asserts++;
+  const keys = [settleTextKey('win'), settleTextKey('lose'), settleTextKey('cancel')];
+  if (new Set(keys).size !== 3) probs.push(`三个 key 有重复：${keys.join('/')}`);
+  asserts++;
+  for (const k of keys) if (!(k in I18N.zh) || !(k in I18N.en)) probs.push(`文案表缺 ${k}`);
+
+  // 赢的那一屏要给得久一点：赢是这一刻唯一的高光，输只是路过的过程。
+  asserts++;
+  if (!(settleMs('win') > settleMs('lose'))) probs.push('赢的停留时间没有比输长');
+  asserts++;
+  if (settleMs('cancel') !== settleMs('lose')) probs.push('取消的停留时间与失败不一致');
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : 'win/lose/cancel 三态互斥 · 取消不落回失败',
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 小游戏：松手与提前按
+/**
+ * **玩家中途松手 / 按早了，不该静默卡住。**
+ *
+ * ## 为什么单独一条
+ *
+ * `verify_minigame_playable` 问的是"能不能跑到一个终局"——
+ * 而"卡住"和"跑不通"在它眼里是同一件事：Esc 收尾，所以它照样绿。
+ * 它甚至有一条"一个键都没按却自己判赢"，却没有一条**「按对了能赢」**。
+ *
+ * 这一族两个 bug 都是同一个形状：**意图写对了，代码没接上，症状安静**。
+ *
+ * | 症状 | 为什么绿着 |
+ * |---|---|
+ * | 云描到一半松手，进度条冻结 | 进度只在"贴着起点重新起笔"之后才动，而这要求玩家回到起点；没有任何判据问过"松手之后还能不能描" |
+ * | 竹在引导期就按住空格，第一根必丢 | 引导期那一次 keydown 顺手置上了 held，浏览器的按键重复被吞掉规则吃掉；而回归里没人"一直按着" |
+ *
+ * ## 它凭什么会红
+ *
+ * 云的判据跑的是**真的落笔路径**：在起点落笔 → 描一段 → 抬笔 → **在轮廓中段
+ * 重新落笔** → 描完 → 抬笔。把 `canStartStrokeAt` 退回"只看起点热区"就红：
+ * 第二次落笔武装不起来，`updateDraw` 再也不被调用，ratio 停在第一段，
+ * 于是收不到 `win`。
+ *
+ * 竹的判据模拟的是浏览器的**按键重复**（连发 keydown，中间不 keyUp）：
+ * 引导期按一次 → 等价于玩家从一开始就按住空格。
+ * 把 `this.spaceHeld = false` 从引导期分支里删掉就红：第一次砍被吞掉，`current` 停在 0。
+ */
+check('verify_minigame_resume', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ---------------- 云：抬笔之后还能续描 ----------------
+  {
+    const { g, result } = newMiniGame('cloud');
+    // 私有字段只在这一条断言里用：轮廓点与进度是这个游戏唯一的可观测量。
+    const c = g as unknown as {
+      path: Float32Array;
+      ratio: number;
+      nextSeg: number;
+      started: boolean;
+    };
+    const n = Math.floor(c.path.length / 2);
+    const px = (i: number) => c.path[((i % n) + n) % n * 2];
+    const py = (i: number) => c.path[((i % n) + n) % n * 2 + 1];
+
+    // 第一笔：从起点起，描过前七点
+    g.onPointerDown(px(0), py(0));
+    for (let i = 1; i <= 6; i++) g.onPointerMove(px(i), py(i));
+    g.onPointerUp(px(6), py(6));
+
+    asserts++;
+    if (c.nextSeg <= 0) probs.push('云：第一笔没有认领到任何段（测试驱动方式本身有问题）');
+
+    // 抬笔之后，在**轮廓中段**重新落笔——离起点远得很，
+    // 而这正是原来唯一无法恢复的位置。
+    const mid = Math.floor(n / 2);
+    g.onPointerDown(px(mid), py(mid));
+    asserts++;
+    if (!c.started) {
+      probs.push('**抬笔之后无法续描** —— 落笔被起点热区挡住，进度条会静冻结着');
+    } else {
+      for (let i = mid + 1; i <= n; i++) g.onPointerMove(px(i), py(i));
+      g.onPointerUp(px(n), py(n));
+      asserts++;
+      if (c.ratio < 0.75) probs.push(`云：续描之后完成度只有 ${(c.ratio * 100).toFixed(1)}%，未过 75%`);
+      asserts++;
+      if (result() !== 'win') probs.push(`云：续描到底没有判赢（收到 ${result() ?? '什么都没收到'}）`);
+    }
+  }
+
+  // ---------------- 竹：引导期就按住，第一根不该丢 ----------------
+  {
+    const { g } = newMiniGame('bamboo');
+    const b = g as unknown as { current: number; windowActive: boolean; introActive: boolean };
+
+    asserts++;
+    if (!b.introActive) probs.push('竹：开局不在引导期（测试驱动方式本身有问题）');
+
+    // 引导期按一次（玩家从一开始就按住空格）
+    g.onKeyDown('Space', false);
+    asserts++;
+    if (b.introActive) probs.push('竹：引导期没有被这一次按键结束');
+
+    // 浏览器的按键重复：连发 keydown，中间**不** keyUp。
+    g.onKeyDown('Space', false);
+    asserts++;
+    if (b.current < 1) {
+      probs.push('**引导期按住空格的玩家丢掉第一根** —— 这一次砍被按键重复的吞键规则吃掉了');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : '云可续描到 win · 竹按住不丢第一根',
+    asserts,
+  );
 });
 
 // ---------------------------------------------------------------- 跑

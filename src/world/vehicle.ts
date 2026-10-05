@@ -118,7 +118,7 @@
 import { Group, Object3D, Vector3, Quaternion, Box3, Matrix4, Mesh, AnimationMixer, AnimationClip, KeyframeTrack, InterpolateDiscrete, LoopRepeat, type AnimationAction } from 'three';
 import { RIDE } from '../data/raw';
 import { clamp, clamp01, damp } from '../core/math';
-import { stancePoseOf, loopSeamOf, trimToSeam, type StancePose, type LoopSeam } from './pose';
+import { stancePoseOf, loopSeamOf, trimToSeam, footOrbitOf, type StancePose, type LoopSeam } from './pose';
 
 export type RideMode = 'foot' | 'bike' | 'motorcycle' | 'skate';
 export const RIDE_MODES: readonly RideMode[] = ['foot', 'bike', 'motorcycle', 'skate'];
@@ -1189,6 +1189,15 @@ export interface PreparedRideClip {
    * 量不到接缝时是 0，调用方据此退回按步速推的旧行为。
    */
   pedalRate: number;
+  /**
+   * 骑行片段的「脚圈中心」，**角色本地、模型单位**（见 `footOrbitOf`）。
+   *
+   * 自行车摆位靠它：脚该踩在**踏板**上，而踏板绕曲柄轴心转，
+   * 所以「脚圈中心 = 曲柄轴心」就是骑手该对上的那个点。
+   *
+   * `null` = 量不到（骨架里没有左右踝）⇒ 摆位退回旧的「骨盆钉鞍面」。
+   */
+  footOrbit: Vector3 | null;
 }
 
 /**
@@ -1220,13 +1229,17 @@ export function prepareRideClip(
   const pelvisY = pelvisHeightOf(clip, rootName);
   const inplace = stripRootMotion(clip, rootName);
   const seam = loopSeamOf(char, inplace, rootName);
+  const cut = seam ? trimToSeam(inplace, seam) : inplace;
   return {
-    clip: seam ? trimToSeam(inplace, seam) : inplace,
+    clip: cut,
     seam,
     cadence,
     pelvisY,
     // 接缝就在「踩满一圈」那一帧上，所以 turns/time 就是片段每秒钟的曲柄转速。
     pedalRate: seam && seam.time > 1e-6 ? (2 * Math.PI * seam.turns) / seam.time : 0,
+    // ★ 量的是**裁完之后**真正在播的那条：脚圈中心会随裁剪点移动
+    //   （接缝落在 1 圈处，而整条片段是 3.417 圈，两者的中点轨迹不同）。
+    footOrbit: footOrbitOf(char, cut),
   };
 }
 
@@ -1836,6 +1849,11 @@ export class Vehicle {
    * 0 = 量不到，播放倍率退回按步速推（`applyCadence`）。
    */
   private ridePedalRate = 0;
+  /**
+   * 骑行片段的「脚圈中心」，**角色本地、模型单位**（`footOrbitOf` 量出）。
+   * 自行车摆位靠它把脚圈中心对准曲柄轴心；`null` 时退回鞍面摆法。
+   */
+  private rideFootOrbit: Vector3 | null = null;
   /** 自行车的装配节点。`null` = 没装（不是 bike 模式，或模型没到）。 */
   private rig: BikeRig | null = null;
   /** 车把当前偏转（弧度），由航向变化率推出来（见 `bikeSteerTarget`）。 */
@@ -1913,6 +1931,7 @@ export class Vehicle {
       this.pelvisH = r.pelvisY;
       this.rideSeam = r.seam;
       this.ridePedalRate = r.pedalRate;
+      this.rideFootOrbit = r.footOrbit;
       if (r.cadence > 1e-3) this.clipCadence.ride = r.cadence;
       if (!r.seam) {
         // 量不到 = 素材不循环（或骨架认不出脚）。**照旧播整条**，
@@ -2718,40 +2737,73 @@ export class Vehicle {
     if (!char || !char.visible) return;
 
     if (this.mode === 'bike') {
-      // 跨在坐垫上：位置由车的变换决定，**不自己算**，免得两处各算一套而漂移。
+      // ★ 摆位：**脚圈中心对准曲柄轴心**——不是「骨盆钉在鞍面上」。
       //
-      // ★ 这里**必须用局部矩阵 `bike.matrix`，不能用 `localToWorld()`**。
-      //   `localToWorld()` 给的是**世界**坐标，而 `char.position` 是在
-      //   **父节点 `this.group` 的空间**里解读的——而 `group` 自己已经平移到
-      //   玩家位置（沿路几百米）。两者一混，角色被放到"距原点两倍"的地方：
-      //   实机症状是**载具在、骑手不见了**（滑板模式就是"滑板上没人"）。
-      //   `bike` 与 `char` 是兄弟节点，所以从 bike 本地 → group 本地
-      //   只需要乘 `bike.matrix`（含车自己的缩放与偏航）。
+      // 骑手真正该对上的点是**踏板**，而脚踩在踏板上这件事在动画里
+      // 就是「两踝中点绕某个点转圈」。那个点就是曲柄轴心，于是整件事
+      // 塌成一行式子，而且**不含任何写死的常数**：
       //
-      // ★ 站位**不再用写死的 `SADDLE_H`**。写死 1.05m 的后果是
-      //   「人不在自行车上」：那份 1.05 既不是这台车的鞍面高度，
-      //   也不是动画里骨盆的高度，两边都对不上。
-      //   现在按实测算：鞍面从模型上量（`saddleTopOf`），
-      //   骨盆高度从**动画**里量（`pelvisHeightOf`，实测 0.504 个模型单位），
-      //   两者相减才是「角色原点该摆在哪」——
-      //   因为角色的原点**不在骨盆上**，它在骨盆正下方 `pelvisH` 处。
-      const s = bike ? bike.scale.x || 1 : 1;
+      // ```
+      // char.position = 曲柄轴心(车模本地) → group
+      //                − R_y(π) · (脚圈中心 × 角色缩放)
+      // ```
+      //
+      // 两个量都是实测的（`rig.crank` 由 `assembleBike` 装出来，
+      // `footOrbit` 由 `prepareRideClip` 从动画里量），所以换车、换人、
+      // 换动画都不用改这里。
+      //
+      // ## ★ 为什么不再用「骨盆钉鞍面」——代价写在下面，别急着改回去
+      //
+      // 旧做法把骨盆放在鞍面上方 1.1cm，于是**脚离踏板 11–17cm**：
+      // 脚在旁边画圈，够不着踏板。改成对准曲柄轴心之后脚到踏板只剩 **5.1cm**
+      // （那是这套素材的精度上限：脚圈半径 0.149 对踏板轨道 0.098，
+      //  差值非零就对不齐）。
+      //
+      // 代价是**骑手悬在鞍面上方 15.9cm**——因为这套骑行动画的
+      // 「腿长 ÷ 曲柄半径」之比是 3.93，而这台车是 7.23：
+      // 动画的腿**相对**这台车太短，而缩放保持比值，调角色的身高调和不了。
+      // 可解析地证明：脚够得着轴心要 s≥1.173、脚圈半径等于踏板半径要
+      // s=0.658，两者之积 0.772≠1，没有哪个 s 同时成立。
+      //
+      // 所以这是**有意选的取舍**：让脚够得着踏板，接受骑手偏高。
+      // 视觉上读作「车对 rider 偏小」，比「两只脚在旁边空踩」自然。
+      // `verify_bike_rig` 的判据已随之改成量「脚圈中心落在曲柄轴心上」。
+      //
+      // 脚圈中心量不到（骨架里没有左右踝）时退回旧的鞍面摆法，
+      // 那时至少人还坐在车上。
+      //
+      // ★ 全程**不用 `localToWorld()`**：它给的是**世界**坐标，而
+      //   `char.position` 是在父节点 `this.group` 的空间里解读的——
+      //   而 `group` 自己已经平移到玩家位置（沿路几百米）。两者一混，
+      //   角色被放到「距原点两倍」的地方，实机症状是
+      //   **载具在、骑手不见了**（滑板模式就是「滑板上没人」）。
       const cs = char.scale.x || 1;
-      const seat = this.rig?.seat ?? new Vector3(0, SADDLE_H / s, 0);
-      if (bike) {
-        // 全程在**车模本地单位**里算，最后一次 `bike.matrix` 换到 group 空间。
-        //   鞍面在车模空间；骨盆高度在角色空间，要除以角色缩放换到同一单位。
-        const pelvisY = seat.y * s + CHAR_HEIGHT * PELVIS_ABOVE_SADDLE;
-        const p = new Vector3(
-          // 后方 = 车模 +X（车头在 −X）。骑手重心要在坐垫后面一点。
-          seat.x + PELVIS_BEHIND_SADDLE / s,
-          (pelvisY - this.pelvisH * cs) / s,
-          seat.z,
-        );
+      const orbit = this.rideFootOrbit;
+      if (bike && orbit && this.rig) {
         bike.updateMatrix();
-        char.position.copy(p).applyMatrix4(bike.matrix);
+        // 曲柄轴心：车模本地 → group 空间
+        const axis = this.rig.crank.position.clone().applyMatrix4(bike.matrix);
+        // 脚圈中心：模型单位 → 米（角色缩放）→ 角色自己的朝向（`char.rotation.y = π`）
+        const g = orbit.clone().multiplyScalar(cs).applyAxisAngle(AXIS_Y, CHAR_FACING_YAW);
+        char.position.copy(axis).sub(g);
       } else {
-        char.position.set(0, SADDLE_H, 0);
+        const s = bike ? bike.scale.x || 1 : 1;
+        const seat = this.rig?.seat ?? new Vector3(0, SADDLE_H / s, 0);
+        if (bike) {
+          // 全程在**车模本地单位**里算，最后一次 `bike.matrix` 换到 group 空间。
+          //   鞍面在车模空间；骨盆高度在角色空间，要除以角色缩放换到同一单位。
+          const pelvisY = seat.y * s + CHAR_HEIGHT * PELVIS_ABOVE_SADDLE;
+          const p = new Vector3(
+            // 后方 = 车模 +X（车头在 −X）。骑手重心要在坐垫后面一点。
+            seat.x + PELVIS_BEHIND_SADDLE / s,
+            (pelvisY - this.pelvisH * cs) / s,
+            seat.z,
+          );
+          bike.updateMatrix();
+          char.position.copy(p).applyMatrix4(bike.matrix);
+        } else {
+          char.position.set(0, SADDLE_H, 0);
+        }
       }
     } else if (this.mode === 'skate') {
       // 同上：车与人是兄弟节点，用局部矩阵，别用 localToWorld。
@@ -3012,6 +3064,19 @@ export class Vehicle {
   get bikeCrankAngle(): number {
     return this.rig?.crankSpin.rotation.x ?? 0;
   }
+  /** 曲柄轴心的**世界**坐标（米）。自行车摆位把脚圈中心对准的就是它。 */
+  get bikeCrankCentre(): Vector3 | null {
+    if (!this.rig) return null;
+    this.rig.crank.updateWorldMatrix(true, false);
+    return this.rig.crank.getWorldPosition(new Vector3());
+  }
+  /**
+   * 骑行片段的「脚圈中心」，**角色本地、模型单位**（`footOrbitOf` 量出）。
+   * 摆位就是拿它对准 `bikeCrankCentre`；判据要问的也是这一对。
+   */
+  get rideFootOrbitLocal(): Vector3 | null {
+    return this.rideFootOrbit ? this.rideFootOrbit.clone() : null;
+  }
   /**
    * 自行车**自转层的本地 +X 在世界空间**的方向（单位向量）。
    *
@@ -3122,6 +3187,8 @@ const STAND_RATE = 7;
  * 踏板轨道绕它转，脚撑与曲柄的自转角也写在绕它对齐好的那���节点上。
  */
 const AXIS_X = new Vector3(1, 0, 0);
+/** 竖直轴。角色朝向（`CHAR_FACING_YAW`）与「两脚在矢状面里转圈」都绕它。 */
+const AXIS_Y = new Vector3(0, 1, 0);
 /**
  * 摩托车前轮的最大转向角（弧度）。约 26°，真实摩托的最大转向角。
  *
