@@ -7,15 +7,27 @@
  * 「设备内存 2GB」）。原作把这句话留在 `showUnsupported()` 里，只在跑不动
  * 的时候才给玩家看；本作把它**也**放在标题页的画质组里，理由是低配策略
  * 在 Web 上第一次变得**可见且可改**了：低档会把渲染分辨率压到 60%、
- * 关掉阴影、把草皮行道树收进 46m/52m。玩家看着一片明显更糊的画面，
- * 而界面上没有一个字告诉他「这是因为你的卡被判定成了核显」——
- * 他只会以为这个游戏本来就长这样。
+ * 关掉阴影与地面细节，并把行道树收进 95m、灌木收进 40m。玩家看着一片
+ * 明显更糊的画面，而界面上没有一个字告诉他「这是因为你的卡被判定成了
+ * 核显」——他只会以为这个游戏本来就长这样。
  *
  * 所以这里三件事一起给：**判定理由**（为什么落在这档）、
  * **档位摘要**（这一档砍掉了什么，来自 `tierSummary()`）、
  * **三档可选**（随时改，改完宿主立刻调 `onQualityChange` 反映到画面上）。
  * 缺一不可：只有理由没有摘要，玩家不知道怎么改；只有摘要没有理由，
  * 玩家不知道自己为什么被当成低配。
+ *
+ * ## 档位说明为什么单独给一句 `quality_hint`
+ *
+ * 摘要说的是"这一档开什么"（分辨率 60% / 阴影 off / 地面细节 off），
+ * 而 `quality_hint` 补的是摘要里**放不下**的那一刀：植被半径要**重新进
+ * 这一趟**才生效（`veg.invalidate()` 的行为）。不写这一句，玩家调完档
+ * 看着画面没变，会以为设置没生效。
+ *
+ * 它曾经是一句谎话：源文案写"把草皮行道树收到 70m"，而草皮那一层
+ * （交叉卡片 + alphaTest + 风摆）早已整层删除换成 `groundDetail`，
+ * 70m 也和 `PRESETS` 里的 95m / 40m 都不对。现在由
+ * `tools/i18n-supplement.json` 覆盖，改的是真值。
  */
 import { t } from '../i18n';
 import { TIER_KEYS, tierSummary } from '../core/settings';
@@ -31,6 +43,14 @@ export interface TitleOpts {
   capability: Capability;
   /** 当前档位（宿主从 settings 里读的）。 */
   tier: Tier;
+  /**
+   * 有没有存档。有才给「继续旅程 / 重新开始」两颗按钮。
+   *
+   * 存档一直都在（`GameStateManager` 的 `hasSave()`），只是入口从来没摆在
+   * 标题页上：想重玩一遍，得先进游戏 → Esc → 重新开始。
+   * 玩家不会知道可以这么做——而"再骑一遍"恰好是这种游戏最自然的第二个动作。
+   */
+  hasSave: boolean;
 }
 
 export class TitleScreen {
@@ -44,6 +64,8 @@ export class TitleScreen {
   private tierBtns: HTMLButtonElement[] = [];
   private summaryBox: HTMLDivElement;
   private reasonEl: HTMLDivElement;
+  /** 「继续旅程 / 重新开始」那一排。没有存档时是 null。 */
+  private saveRow: HTMLDivElement | null = null;
   // 这两个由 buildHelp() 在构造函数里建。写成 `!` 是准确的——
   // 构造函数第一屏就调了它，TS 只是看不穿跨方法的赋值。
   private helpBox!: HTMLDivElement;
@@ -73,6 +95,21 @@ export class TitleScreen {
     acts.appendChild(button(t('demo_start'), { cls: 'g-btn-major', onClick: () => this.hooks.onStartDemo() }));
     card.appendChild(acts);
     card.appendChild(note(t('demo_hint'), 'g-note-dim'));
+
+    // ---- 有存档才出现的两颗 ----
+    // 放在主按钮**下面**而不是并列：并列会让人以为「开启旅程」和「继续旅程」
+    // 是两个并列的入口，而它们其实是"从头"和"接着"的关系。
+    // 「重新开始」是破坏性的，所以用 quiet 样式，不给主行动那颗的视觉权重。
+    if (o.hasSave) {
+      this.saveRow = el('div', 'g-acts g-acts-sub');
+      this.saveRow.appendChild(
+        button(t('title_continue'), { cls: 'g-btn', onClick: () => this.hooks.onContinue() }),
+      );
+      this.saveRow.appendChild(
+        button(t('title_restart'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onRestart() }),
+      );
+      card.appendChild(this.saveRow);
+    }
 
     // ---- 工具行 ----
     const tools = el('div', 'g-tools');
@@ -209,6 +246,12 @@ export class TitleScreen {
     this.paintSummary();
     setText(this.reasonEl, this.cap.reason);
     setText(this.helpBody, t('help_overlay'));
+    if (this.saveRow) {
+      const btns = this.saveRow.querySelectorAll<HTMLElement>('.g-btn, .g-btn-quiet');
+      // 顺序与构造时一致：继续、重开
+      setText(btns[0], t('title_continue'));
+      setText(btns[1], t('title_restart'));
+    }
   }
 
   dispose(): void {

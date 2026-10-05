@@ -99,7 +99,20 @@ export class Onboarding {
     this.setTouch(o.touch);
   }
 
-  /** 桌面：WASD / 空格 / ESC / M / V / E / 1~4，与 main 的 keydown 分支一一对应。 */
+  /**
+   * 桌面：WASD / 空格 / ESC / M / V / E / 1~4，与 main 的 keydown 分支一一对应。
+   *
+   * 左边一列是**描述键**，右边才是键帽。原来这里写的是 `key_camera` /
+   * `key_vehicle`——那两条的**值就是键帽本身**（"V" / "E"），于是界面上
+   * 渲染出「V → V」「E → E」这种自指的行。`key_item_bar` 更糟：那条键
+   * 根本不存在，`t()` 的兜底渲染成 `⟨key_item_bar⟩`。
+   *
+   * 三行里两行自指、一行是内部符号名，而这是玩家点「开启旅程」之后
+   * 看到的**第一屏**。真正该用的 `key_item_bar_desc` 一直都在表里，
+   * 只是被死字白名单当成"冗余条目"记了一笔。
+   *
+   * 现在由 `i18n-dead.mjs` 的反向判据（"引用了但没写"）守着这一类。
+   */
   private buildDesk(): HTMLDivElement {
     const box = el('div', 'g-keys');
     const items: [string, string][] = [
@@ -110,9 +123,9 @@ export class Onboarding {
       ['key_check_in', 'Space / Enter'],
       ['key_pause', 'Esc'],
       ['key_mute', 'M'],
-      ['key_camera', 'V'],
-      ['key_vehicle', 'E'],
-      ['key_item_bar', '1 ~ 4'],
+      ['key_camera_desc', 'V'],
+      ['key_vehicle_desc', 'E'],
+      ['key_item_bar_desc', '1 ~ 4'],
     ];
     for (const [k, glyph] of items) {
       const r = el('div', 'g-key');

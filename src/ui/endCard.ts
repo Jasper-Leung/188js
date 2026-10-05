@@ -389,7 +389,13 @@ export class EndCard {
     setText(this.backTab, t('card_side_back'));
     setFlag(this.frontTab, 'is-on', this.side === 'front');
     setFlag(this.backTab, 'is-on', this.side === 'back');
-    setText(this.captionEl, this.side === 'front' ? t('postcard_variant_hint') : t('back_preview_caption'));
+    // 背面那一句按结局分支：选了「放手」就把"留白是故意的"说出来。
+    // `back_break_blank` 之前是死字——文案写着"背面留白，封口的蜡已经掰开。
+    // 这句话不再替你写"，而玩家点进背面只看到一片空白，
+    // 读起来像**功能没做完**，不像一个抉择。说出这句话，它才是抉择。
+    const backCaption =
+      this.game.endingId === 'break' ? t('back_break_blank') : t('back_preview_caption');
+    setText(this.captionEl, this.side === 'front' ? t('postcard_variant_hint') : backCaption);
 
     setText(this.writeBtn, t('write_back'));
     // 导出两颗按钮要能分辨：同一个「导出明信片」摆在两处，玩家不知道

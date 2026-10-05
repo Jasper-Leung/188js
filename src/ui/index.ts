@@ -62,6 +62,15 @@ import { PerfPanel } from './perfPanel';
 export interface UIHooks {
   onStart(): void;
   /**
+   * 标题页的「继续旅程」：跳过引导页，直接回到世界。
+   *
+   * 它和 `onStart` 的区别只有"要不要再看一遍那四个词"——存档在 `ready()`
+   * 阶段就读进来了，序章也因为 `prologueDone` 不会重播。
+   * 单独一个 hook 而不是复用 `onStart`，是因为"从头"和"接着"对玩家是
+   * 两件不同的事，**共用一个动词会让标题页没法把它们分开摆**。
+   */
+  onContinue(): void;
+  /**
    * 引导页结束、玩家真正进到世界里了。
    *
    * 这条 hook 存在是因为踩过一次很典型的坑：引导页的「开始骑行」原来直接调
@@ -289,6 +298,7 @@ export class UI {
       hooks: this.hooks,
       capability: opts.capability,
       tier: this.tier,
+      hasSave: this.game.hasSave(),
     });
     this.onboarding = new Onboarding({
       parent: this.root,

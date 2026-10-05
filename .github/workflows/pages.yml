@@ -1,0 +1,68 @@
+name: 部署到 GitHub Pages
+
+# 触发：推 main 跑一次；手动也能跑（Actions 页面上的 Run workflow）。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages 部署需要这两条权限，而默认的 read-all 不含 write。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 不打断别人正在跑的部署：同分支上后来的一次取消前一次。
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `npm ci` 严格按 lockfile 装依赖，比 `npm install` 可复现也快。
+      # 它要求 lockfile 与 package.json 一致——esbuild 是 2026-10-05 补进
+      # devDependencies 的（tools/*.mjs 直接 import 它，之前只是靠 vite 传递依赖），
+      # 配套的 lockfile 改动已经和 package.json 一起提交，所以这里可以用 ci。
+      - name: 装依赖
+        run: npm ci
+
+      # ★ 回归是上线的门。它是本项目**唯一**的验证入口
+      # （`tools/verify-all.mjs` 会把 src/verify/*.ts 打成单文件在 Node 里跑），
+      # 而它判的是 `asserts > 0` / 无 `[FAIL]` / 不抛异常——**不信退出码**。
+      - run: npm run typecheck
+      - run: npm run verify
+
+      - run: npm run build
+        with:
+          # vite.config.ts 里 base 已经是 './'，这里保持一致。
+          # 两处不一致时的症状很安静：本地一切正常，线上白屏 404。
+          NODE_ENV: production
+
+      # Pages 需要 .nojekyll 才不会把下划线开头的目录当 Jekyll 处理。
+      # public/.nojekyll 会被 vite 原样拷进 dist/。
+      - name: 确认产物里有 .nojekyll
+        run: test -f dist/.nojekyll || touch dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

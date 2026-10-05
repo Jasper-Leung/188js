@@ -44,6 +44,7 @@ import { button, el, setAttr, setFlag, setShown, setStyle, setText } from './dom
 import { FRAGMENT_COLORS } from './theme';
 import type { World } from '../world/world';
 import { GameStateManager } from '../game/state';
+import { interactAt, type InteractKind } from '../game/phase';
 
 /**
  * 8 向箭头，索引 0 = 正前方，顺时针递增。
@@ -145,6 +146,7 @@ export class Hud {
   private lvbiEl: HTMLSpanElement;
   private moodEl: HTMLSpanElement;
   private chapterEl: HTMLSpanElement;
+  private offRoadEl: HTMLSpanElement;
   private nextEl: HTMLDivElement;
 
   // 碎片栏
@@ -185,6 +187,18 @@ export class Hud {
     // "我现在在第几章"——而集齐五件之后这一章的走法会整个变掉。
     this.chapterEl = el('span', 'g-stat g-stat-chapter');
     left.appendChild(this.chapterEl);
+    /**
+     * 离路提示。**只在真的偏出去时出现。**
+     *
+     * 降速本身是 `ride.ts` 的 `applyOffRoad()`，但光降速玩家未必察觉：
+     * 6m/s 掉到 2.7m/s 在一片绿色草坡上很难自己看出来，而这时候
+     * 相机往往已经钻进树冠（最近的植被块可以距玩家 0.5m）。
+     * 所以给它一格字，让"我偏了"这件事和"车变慢了"同时发生。
+     *
+     * 复用 `hud_road_no`（性能面板里那句「已偏离」），不新增文案。
+     */
+    this.offRoadEl = el('span', 'g-stat g-stat-offroad g-hidden', t('hud_road_no'));
+    left.appendChild(this.offRoadEl);
     top.appendChild(left);
     this.nextEl = el('div', 'g-next');
     top.appendChild(this.nextEl);
@@ -276,6 +290,9 @@ export class Hud {
     setText(this.lvbiEl, t('lvbi_label', { 0: this.game.lvbi }));
     setText(this.moodEl, t('mood_label', { 0: this.game.mood, 1: ECON.MOOD_CEIL }));
     setText(this.chapterEl, t(`chapter_label_${this.game.chapter}`, { 0: this.game.chapter }));
+    // 离路提示：与降速同源（`ride.ts` 的 `applyOffRoad`），
+    // 用它自己的布尔而不是重新判路面，免得两处判据漂移。
+    setShown(this.offRoadEl, this.world.ride.offRoad);
 
     // 集齐五件之后，导航指向**十八驿**而不是任何一座碎片驿站。
     // 这是第一章唯一的收尾动作，所以它必须占住「下一处」这一格——
@@ -321,20 +338,35 @@ export class Hud {
   /**
    * 脚下提示圈。
    *
-   * 出现的条件用 `world.nearby.needsVisit`（World 那边已经调过
-   * `fragmentStationNeedsVisit`）而不是自己再判一次。
+   * 出现的条件与圈上写什么，**都取自 `phase.ts` 的 `interactAt()`**——
+   * 和宿主 `tryCheckIn()` 是同一个函数。所以「圈上写进入小铺、按下去却
+   * 跑去打卡」这种脱节在结构上就不可能发生（同一个项目已经为"三块指示牌
+   * 各找一次目标"栽过一次，见 `state.ts` 文件头）。
+   *
    * 距离阈值抄 `World.canCheckIn()` 里那一条：够得着的定义是
    * 「驿站半径 + 路半宽」，少一寸玩家会站在圈外按空格。
+   *
+   * 铺子站（0 / 2 / 8）过去**从来不出圈**——`needsVisit` 对没有碎片的驿站
+   * 恒假，而那三座恰好都没有碎片。于是玩家在茶铺和灯铺门口看不到任何提示，
+   * 按空格也没有反应（宿主那条路也没写）。现在两半都补上了。
    */
   private syncRing(): void {
     const nb = this.world.nearby;
-    const inRange =
-      nb.index >= 0 &&
-      nb.hasFragment &&
-      nb.needsVisit &&
-      nb.distance <= WORLD.STATION_PASS_RADIUS + ROADMESH.TOTAL_HALF_WIDTH;
-
-    if (!inRange) {
+    if (nb.index < 0) {
+      this.hideRing();
+      return;
+    }
+    const kind = interactAt({
+      shopName: nb.shopName,
+      isHome: nb.isHome,
+      objectiveReturn: this.game.objective === 'return',
+      hasFragment: nb.hasFragment,
+      needsVisit: nb.needsVisit,
+      distance: nb.distance,
+      reach: WORLD.STATION_PASS_RADIUS + ROADMESH.TOTAL_HALF_WIDTH,
+      busy: this.world.checkInStage !== 'none',
+    });
+    if (kind === 'none') {
       this.hideRing();
       return;
     }
@@ -376,15 +408,9 @@ export class Hud {
       setStyle(this.ring, 'transform', `scale(${k.toFixed(3)})`);
     }
 
-    // 首访 / 再访 / 触屏各一套键
-    const revisited = this.game.getStationCount(nb.index) > 0;
-    const label = this.touchMode
-      ? revisited
-        ? t('touch_revisit_button')
-        : t('touch_checkin_prompt')
-      : revisited
-        ? t('desktop_revisit_prompt', { 0: nb.visitsLeft })
-        : t('desktop_checkin_prompt');
+    // 键位提示。铺子与回家各一套，**不复用打卡那套**——
+    // 「打卡」和「进入小铺」是不同的事，标签含糊就等于没提示。
+    const label = this.ringLabelFor(kind);
     setText(this.ringLabel, label);
     // 圈内那个圆是纯装饰（它是 div 不是文字），所以按钮的可访问名走 aria
     setAttr(this.ringBtn, 'aria-label', label);
@@ -394,6 +420,24 @@ export class Hud {
     if (!this.ringShown) return;
     this.ringShown = false;
     setShown(this.ringHold, false);
+  }
+
+  /**
+   * 圈上那行字。分派规则只在这一处，而 kind 来自 `interactAt()`——
+   * 和宿主 `tryCheckIn()` 同一个函数，所以标签与动作不可能对不上。
+   */
+  private ringLabelFor(kind: InteractKind): string {
+    if (kind === 'shop') return t(this.touchMode ? 'touch_shop_prompt' : 'desktop_shop_prompt');
+    if (kind === 'home') return t('desktop_home_prompt');
+    const nb = this.world.nearby;
+    const revisited = this.game.getStationCount(nb.index) > 0;
+    return this.touchMode
+      ? revisited
+        ? t('touch_revisit_button')
+        : t('touch_checkin_prompt')
+      : revisited
+        ? t('desktop_revisit_prompt', { 0: nb.visitsLeft })
+        : t('desktop_checkin_prompt');
   }
 
   // ---------------------------------------------------------------- 同步

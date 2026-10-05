@@ -10,7 +10,7 @@ import { Renderer } from '../core/renderer';
 import { PRESETS, type QualityPreset } from '../core/settings';
 import type { Tier } from '../core/capability';
 import { Terrain } from './terrain';
-import { Road, ROAD } from './road';
+import { Road, ROAD, JUNCTION } from './road';
 import { Water } from './water';
 import { Vegetation } from './vegetation';
 import { Scenery, type SceneryKind } from './scenery';
@@ -332,6 +332,32 @@ export class World {
     } else if (!steleInside && bestD > WORLD.STELE_PASS_RADIUS + 6) {
       this.steleInside.delete(best);
     }
+
+    this.updateJunctionLine();
+  }
+
+  /**
+   * 8 字自交点：骑过中心时说一句「路自此复」。
+   *
+   * 这个地方是全图唯一一个**空间本身就是台词**的位置：路在这里分岔、
+   * 又绕回自己身上。什么都不说，它就只是地图上的一个岔；
+   * 三个字，它才是"你走回来了"。
+   *
+   * **按圈去重，而不是"进过一次就不再进"**：玩家会绕第二圈、第三圈，
+   * 而这句话每圈都成立——它提醒的正是"你又走回来了"。
+   * `this.lap` 由弧长回绕推进，一圈只变一次，所以拿它当钥匙就够了。
+   */
+  private junctionLap = -1;
+  private updateJunctionLine() {
+    const p = this.ride.pos;
+    const d = Math.hypot(p.x - JUNCTION.center.x, p.z - JUNCTION.center.z);
+    if (d > JUNCTION.radius + 6) return;
+    if (this.lap === this.junctionLap) return;
+    this.junctionLap = this.lap;
+    const text = t('crossing_mark_line');
+    if (text && !text.startsWith('⟨')) {
+      this.emit({ type: 'storyLine', stationIndex: -1, title: t('crossing_title'), text });
+    }
   }
 
   /** 玩家在打卡范围内吗？（够得着 + 不是冷却中 + 骑开了足够远） */
@@ -428,11 +454,35 @@ export class World {
               .filter((v) => v && !v.startsWith('⟨')),
           });
         } else {
-          // 首访对白在这一刻播（**只在第一次**——重播会磨平三次到访的累积感）
           const st = this.stations.list[this.checkInTarget];
           const lines = isEnglish() ? st?.placement.def.dialogue_en : st?.placement.def.dialogue;
-          if (lines && lines.length && game.getStationCount(this.checkInTarget) === 0) {
+          // 打卡由宿主在**小游戏之后**才记（`main.ts` 的 `game.checkIn()`），
+          // 而这一刻还在打卡过场的运镜里，所以这里的 count 是**不含本次**的：
+          // 0 = 首访，1 = 第二遍，2 = 第三遍。首访对白的 `=== 0` 就靠这个。
+          const count = game.getStationCount(this.checkInTarget);
+          if (lines && lines.length && count === 0) {
             this.emit({ type: 'dialogue', speaker: st!.placement.def.name, lines: [...lines] });
+          } else if (count === 1 || count === 2) {
+            /**
+             * 第二 / 第三次到访，各给一句。
+             *
+             * `MAX_VISITS_PER_STATION = 3` 这个数字在 `verify_checkin`
+             * 里守得很严，可它在界面上**完全看不出来**——顶栏的圆点是很小的提示，
+             * 而"我为什么要来第三遍"没有任何地方回答。
+             *
+             * 走 `storyLine`（黑底文字卡）而不是 `dialogue`：这两句是驿站自己
+             * 嘟囔的一句，不是有人拦住你说话，不该锁操作、不该打断过弯。
+             */
+            const key = count === 1 ? 'revisit_2nd_here' : 'revisit_3rd_here';
+            const text = t(key);
+            if (text && !text.startsWith('⟨')) {
+              this.emit({
+                type: 'storyLine',
+                stationIndex: this.checkInTarget,
+                title: st?.placement.def.name ?? '',
+                text,
+              });
+            }
           }
         }
       }
@@ -590,11 +640,16 @@ export class World {
   }
 
   // ---------------------------------------------------------------- 异步资产
+  /**
+   * 自行车。**缩放不在这里做**——`Vehicle.rebuild()` 会按前轮实测半径
+   * 自己算（`bicycleScale`），而这一代车模单位正常（轮半径 0.1947），
+   * 旧的 `WORLD.BIKE_SCALE = 0.012` 是给包围盒 65534 的那个车模准备的。
+   * 在这里先缩一遍的话，`rebuild()` 里的扫描量到的是已经被压过的盒子。
+   */
   async loadBikeModel(): Promise<boolean> {
-    const model = await loadModel(modelUrl('res://assets/bike.glb'));
+    const model = await loadModel(modelUrl('res://assets/models/bicycle.glb'));
     if (!model) return false;
     const holder: Object3D = model.root;
-    holder.scale.setScalar(WORLD.BIKE_SCALE);
     // 自行车只是**载具的一种**，模型交给 Vehicle 管，
     // 这样加第二种载具时不必再动 Ride 的模型分支。
     this.ride.vehicle.attach({ bike: holder });
@@ -624,6 +679,37 @@ export class World {
       clips: survivor ? collectClips(survivor.animations) : {},
     });
     this.emit({ type: 'loaded', what: 'vehicle' });
+  }
+
+  /**
+   * 摩托车。**单独一条加载链**，不与滑板/角色同批。
+   *
+   * ## 为什么不并进 `loadVehicleExtras`
+   *
+   * 它是 3.4MB，而挂着它的那条链外面套着 20 秒硬超时。
+   * 同一批 `Promise.all` 意味着**最慢的那一个**决定整批的成败——
+   * 弱网下别的模型早就到了，进度条还卡着。
+   *
+   * ## 为什么它**不需要**角色模型
+   *
+   * `motorcycle.glb` 是 Tripo 导出的静态模型：84 个网格、0 骨骼、0 动画，
+   * **骑手和车体焊在同一批零件里**（见 `tools/extra-models.mjs`）。
+   * 所以骑它的时候外加的 `char` 会被 `Vehicle` 藏起来，不需要在这里配对。
+   *
+   * **晚到不影响任何事**：`Vehicle.canEnter('motorcycle')` 在模型到位前
+   * 一直是假，`cycle()` 自动跳过它，玩家按 E 不会切到一个看不见的车。
+   */
+  async loadMotorcycleModel(): Promise<boolean> {
+    const model = await loadModel(modelUrl('res://assets/models/motorcycle.glb')).catch(() => null);
+    if (!model) {
+      this.assetFail('摩托车', 'motorcycle.glb');
+      return false;
+    }
+    // 缩放与朝向都在 Vehicle.rebuild 里做（按前轮实测半径算，不写死），
+    // 这里只负责把模型交出去——和自行车、滑板同一条路。
+    this.ride.vehicle.attach({ motorcycle: model.root });
+    this.emit({ type: 'loaded', what: 'motorcycle' });
+    return true;
   }
 
   /**

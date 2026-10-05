@@ -31,6 +31,19 @@
 export const SRC_EXTRA = 'D:/code/20260920';
 /** 角色与滑板在另一个目录（`modelbone`），文件名也不同 */
 export const SRC_BONE = 'D:/code/20261001/modelbone';
+/**
+ * `modelbone/vehicle_switch` —— 载具切换系统那个项目的模型目录。
+ *
+ * 自行车、摩托车、以及**带 9 段动画**的人物都在这里，而不是 `modelbone` 根下：
+ * `modelbone` 根下那份是 3 段动画的 `survivor_rigged_v2.glb`（run / walk / 骑自行车），
+ * 停在那儿不动的时候只能露出 bind pose —— 也就是**张开双臂的站姿**，
+ * 而那是游戏的第一帧。`vehicle_switch` 里的 `survivor_rigged_v2_fullanim.glb`
+ * 由 `tools/merge-anim.mjs` 合入了 6 段（clap / surf / dig / jump / **idle** / **wait**），
+ * 待机终于有动作可播。
+ */
+export const SRC_VEHICLE = 'D:/code/20261001/modelbone/vehicle_switch/public/models';
+/** 摩托车载具（`motocycleriding` 演示项目导出的那台车） */
+export const SRC_MOTO = 'D:/code/20261001/motocycleriding';
 
 /**
  * `[源文件名, 输出短名, 贴图边长, 需要拆簇?, 裁底部比例, 源目录?]`
@@ -57,9 +70,35 @@ export const EXTRA_MODELS = [
   // 所以运行时**不要**再补一次 modelYawFix——补了就会歪 31.7°。
   // 轮子节点名是 wheel_FL / wheel_FR / wheel_RL / wheel_RR，绕**本地 Z**自转。
   ['skate_glide/skateboard+3d+model.glb', 'skateboard.glb', 1024, false, 0, SRC_BONE],
-  // 角色：51,423 面 / 归一化高 1.0 / **86 骨** / 3 个动画
-  // （`run` / `walk` / `骑自行车`）。贴图 1024 是因为它是玩家全程盯着的东西。
-  ['survivor_rigged_v2.glb', 'survivor.glb', 1024, false, 0, SRC_BONE],
+  // 角色：**9 段动画**（`survivor_rigged_v2_fullanim.glb`），
+  // 86 骨 / 59,956 顶点 / 51,423 面，归一化高 1.0。
+  // 片段：run · walk · 骑自行车 · clap · surf · dig · jump · **idle** · **wait**。
+  //
+  // 换这一版是为了**待机**：上一版只有 3 段（run / walk / 骑自行车），
+  // 而 `Vehicle.updateFootAnim()` 在速度归零时把两条轨的权重都清零，
+  // 于是停下来露出的是 bind pose —— 游戏第一帧就是**张开双臂的站姿**。
+  // 有 `idle` 之后那一句"待机权重 0"才有地方可去。
+  // 贴图 1024：玩家全程盯着这个人。
+  ['survivor_rigged_v2_fullanim.glb', 'survivor.glb', 1024, false, 0, SRC_VEHICLE],
+  //
+  // 自行车：25 个零件 / 175,178 顶点 / **184,433 面**，21 张贴图共 15.1MB。
+  // 原始包围盒（未缩放）长 0.9796 × 高 0.6588 × 宽 0.3746。
+  // ⚠ 车头方向**不要照抄节点平移**：前轮 x=−0.3114、后轮 x=+0.2874 看着像车头在 −X，
+  //   但实机 `chase` 侧视图里车是**横着的**，证明车头本来就在 **−Z**，
+  //   而 −Z 正是本作前进方向 ⇒ `BICYCLE_YAW = 0`。以渲染为准（见 vehicle.ts 的 MODEL_HEADS）。
+  // 轮半径实测 0.1947（`tripo_part_0` 圆度 5%，`tripo_part_2` 圆度 6%，
+  // 而车架大三角圆度 27% 被正确挡在外面）。
+  // 贴图 1024：玩家骑的是它，离镜头最近。
+  ['bicycle_clean.glb', 'bicycle.glb', 1024, false, 0, SRC_VEHICLE],
+  // 摩托车：**Tripo 导出**，69 个 `tripo_part_N` 静态网格，**无骨骼无动画**，
+  // 骑手与车体焊死在同一批零件里（所以这个模式下共享角色必须藏起来）。
+  // 原始 24.4MB / 381,656 顶点 / **376,765 面** / **207 张贴图**。
+  // 原始包围盒 0.6111 × 0.9803 × 0.9783，**车头在 +Z**
+  // （前轮 `tripo_part_0` z=+0.344，后轮 `tripo_part_1` z=−0.299，轴距 0.643）。
+  //
+  // 贴图压到 **512**：207 张各带一张 baseColor，1024 的话光贴图就 20MB 上下，
+  // 比原图还大。几何那边另给一档更狠的简化（见 optimize-assets.mjs 的 JOBS）。
+  ['motorcycle_rider.glb', 'motorcycle.glb', 512, false, 0, SRC_VEHICLE],
 ];
 
 /** 需要拆簇的模型 → 拆分后输出的短名。 */

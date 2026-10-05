@@ -115,9 +115,24 @@ export function assertRide(): { ok: boolean; detail: string; asserts: number } {
 
   // 极速封顶：踩十秒也不能超过 MAX_SPEED
   asserts++;
-  for (let i = 0; i < 600; i++) ride.fixedUpdate(1 / 60, { throttle: -1, steer: 0 });
-  if (Math.abs(ride.speedValue - RIDE.MAX_SPEED) > 0.05) {
-    probs.push(`踩十秒后车速 ${ride.speedValue.toFixed(2)}，应为 MAX_SPEED=${RIDE.MAX_SPEED}`);
+  const onRoadTop = sprintOnRoad(ride, 10);
+  if (Math.abs(onRoadTop - RIDE.MAX_SPEED) > 0.05) {
+    probs.push(`在路上踩十秒车速 ${onRoadTop.toFixed(2)}，应为 MAX_SPEED=${RIDE.MAX_SPEED}`);
+  }
+
+  // 反过来：**不修正方向**地踩十秒，必须明显慢于极速。
+  //
+  // 这条守的是"离路降速真的接在链路上了"。它和上面那条是一对：
+  // 上面量"在路上能开多快"，这条量"偏出去会被按住"。
+  // 只写上面那条的话，把 `applyOffRoad()` 整段删掉回归照样全绿。
+  asserts++;
+  const drifted = sprintFree(ride, 10);
+  if (drifted >= RIDE.MAX_SPEED - 0.5) {
+    probs.push(`不修正方向踩十秒仍有 ${drifted.toFixed(2)} m/s（≈极速），离路没有被按住`);
+  }
+  asserts++;
+  if (ride.onRoad()) {
+    probs.push('不修正方向踩了十秒居然还在路上——离路判定或出生点朝向有问题');
   }
 
   // 松油门要能停下来（不能一路滑）
@@ -141,6 +156,36 @@ export function assertRide(): { ok: boolean; detail: string; asserts: number } {
     ? probs.join('；')
     : `1s 满油门 ${RIDE.ACCEL} m/s · 满舵 0.5s ${(wantTurn * 57.3).toFixed(0)}° · 极速 ${RIDE.MAX_SPEED} m/s · 交叉口 ${j.detail}`;
   return { ok: probs.length === 0, detail, asserts };
+}
+
+/**
+ * 十秒满油门，**每一步都把车按回中心线**，返回末速。
+ *
+ * 原来这一步是"一直直着踩十秒"。而实测直着踩 **2 秒**就离路了
+ * （`off` 从 0 涨到 4.3m、`road=n`），加上离路降速之后，那条判据量到的
+ * 就不再是"极速"而是"草地上的极速"——它红了，而红的原因写着
+ * `应为 MAX_SPEED=15`，看着像极速被改坏了。
+ *
+ * 它声称量的是极速，那就让它**真的在路上量**。
+ * `ride.pos` 返回的就是模拟自己用的那个向量，直接改它即可；
+ * 速度是独立字段，不会被这一下带走，而 `applyOffRoad()` 每步重读位置，
+ * 于是它量到的确实是"在路上的极速上限"。
+ */
+function sprintOnRoad(ride: Ride, seconds: number): number {
+  const p = pointAtArcLength(0).pos;
+  const steps = Math.round(seconds * 60);
+  for (let i = 0; i < steps; i++) {
+    ride.pos.set(p.x, ride.pos.y, p.z);
+    ride.fixedUpdate(1 / 60, { throttle: -1, steer: 0 });
+  }
+  return ride.speedValue;
+}
+
+/** 十秒满油门，**不修正方向**——用来量"偏出去会被按住多少"。 */
+function sprintFree(ride: Ride, seconds: number): number {
+  const steps = Math.round(seconds * 60);
+  for (let i = 0; i < steps; i++) ride.fixedUpdate(1 / 60, { throttle: -1, steer: 0 });
+  return ride.speedValue;
 }
 
 /**

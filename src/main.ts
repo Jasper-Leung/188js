@@ -25,12 +25,13 @@ import { Road } from './world/road';
 import { Water } from './world/water';
 import { Vegetation } from './world/vegetation';
 import { Stations } from './world/stations';
+import { ROAD } from './world/road';
 import { Sky } from './world/sky';
 import { Scene, PerspectiveCamera } from 'three';
 import { game, GameStateManager } from './game/state';
 import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
-import { ECON, SHOPS } from './data/raw';
+import { ECON, SHOPS, WORLD } from './data/raw';
 import { UI } from './ui';
 import { clamp } from './core/math';
 import { perf } from './core/perf';
@@ -41,7 +42,7 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportBothSides, seededBackText, type EndingId } from './game/postcard';
 
-import { canRide as canRideNow, type Phase } from './game/phase';
+import { canRide as canRideNow, interactAt, type Phase } from './game/phase';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
 const bootSub = document.getElementById('boot-sub') as HTMLElement;
@@ -198,6 +199,17 @@ async function main() {
   // 20 秒足够 localhost 与正常宽带走完 4MB，也足够在慢网下给出"它不来了"的信号。
   void withTimeout(assetChain, 20_000, '模型加载超时');
 
+  // **摩托车单独一条链**，不进上面的 `assetChain`。
+  //
+  // 理由是它 3.4MB，而 `assetChain` 外面套着 20 秒硬超时：
+  // 塞进那个 `Promise.all` 就等于让**最慢的那一个**决定整条链的成败——
+  // 弱网下滑板和角色早就到了，进度条却卡在 0.9 直到超时，
+  // 玩家看着一个明明已经能玩的游戏迟迟不开始。
+  //
+  // 它是纯附加的可选载具：晚几秒出现，`E` 就在 `canEnter` 上跳过它，
+  // 玩家什么都不必等。**不进链也就不会被那次超时波及。**
+  void world.loadMotorcycleModel().catch((e) => console.warn('[gift188] 摩托车模型加载失败：', e));
+
   // ---- 游戏状态机 ----
   const app = new App(world, settings, capability);
   await app.ready();
@@ -314,6 +326,7 @@ class App {
       parent: root,
       hooks: {
         onStart: () => this.startRide(),
+        onContinue: () => this.continueRun(),
         // 引导页的出口。**必须在这里把 phase 切到 roaming**，
         // 而不是在 UI 内部直接画 HUD——不然 `canRide` 恒为假，车不动。
         onWorldEntered: () => this.enterWorld(),
@@ -331,7 +344,7 @@ class App {
         onLangToggle: () => this.toggleLang(),
         onCheckIn: () => this.tryCheckIn(),
         onShopBuy: (id) => this.buy(id),
-        onShopClose: () => this.ui.setShopOpen(false),
+        onShopClose: () => this.closeShop(),
         onTakePostcard: () => this.finishRun(),
         onKeepRiding: () => this.toRoaming(),
         onEndingPick: (e) => {
@@ -406,6 +419,26 @@ class App {
     game.on('lvbi', () => this.ui.syncFromState());
     game.on('mood', () => this.ui.syncFromState());
     game.on('item', () => this.ui.syncFromState());
+    /**
+     * 拿到碎片：**说清楚那是什么。**
+     *
+     * 这一条是这一轮实机评审里最刺眼的"内容没送达"：
+     * 玩家打一局小游戏、收下一块碎片，屏幕上只有 `碎片 2/5` 涨了一格。
+     * 五块碎片的名字（云/茶/琴/竹/禽）在 HUD 的格子里，`fragment_tip_*`
+     * 挂在那一格的 `title` 上——而 `title` 只有鼠标悬停才看得见，
+     * 触屏上根本悬停不了。所以整局下来玩家**始终不知道自己在收集什么**。
+     *
+     * 用已有的黑底文字卡：不锁操作、不吃点击、自动推进，
+     * 和序章、石碑、路过的驿站台词走同一条路。
+     */
+    game.on('fragment', (stationIdx) => {
+      const slot = STATIONS[stationIdx]?.slot ?? -1;
+      if (slot < 0) return;
+      this.ui.showStoryCard(
+        `${t(`fragment_${slot}`)}\n${t(`fragment_tip_${slot}`)}`,
+        t('fragment_obtained'),
+      );
+    });
 
     mark('启动循环…');
     this.loop.start();
@@ -644,6 +677,36 @@ class App {
     this.ui.showOnboarding();
   }
 
+  /**
+   * 标题页的「继续旅程」：不看引导页，直接回到世界。
+   *
+   * 存档在 `ready()` 的「读档…」那一步就已经读进来了，所以这里不需要
+   * 再 load 一次；序章也不会重播——`enterWorld()` 里那句
+   * `if (!game.prologueDone)` 在有存档时为假。
+   */
+  private continueRun() {
+    void audio.unlock();
+    audio.playBgm('bgm', 0.5);
+    this.ui.setDialogueAutoAdvance(0);
+    this.enterWorld();
+  }
+
+  /**
+   * 清掉这一趟的全部进度，回到十八驿旁。
+   *
+   * 标题页的「重新开始」与暂停面板的「重新开始」共用这一段——
+   * 两条路径要做的事完全一样，只有**之后去哪**不同。
+   */
+  private resetRun() {
+    game.reset();
+    this.world.setOdometer(0);
+    this.backText = '';
+    writeBackText('');
+    this.demoActive = false;
+    this.world.teleportToStation(0);
+    this.ui.setShopOpen(false);
+  }
+
   private enterWorld() {
     // 幂等：UI 的 enterWorld() 也会走到这里（它只负责画 HUD），
     // 而 hook 是从 UI 内部发出来的，所以这条路径可能被走两次
@@ -688,15 +751,25 @@ class App {
   }
 
   restart() {
-    game.reset();
-    this.world.setOdometer(0);
-    this.backText = '';
-    writeBackText('');
-    this.demoActive = false;
-    this.world.teleportToStation(0);
-    this.ui.setShopOpen(false);
-    this.toRoaming();
+    this.resetRun();
+    // 同一个动词，两条路径：暂停面板里是"回到刚才那一趟的起点"，
+    // 标题页里是"清档之后从头进世界"——后者还得把标题页收起来。
+    if (this.phase === 'title') {
+      this.continueRun();
+    } else {
+      this.toRoaming();
+    }
     this.ui.syncFromState();
+  }
+
+  /**
+   * 关铺子。**必须把相位还回去**——`tryCheckIn()` 打开铺子时把 phase 设成了
+   * `checkin`（为了不在 `canRide` 的白名单之外），而 `canRide` 只认 `roaming`。
+   * 忘了这一句的症状和当初引导页那个 bug 一模一样：**画面全对，只有车不动**。
+   */
+  private closeShop() {
+    this.ui.setShopOpen(false);
+    if (this.phase === 'checkin') this.phase = 'roaming';
   }
 
   private startDemo() {
@@ -742,6 +815,16 @@ class App {
   // ---------------------------------------------------------------- 打卡
   tryCheckIn() {
     if (this.phase !== 'roaming') return;
+    const kind = this.interactKind();
+    if (kind === 'shop') {
+      // 相位复用 `checkin`：它已经在 `verify_phase` 的"占用"集合里
+      // （`{paused, checkin, synthesis}`），所以不用新增相位、那条不变式也不用改。
+      // 语义也对得上——"站定了、车不能动、镜头之外正在办事"。
+      // `world.checkInStage` 保持 `'none'`，打卡过场不会被触发。
+      this.phase = 'checkin';
+      this.ui.setShopOpen(true);
+      return;
+    }
     const can = this.world.canCheckIn();
     if (!can.ok) {
       const key = can.reason === 'cooldown' ? 'blocked_cooldown' : can.reason === 'recheck' ? 'blocked_recheck' : 'blocked_busy';
@@ -751,7 +834,7 @@ class App {
     // 回家这一条走独立分支：0 号驿站没有碎片，
     // `runMiniGame` 里 `STATIONS[idx].slot < 0` 会立刻把它踢回 roaming，
     // 于是"第一章完成"这件事一次都不会发生。
-    if (this.world.nearby.isHome) {
+    if (kind === 'home' || this.world.nearby.isHome) {
       this.phase = 'checkin';
       this.world.startCheckIn(
         GameStateManager.HOME_STATION,
@@ -764,6 +847,25 @@ class App {
     if (idx < 0) return;
     this.phase = 'checkin';
     this.world.startCheckIn(idx, (finished) => void this.runMiniGame(finished));
+  }
+
+  /**
+   * 「对面前的站按确认会发生什么」。判定在 `phase.ts` 的 `interactAt()` 里，
+   * HUD 的脚下提示圈读的是同一个函数——所以圈上写什么和按下去发生什么
+   * 不可能各说各话。
+   */
+  private interactKind() {
+    const nb = this.world.nearby;
+    return interactAt({
+      shopName: nb.shopName,
+      isHome: nb.isHome,
+      objectiveReturn: game.objective === 'return',
+      hasFragment: nb.hasFragment,
+      needsVisit: nb.needsVisit,
+      distance: nb.distance,
+      reach: WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH,
+      busy: this.world.checkInStage !== 'none',
+    });
   }
 
   /**
@@ -911,7 +1013,10 @@ class App {
       // 而"手机响了"这句话本身不该把人按在路上，更不该顶掉一局茶。
       this.ui.showInterruptCard(e.text, t('villain_cue_title'), 1200);
     } else if (e.type === 'duskBegan') {
-      this.ui.showToast(t('dusk_toast'), 3200);
+      // 这里原来写的是 `t('dusk_toast')`，而那条键**从来不存在**——
+      // 于是第二圈天色转暗时，玩家看到的是字面量 `⟨dusk_toast⟩`。
+      // 表里真正写着的是 `dusk_began`：「天要暗了。灯亮起来，路还是那条路。」
+      this.ui.showToast(t('dusk_began'), 3200);
     } else if (e.type === 'loaded') {
       // 资产到位不打扰玩家：它自己会出现在画面上
       void e.what;

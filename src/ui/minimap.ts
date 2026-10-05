@@ -40,12 +40,32 @@ import { ACCENT, INK, INK_FAINT, PAPER_DAY } from './theme';
 import type { World } from '../world/world';
 import type { GameStateManager } from '../game/state';
 
-/** 画布的 CSS 边长（px）。**故意不用 rem**：这是一个位图的像素尺寸，
+/** 基准边长（px）。下面所有绘制常量都是在这个尺寸下量的，缩放时乘 `u`。
+ *  **故意不用 rem**：这是一个位图的像素尺寸，
  *  由 JS 读 rect 再乘 dpr 才能得到正确的后备缓冲，用 rem 反而多一层
  *  「布局定完没有」的时序依赖（构造时父节点可能还是 display:none）。 */
-const SIZE = 168;
+const BASE = 168;
 /** 环线离画布边留的空白（px）。 */
 const PAD = 10;
+
+/**
+ * 视口越大，图越大。
+ *
+ * 原来是**固定 168px**，而这一条是实机评审里玩家读不懂的东西：
+ * 1920×1080 的屏幕角落里那个 168px 的方块上，环线只有 1.4px 宽、
+ * 玩家三角只有 5px 高——"我现在在哪儿"要靠盯着一个比正文标点还小的
+ * 图形去找。屏幕越大，这个方块占的比例越小，而它恰恰是**唯一**一张
+ * 全局地图。
+ *
+ * 跟着视口走之后：手机 150、桌面 200、大屏 248。上限压在 248 是因为
+ * 再大它就从"指示"变成"占地方"，而右下角还压着道具栏。
+ */
+function sizeFor(vw: number): number {
+  if (vw >= 1700) return 248;
+  if (vw >= 1200) return 200;
+  if (vw >= 900) return 176;
+  return 150;
+}
 
 // ---------------------------------------------------------------- 投影
 
@@ -55,8 +75,11 @@ const PAD = 10;
  * 包围盒取 `CENTERLINE` 而不是 `STATIONS`：驿站原位一定在环线上，
  * 而环线才是那个把整个 8 字撑满的形状。按驿站取包围盒会让图偏出去
  * 一圈，而玩家会以为"路比图短"。
+ *
+ * 边长会随视口变（`sizeFor`），所以它是**函数**而不是模块级常量——
+ * 原来它算一次就固定，于是图只能有一个尺寸。
  */
-const PROJ = (() => {
+function makeProj(size: number) {
   let minX = Infinity;
   let maxX = -Infinity;
   let minZ = Infinity;
@@ -69,10 +92,10 @@ const PROJ = (() => {
   }
   const spanX = Math.max(maxX - minX, 1e-3);
   const spanZ = Math.max(maxZ - minZ, 1e-3);
-  const k = (SIZE - PAD * 2) / Math.max(spanX, spanZ);
+  const k = (size - PAD * 2) / Math.max(spanX, spanZ);
   // 等比缩放之后在两个轴上各居中一次：8 字不是正方形，不居中就会有一边贴边
-  const offX = PAD + (SIZE - PAD * 2 - spanX * k) * 0.5;
-  const offZ = PAD + (SIZE - PAD * 2 - spanZ * k) * 0.5;
+  const offX = PAD + (size - PAD * 2 - spanX * k) * 0.5;
+  const offZ = PAD + (size - PAD * 2 - spanZ * k) * 0.5;
   return {
     x(wx: number): number {
       return offX + (wx - minX) * k;
@@ -81,7 +104,9 @@ const PROJ = (() => {
       return offZ + (wz - minZ) * k;
     },
   };
-})();
+}
+
+type Proj = ReturnType<typeof makeProj>;
 
 /** 中心线在图上的自交点。`countCrossings()`（route.ts）就是拿 CENTERLINE[0]
  *  当这个点数的，所以这里用同一个来源而不是另算一遍。 */
@@ -99,6 +124,16 @@ export class Minimap {
 
   private world: World;
   private game: GameStateManager;
+
+  /** 当前边长与投影。跟着视口走，改了就重画静态层。 */
+  private size = BASE;
+  private proj: Proj = makeProj(BASE);
+  /** 绘制常量的缩放系数：`size / BASE`。所有 px 常量乘它。 */
+  private u = 1;
+  /** `applySize()` 已经跑过至少一次（用来区分"没定过尺寸"和"尺寸恰好没变"）。 */
+  private sized = false;
+
+  private onResize = () => this.applySize();
 
   private dirty = true;
   /**
@@ -122,12 +157,6 @@ export class Minimap {
     this.root = el('div', 'g-minimap');
     // canvas 上标一句，让屏幕阅读器知道这张图是什么（读不出来也比没有强）
     this.canvas = el('canvas', 'g-minimap-c');
-    this.canvas.width = SIZE;
-    this.canvas.height = SIZE;
-    this.canvas.style.width = SIZE + 'px';
-    this.canvas.style.height = SIZE + 'px';
-    this.canvas.setAttribute('role', 'img');
-    this.canvas.setAttribute('aria-label', t('postcard_map_title'));
     this.root.appendChild(this.canvas);
     parent.appendChild(this.root);
 
@@ -136,11 +165,52 @@ export class Minimap {
     this.ctx = ctx;
 
     this.base = el('canvas');
-    this.base.width = SIZE;
-    this.base.height = SIZE;
     const bctx = this.base.getContext('2d');
     if (!bctx) throw new Error('小地图离屏层拿不到 2D 上下文');
     this.baseCtx = bctx;
+
+    // **必须在两张画布都建好之后再定尺寸。**
+    //
+    // 上一版把 `applySize()` 放在建 `base` 之前，于是它去写
+    // `this.base.width` 时 `this.base` 还是 undefined：
+    // `TypeError: Cannot set properties of undefined (setting 'width')`
+    // 从 `new UI()` 里抛出去，`ready()` 的 promise 拒绝，
+    // **启动屏永远停在 62%，标题页出不来，游戏完全玩不了。**
+    //
+    // 这一条 bug 值得记下来，因为它通过了 typecheck、通过了 25 条 / 277 断言
+    // 的全部回归、也通过了 `vite build`——所有只在**运行时**存在的判据
+    // 都抓不到"构造函数里少建了一个对象"。唯一的证据来源是实机控制台。
+    this.applySize();
+
+    window.addEventListener('resize', this.onResize);
+  }
+
+  /**
+   * 按视口定边长，重建两张画布的尺寸与投影。
+   *
+   * 静态层必须重画（`markDirty`）：投影变了，而静态层是**离屏缓存**，
+   * 不重画的话玩家会看到"路还是那条路，但驿站全错位了"。
+   *
+   * `this.base` 存在性是被断言过的，不是防御性编程：它已经错过一次
+   * （见构造函数里那段注释），而那一次的代价是**整个游戏起不来**。
+   */
+  private applySize(): void {
+    const next = sizeFor(window.innerWidth);
+    if (this.sized && next === this.size) return;
+    this.sized = true;
+    this.size = next;
+    this.u = next / BASE;
+    this.proj = makeProj(next);
+    this.canvas.width = next;
+    this.canvas.height = next;
+    this.canvas.style.width = next + 'px';
+    this.canvas.style.height = next + 'px';
+    this.canvas.setAttribute('role', 'img');
+    this.canvas.setAttribute('aria-label', t('postcard_map_title'));
+    if (!this.base) throw new Error('小地图：applySize() 早于离屏层建立');
+    this.base.width = next;
+    this.base.height = next;
+    this.dirty = true;
   }
 
   /** 状态变了（读档、买东西、打完卡）：静态层要重画。 */
@@ -169,12 +239,12 @@ export class Minimap {
       this.dirty = false;
     }
     const g = this.ctx;
-    g.clearRect(0, 0, SIZE, SIZE);
+    g.clearRect(0, 0, this.size, this.size);
     g.drawImage(this.base, 0, 0);
 
     const p = this.world.ride.pos;
-    const px = PROJ.x(p.x);
-    const py = PROJ.z(p.z);
+    const px = this.proj.x(p.x);
+    const py = this.proj.z(p.z);
 
     this.paintTarget(g, px, py, targetIdx);
     this.paintPlayer(g, px, py, this.world.ride.headingValue);
@@ -195,21 +265,22 @@ export class Minimap {
   // ---------------------------------------------------------------- 静态层
 
   private paintBase(): void {
+    const u = this.u;
     const g = this.baseCtx;
-    g.clearRect(0, 0, SIZE, SIZE);
+    g.clearRect(0, 0, this.size, this.size);
 
     // 纸
     g.fillStyle = `rgb(${PAPER_DAY[0]},${PAPER_DAY[1]},${PAPER_DAY[2]})`;
-    g.fillRect(0, 0, SIZE, SIZE);
+    g.fillRect(0, 0, this.size, this.size);
 
     // 环线。961 段一次画完，线宽取 1.4 —— 再细在 168px 的图上就断了
     g.strokeStyle = 'rgba(43,36,27,0.34)';
-    g.lineWidth = 1.4;
+    g.lineWidth = 1.4 * u;
     g.lineJoin = 'round';
     g.beginPath();
-    g.moveTo(PROJ.x(CENTERLINE[0].x), PROJ.z(CENTERLINE[0].z));
+    g.moveTo(this.proj.x(CENTERLINE[0].x), this.proj.z(CENTERLINE[0].z));
     for (let i = 1; i < CENTERLINE.length; i++) {
-      g.lineTo(PROJ.x(CENTERLINE[i].x), PROJ.z(CENTERLINE[i].z));
+      g.lineTo(this.proj.x(CENTERLINE[i].x), this.proj.z(CENTERLINE[i].z));
     }
     g.closePath();
     g.stroke();
@@ -217,14 +288,14 @@ export class Minimap {
     // 中线自交点：小十字。这是 8 字唯一一处"路自己碰自己"的地方，
     // 而它恰好也是最容易骑错的一处（两条环在这里并排），所以画出来。
     g.strokeStyle = 'rgba(43,36,27,0.42)';
-    g.lineWidth = 1.2;
-    const cx = PROJ.x(CROSSING.x);
-    const cz = PROJ.z(CROSSING.z);
+    g.lineWidth = 1.2 * u;
+    const cx = this.proj.x(CROSSING.x);
+    const cz = this.proj.z(CROSSING.z);
     g.beginPath();
-    g.moveTo(cx - 3, cz - 3);
-    g.lineTo(cx + 3, cz + 3);
-    g.moveTo(cx + 3, cz - 3);
-    g.lineTo(cx - 3, cz + 3);
+    g.moveTo(cx - 3 * u, cz - 3 * u);
+    g.lineTo(cx + 3 * u, cz + 3 * u);
+    g.moveTo(cx + 3 * u, cz - 3 * u);
+    g.lineTo(cx - 3 * u, cz + 3 * u);
     g.stroke();
 
     for (let i = 0; i < STATIONS.length; i++) {
@@ -247,29 +318,30 @@ export class Minimap {
    * 它们永远全是空心，玩家会以为那 11 座没有意义。
    */
   private paintStation(g: CanvasRenderingContext2D, i: number): void {
+    const u = this.u;
     const st = STATIONS[i];
-    const x = PROJ.x(st.mapX);
-    const y = PROJ.z(st.mapZ);
+    const x = this.proj.x(st.mapX);
+    const y = this.proj.z(st.mapZ);
     const seen = this.game.seenStations.has(i);
     const isFrag = st.slot >= 0;
-    const r = isFrag ? 4.2 : 2.6;
+    const r = (isFrag ? 4.2 : 2.6) * u;
 
     if (isFrag) {
       const cnt = st.slot >= 0 ? this.game.getStationCount(i) : 0;
       const frac = Math.min(cnt / ECON.MAX_VISITS_PER_STATION, 1);
       // 弧的底：整圈淡灰，让"还差多少"有个参照
       g.strokeStyle = 'rgba(43,36,27,0.20)';
-      g.lineWidth = 2.4;
+      g.lineWidth = 2.4 * u;
       g.beginPath();
-      g.arc(x, y, 6.2, 0, Math.PI * 2);
+      g.arc(x, y, 6.2 * u, 0, Math.PI * 2);
       g.stroke();
       if (frac > 0) {
         g.strokeStyle = ACCENT;
-        g.lineWidth = 2.4;
+        g.lineWidth = 2.4 * u;
         g.lineCap = 'round';
         g.beginPath();
         // 从 12 点方向顺时针走：和"一格一格点亮"的心智一致
-        g.arc(x, y, 6.2, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+        g.arc(x, y, 6.2 * u, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
         g.stroke();
         g.lineCap = 'butt';
       }
@@ -284,7 +356,7 @@ export class Minimap {
       g.fillStyle = `rgb(${PAPER_DAY[0]},${PAPER_DAY[1]},${PAPER_DAY[2]})`;
       g.fill();
       g.strokeStyle = isFrag ? ACCENT : INK_FAINT;
-      g.lineWidth = 1.2;
+      g.lineWidth = 1.2 * u;
       g.stroke();
     }
   }
@@ -298,14 +370,15 @@ export class Minimap {
     py: number,
     targetIdx: number,
   ): void {
+    const u = this.u;
     if (targetIdx < 0 || targetIdx >= STATIONS.length) return;
     const st = STATIONS[targetIdx];
-    const tx = PROJ.x(st.mapX);
-    const ty = PROJ.z(st.mapZ);
+    const tx = this.proj.x(st.mapX);
+    const ty = this.proj.z(st.mapZ);
 
     g.strokeStyle = 'rgba(157,58,47,0.75)';
-    g.lineWidth = 1.4;
-    g.setLineDash([3, 3]);
+    g.lineWidth = 1.4 * u;
+    g.setLineDash([3 * u, 3 * u]);
     g.beginPath();
     g.moveTo(px, py);
     g.lineTo(tx, ty);
@@ -313,9 +386,9 @@ export class Minimap {
     g.setLineDash([]);
 
     g.strokeStyle = ACCENT;
-    g.lineWidth = 1.6;
+    g.lineWidth = 1.6 * u;
     g.beginPath();
-    g.arc(tx, ty, 8.5, 0, Math.PI * 2);
+    g.arc(tx, ty, 8.5 * u, 0, Math.PI * 2);
     g.stroke();
   }
 
@@ -334,25 +407,39 @@ export class Minimap {
     py: number,
     heading: number,
   ): void {
+    const u = this.u;
     g.save();
     g.translate(px, py);
     g.rotate(-heading);
+    // 光晕：同一形状放大后实心铺一层纸色。
+    // 原来只有一条 1.2px 的描边，而玩家压在环线上、压在碎片站的进度弧上、
+    // 压在「下一处」那条虚线上时，三角形和背景会糊在一起——
+    // 而「我在哪儿」这张图上只靠这一个符号回答。
     g.beginPath();
-    g.moveTo(0, -5.2);
-    g.lineTo(3.4, 3.6);
-    g.lineTo(0, 1.8);
-    g.lineTo(-3.4, 3.6);
+    g.moveTo(0, -7.6 * u);
+    g.lineTo(5 * u, 5.3 * u);
+    g.lineTo(0, 2.6 * u);
+    g.lineTo(-5 * u, 5.3 * u);
+    g.closePath();
+    g.fillStyle = `rgba(${PAPER_DAY[0]},${PAPER_DAY[1]},${PAPER_DAY[2]},0.92)`;
+    g.fill();
+    // 本体
+    g.beginPath();
+    g.moveTo(0, -5.2 * u);
+    g.lineTo(3.4 * u, 3.6 * u);
+    g.lineTo(0, 1.8 * u);
+    g.lineTo(-3.4 * u, 3.6 * u);
     g.closePath();
     g.fillStyle = INK;
     g.fill();
-    // 描一圈纸色边：玩家压在环线上时三角形不会和路面线糊在一起
     g.strokeStyle = `rgb(${PAPER_DAY[0]},${PAPER_DAY[1]},${PAPER_DAY[2]})`;
-    g.lineWidth = 1.2;
+    g.lineWidth = 1.2 * u;
     g.stroke();
     g.restore();
   }
 
   dispose(): void {
+    window.removeEventListener('resize', this.onResize);
     this.root.remove();
   }
 }

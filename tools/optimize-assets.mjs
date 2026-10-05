@@ -112,13 +112,31 @@ const MASS_MODELS = { has: isMassModel };
 // 后果不是报错，是世界看起来像高速公路而不是乡村：
 // 一株行道树 35,461 面，49 株就是 174 万面，谁也不敢多种，
 // 于是 1228.8m 的环线上只有 49 棵树。数字与取舍见 src/world/vegetation.ts。
+/**
+ * 逐个模型的几何预算。**没有表的项目走默认档**（0.6 / 0.0025）。
+ *
+ * 自行车与摩托车必须单列，它们是这批资产里最重的两个，而"离镜头最近"
+ * 和"整台车 69 个零件"是两件冲突的事：
+ *
+ * | | 原始面数 | ratio | 之后 | error |
+ * |---|---:|:---:|---:|:---:|
+ * | `bicycle.glb` | 184,433 | 0.45 | ~83k | 0.0008（英雄档，和旧 bike.glb 同） |
+ * | `motorcycle.glb` | 376,765 | 0.2 | ~75k | 0.006 |
+ *
+ * 摩托车的 error 比地标大不是随手填的：**误差是相对包围盒的**，
+ * 而它只有 2m 高、0.98 个单位大，同样 0.0025 在这么小的包围盒上
+ * 会一路啃到轮辋和链条那种只有几个像素的细节上去。
+ * 面数再乘 0.2 之后 376k → 75k，这一档才敢配一个更大的误差。
+ */
 const JOBS = files.map((f) =>
-  f === 'bike.glb'
+  f === 'bike.glb' || f === 'bicycle.glb'
     ? { src: join(SRC_MODELS, f), name: f, ratio: 0.45, error: 0.0008 }
-    : MASS_MODELS.has(f)
-      // 量产道具：误差放到 0.01（地标的 4 倍）、面数压到约 1/10
-      ? { src: join(SRC_MODELS, f), name: f, ratio: 0.1, error: 0.01 }
-      : { src: join(SRC_MODELS, f), name: f, ratio: 0.6, error: 0.0025 },
+    : f === 'motorcycle.glb'
+      ? { src: join(SRC_MODELS, f), name: f, ratio: 0.2, error: 0.006 }
+      : MASS_MODELS.has(f)
+        // 量产道具：误差放到 0.01（地标的 4 倍）、面数压到约 1/10
+        ? { src: join(SRC_MODELS, f), name: f, ratio: 0.1, error: 0.01 }
+        : { src: join(SRC_MODELS, f), name: f, ratio: 0.6, error: 0.0025 },
 );
 
 if (JOBS.length === 0) {

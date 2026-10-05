@@ -19,8 +19,9 @@
  */
 import { Group, Vector3, MathUtils, type PerspectiveCamera } from 'three';
 import { RIDE, WORLD } from '../data/raw';
+import { CENTERLINE, nearestArcParam } from '../data/route';
 import { Terrain } from './terrain';
-import { Road } from './road';
+import { Road, ROAD } from './road';
 import { Vehicle, MODE_TUNE, type RideMode } from './vehicle';
 import { Stations, type StationRuntime } from './stations';
 import { clamp, damp } from '../core/math';
@@ -31,8 +32,52 @@ const {
 } = RIDE;
 
 const BIKE_RADIUS = 0.9; // 车轮半径，用于撞墙时算接触点
+
 /** 相机跟随的指数衰减率。由原版每帧 lerp 0.12 折算：-ln(1-0.12)×60 ≈ 7.7 */
 const CAM_DAMP = -Math.log(1 - 0.12) * 60;
+
+/**
+ * ## 路肩之外为什么要降速，以及为什么是"压极速"而不是"掉速度"
+ *
+ * 原来离路是**零后果**的：`onRoad()` 只被探针读，从没进过运动学。
+ * 实测（按住 W 不打方向）离路只花 **2 秒**——`off` 从 0 涨到 4.3m、
+ * `road=n`。而离路之后的画面是：相机钻进树冠（最近的植被块距玩家 0.5m、
+ * 尺寸 45×60×45m），整屏变成没有地平线的绿色多边形。
+ *
+ * 也就是说玩家**察觉不到自己已经偏了**，等到发现时已经在草地里迷路。
+ * 降速就是给这件事一个每帧都在说话的信号：偏出去，车立刻变慢。
+ *
+ * **压极速而不是乘一个阻尼系数**，理由是三件事同时成立：
+ *
+ * 1. **能开回来。** 阻尼（`speed *= 0.9`）在低速下会把车锁死在草地里——
+ *    玩家想回路面，得多按一会儿 W 才攒得出速度，而"越乱越慢"会教玩家
+ *    按 Esc。压极速不动已有的速度，只削掉"还能再快多少"。
+ * 2. **回到路面立刻恢复。** 判据是同一个 `getHeightAt`，所以恢复是瞬时的，
+ *    玩家得到一个干净的"上去了"反馈，而不是一段减速尾巴。
+ * 3. **不会和碰撞打架。** 驿站禁入用的是 `dampSpeed()`（乘性），
+ *    两种机制各管一件事，不会在同一帧里互相把速度清零。
+ */
+export const OFFROAD = {
+  /** 路肩外多快开始吃惩罚（米）。留一点缓冲，别在路沿上就掉速。 */
+  GRACE: 1.5,
+  /** 从开始到吃满，额外走出去多远（米）。线性，不做悬崖。 */
+  RAMP: 6,
+  /** 吃满之后的极速系数。 */
+  FACTOR: 0.45,
+} as const;
+
+/**
+ * 路面系数：离中心线 `lateral` 米时，极速被压到原来的几倍。
+ *
+ * **导出来是为了让 `verify_offslow` 问真代码而不是问一份抄写**——
+ * 这个项目栽过好几次"判据里重算一遍公式"的跟头（见文件头 hash2d 那条），
+ * 而这一条如果只在回归里重算，回归就永远发现不了"实现改了、判据没改"。
+ */
+export function offRoadFactorFor(lateral: number): number {
+  const over = lateral - ROAD.TOTAL_HALF_WIDTH - OFFROAD.GRACE;
+  if (over <= 0) return 1;
+  return 1 - Math.min(over / OFFROAD.RAMP, 1) * (1 - OFFROAD.FACTOR);
+}
 
 /**
  * 机位。
@@ -102,6 +147,13 @@ export class Ride {
   private hasLastPos = false;
   private wheelAngle = 0;
   private boundaryIntensity = 0;
+  /**
+   * 当前路面系数：1 = 在路上，`OFFROAD.FACTOR` = 吃满离路惩罚。
+   * HUD 的「已偏离」与 `verify_offslow` 都读它。
+   */
+  private offRoadFactor = 1;
+  /** 本帧是否在路肩外。HUD 用它显示/隐藏提示，避免每帧比较浮点数。 */
+  private offRoadNow = false;
   private camPos = new Vector3();
   private camLook = new Vector3();
   private camInit = false;
@@ -173,12 +225,15 @@ export class Ride {
       horiz = this.touchDir.x;
     }
 
+    // 运动参数随载具变（自行车 / 滑板）。**读取发生在运动开始之前**，
+    // 所以切载具的那一帧用的还是旧参数 —— 速度与转向都连续，不会窜出去。
+    //
+    // 声明提到 `if` 外面：`applyOffRoad()` 也要用 `maxSpeed`，
+    // 而它跑在 `canMove` 为假的时候（那时速度被清零，但人还在路上）。
+    const tune = MODE_TUNE[this.vehicle.id];
     if (!this.canMove) {
       this.speed = 0;
     } else {
-      // 运动参数随载具变（自行车 / 滑板）。**读取发生在运动开始之前**，
-      // 所以切载具的那一帧用的还是旧参数 —— 速度与转向都连续，不会窜出去。
-      const tune = MODE_TUNE[this.vehicle.id];
       if (vert < -0.1) {
         this.speed = Math.min(this.speed + tune.accel * dt, tune.maxSpeed);
       } else if (vert > 0.1) {
@@ -207,9 +262,56 @@ export class Ride {
     this.position.addScaledVector(this._fwd, this.speed * dt);
 
     this.applyCollisions(dt);
+    this.applyOffRoad(dt, tune);
     this.position.y = this.groundHeight(this.position.x, this.position.z);
 
     this.wheelAngle += (this.speed * dt) / WORLD.WHEEL_RADIUS;
+  }
+
+  /**
+   * 路肩之外压极速。**每固步长调一次**，判据是路面高度查询本身
+   * （`getHeightAt` 在路面外返回 `-Infinity`）——它走 8m 一格的空间哈希，
+   * 比"每帧算到中心线的距离"便宜得多，所以先用它分流，
+   * 只有真的在路面外才去算横向距离。
+   *
+   * `offRoadFactor` 留给 HUD 与回归：1 = 在路上，0.45 = 吃满。
+   */
+  private applyOffRoad(_dt: number, tune: { maxSpeed: number }) {
+    const p = this.position;
+    if (Number.isFinite(this.road.getHeightAt(p.x, p.z))) {
+      this.offRoadFactor = 1;
+      this.offRoadNow = false;
+      return;
+    }
+    const lateral = this.lateralDistance(p.x, p.z);
+    const k = offRoadFactorFor(lateral);
+    if (k >= 1) {
+      this.offRoadFactor = 1;
+      this.offRoadNow = false;
+      return;
+    }
+    this.offRoadNow = true;
+    this.offRoadFactor = k;
+    const capF = tune.maxSpeed * k;
+    const capR = REVERSE_SPEED * k;
+    if (this.speed > capF) this.speed = capF;
+    else if (this.speed < -capR) this.speed = -capR;
+  }
+
+  /**
+   * 到中心线的横向距离（米）。
+   *
+   * 用 `nearestArcParam` 拿最近中心线**点**再量距离，而不是逐段算垂足：
+   * 中心线每 ~1.28m 一个点，所以这个近似最多偏 **0.64m**——对"要不要降速"
+   * 足够，而它换来的是一次走空间哈希的查询而不是 961 次投影。
+   *
+   * 8 字自交点附近会量到**另一支**的距离，于是偏大。偏大意味着多吃一点惩罚，
+   * 方向是安全的（不会让人在自交口白捡一路畅通），所以不做修正。
+   */
+  private lateralDistance(x: number, z: number): number {
+    const i = Math.round(nearestArcParam(x, z) * (CENTERLINE.length - 1));
+    const c = CENTERLINE[Math.min(Math.max(i, 0), CENTERLINE.length - 1)];
+    return Math.hypot(c.x - x, c.z - z);
   }
 
   /**
@@ -404,6 +506,16 @@ export class Ride {
 
   get boundary() {
     return this.boundaryIntensity;
+  }
+
+  /** 路面系数（1 = 在路上）。HUD 与回归读它。 */
+  get surfaceFactor() {
+    return this.offRoadFactor;
+  }
+
+  /** 路肩外（正在吃降速惩罚）。 */
+  get offRoad() {
+    return this.offRoadNow;
   }
 
   get forward(): Vector3 {

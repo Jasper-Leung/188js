@@ -23,20 +23,28 @@ import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency 
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
 import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
-import { Box3, BoxGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D } from 'three';
+import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
-import { Road } from '../world/road';
+// `ROAD` 这个名字在 `data/raw` 已经被路面网格数据占用了，
+// 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
+import { Road, ROAD as ROAD_GEOM } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { canRide, isInWorld } from '../game/phase';
+import { canRide, isInWorld, interactAt } from '../game/phase';
 import { RIDE } from '../data/raw';
-import { CAM_MODES, camParams } from '../world/ride';
-import { Vehicle, MODE_TUNE, RIDE_MODES, autoScaleToHeight } from '../world/vehicle';
-import { assertRide } from './ride';
+import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
+import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXLES, facingDir, motoLeanAt, bicycleScale, localUnion, type RideMode } from '../world/vehicle';import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
 import { PRESETS, clampTier } from '../core/settings';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
+
+/** 把角度差折进 (−π, π]。朝向判据要用：0 与 2π 是同一个方向。 */
+function wrapPi(a: number): number {
+  let x = (a + Math.PI) % (Math.PI * 2);
+  if (x < 0) x += Math.PI * 2;
+  return x - Math.PI;
+}
 
 export interface Check {
   name: string;
@@ -1271,12 +1279,28 @@ check('verify_controls', () => {
     probs.push('滑板与自行车的运动参数完全相同，切换就只剩换模型');
   }
 
+  // 5a. 摩托车也必须**真的不一样**。理由同上：它要是照抄自行车，
+  //     「切到摩托车」就只是个换模型的空动作。
+  asserts++;
+  const mt = MODE_TUNE.motorcycle;
+  if (mt.maxSpeed === bt.maxSpeed && mt.accel === bt.accel && mt.turn === bt.turn) {
+    probs.push('摩托车与自行车的运动参数完全相同，切换就只剩换模型');
+  }
+  asserts++;
+  if (!(mt.maxSpeed > bt.maxSpeed)) {
+    probs.push(`摩托车极速 ${mt.maxSpeed} 不大于自行车 ${bt.maxSpeed}，读作"换了个更慢的车"`);
+  }
+  asserts++;
+  if (!(mt.decel < bt.decel && mt.accel < bt.accel)) {
+    probs.push(`摩托车 加/减速度 ${mt.accel}/${mt.decel} 应都比自行车 ${bt.accel}/${bt.decel} 小（车更沉）`);
+  }
+
   // 5b. **默认必须是徒步**（用户要求：起始没有载具，只有角色）。
   //     写错的表现很隐蔽：玩家一进世界已经在骑车，而他自己不知道。
   asserts++;
   if (RIDE_MODES[0] !== 'foot') probs.push(`默认模式是 ${RIDE_MODES[0]}，应为 foot（起始没有载具）`);
   asserts++;
-  if (RIDE_MODES.length !== 3) probs.push(`模式有 ${RIDE_MODES.length} 种，应为 3（foot/bike/skate）`);
+  if (RIDE_MODES.length !== 4) probs.push(`模式有 ${RIDE_MODES.length} 种，应为 4（foot/bike/motorcycle/skate）`);
 
   // 5c. 缩放必须**算出来**，不能写死：模型是归一化到 1 单位的，
   //     换一批模型高度就变了，写死的数字会在下次换模型时悄悄失配。
@@ -1292,16 +1316,25 @@ check('verify_controls', () => {
   //    **默认模式是 foot**，所以"切失败之后仍是原来那个"要验的是 foot。
   asserts++;
   const v = new Vehicle();
-  v.attach({ bike: null, skate: null, char: null, clips: {} });
+  v.attach({ bike: null, motorcycle: null, skate: null, char: null, clips: {} });
   if (v.canEnter('skate')) probs.push('没有滑板模型却报告"可以进"');
   asserts++;
   if (v.set('skate')) probs.push('没有滑板模型却切成功了');
   asserts++;
   if (v.id !== 'foot') probs.push(`切换失败之后模式却是 ${v.id}，应为 foot`);
 
+  // 6b. 摩托车同理：**没模型就不给切**。3.4MB 的可选资产拉不到是常事，
+  //     而"按 E 切到一个看不见的车"比"不切"糟得多。
+  asserts++;
+  if (v.canEnter('motorcycle')) probs.push('没有摩托车模型却报告"可以进"');
+  asserts++;
+  if (v.set('motorcycle')) probs.push('没有摩托车模型却切成功了');
+  asserts++;
+  if (v.id !== 'foot') probs.push(`摩托车切换失败之后模式却是 ${v.id}，应为 foot`);
+
   // 7. 有了滑板之后能进，而且进得去出得来
   asserts++;
-  v.attach({ bike: new Object3D(), skate: new Object3D(), char: new Object3D(), clips: {} });
+  v.attach({ bike: new Object3D(), motorcycle: new Object3D(), skate: new Object3D(), char: new Object3D(), clips: {} });
   if (!v.canEnter('skate')) probs.push('有滑板模型却报告"不能进"');
   asserts++;
   if (v.id !== 'foot') probs.push('装上模型之后默认模式被改掉了');
@@ -1318,9 +1351,334 @@ check('verify_controls', () => {
   asserts++;
   if (v.id !== 'foot') probs.push('切回徒步之后 id 不对');
 
+  // 7b. 摩托车必须**进得去也出得来**，而且 cycle() 能转到它。
+  //     `cycle` 是 `E` 键走的路：它只认 `canEnter`，
+  //     所以"模型在但轮不到"是真实可能（枚举顺序写错就会这样）。
+  asserts++;
+  if (!v.canEnter('motorcycle')) probs.push('有摩托车模型却报告"不能进"');
+  asserts++;
+  if (!v.set('motorcycle')) probs.push('有摩托车模型却切不过去');
+  asserts++;
+  if (v.id !== 'motorcycle') probs.push(`切过去之后 id 是 ${v.id}，应为 motorcycle`);
+  asserts++;
+  if (!v.set('foot')) probs.push('从摩托车切回徒步失败');
+  asserts++;
+  if (v.id !== 'foot') probs.push(`从摩托车切回徒步之后 id 是 ${v.id}`);
+  asserts++;
+  {
+    // cycle() 从 foot 出发必须能走到 motorcycle：走一圈看它落在哪
+    const seen = new Set<RideMode>([v.id]);
+    for (let i = 0; i < RIDE_MODES.length; i++) {
+      const n = v.cycle();
+      if (!n) break;
+      seen.add(n);
+    }
+    if (!seen.has('motorcycle')) probs.push(`cycle() 转了一圈没经过 motorcycle（经过：${[...seen].join('/')}）`);
+    // 转完一圈必须回到起点，否则 E 键按几次之后就困在某个模式里了
+    asserts++;
+    if (v.id !== 'foot') probs.push(`cycle() 转了一圈之后停在 ${v.id}，应回到 foot`);
+  }
+
+  // 7c. 摩托车模式下**外加的角色必须藏起来**。
+  //     这个模型把骑手和车焊死了（Tripo 导出，0 骨骼 0 动画），
+  //     不藏的话画面上是两个骑手叠在一起。
+  asserts++;
+  {
+    const vc = new Vehicle();
+    const char = new Object3D();
+    char.name = 'char';
+    vc.attach({ bike: new Object3D(), motorcycle: new Object3D(), skate: new Object3D(), char, clips: {} });
+    vc.set('motorcycle');
+    asserts++;
+    if (char.visible) probs.push('摩托车模式下角色仍然可见，会与模型自带的骑手重叠');
+    vc.set('foot');
+    asserts++;
+    if (!char.visible) probs.push('切回徒步之后角色仍然不可见，人不见了');
+  }
+
   const summary =
     `模式 ${RIDE_MODES.join('/')}（默认 ${RIDE_MODES[0]}）· 机位 ${CAM_MODES.join('/')}（默认 ${CAM_MODES[0]}）· ` +
-    `自行车 ${bt.maxSpeed}m/s 保持源项目 · 滑板 ${st.maxSpeed}m/s`;
+    `自行车 ${bt.maxSpeed}m/s 保持源项目 · 摩托车 ${mt.maxSpeed}m/s · 滑板 ${st.maxSpeed}m/s`;
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+/**
+ * 徒步动画：**停住不播，移动才播，且朝向跟着走的方向**。
+ *
+ * ## 为什么必须单独一条，而不是并进 verify_controls
+ *
+ * 这两条都是**用户明确提的要求**，而原来那条断言里没有它们——
+ * 更要命的是，它们的失效**在所有其它断言里都是绿的**：
+ * 参数对、路对、经济对，只有"人站在原地抖腿"。
+ *
+ * ## 判据怎么量
+ *
+ * `update` 收的是 `(dt, speed, heading)`，而动画权重由速度驱动。
+ * 所以直接喂它几段速度，看 `footBlend` 的权重：
+ *
+ * · `speed = 0` 跑 2 秒 → walk/run 权重都必须是 **0**（待机不播）
+ * · `speed = 1.2`（走路）→ walk 权重应显著高于 run
+ * · `speed = 5`（跑步）→ run 权重应显著高于 walk
+ * · 回到 0 再跑 2 秒 → 权重必须**重新归零**（不是只降下来就停住）
+ *
+ * 朝向那条量 `char.rotation.y`：它必须等于 heading，
+ * 而**不能**是旧的 `heading + π/2`（那是"侧对路肩"的老行为）。
+ */
+check('verify_foot_anim', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const char = new Object3D();
+  // ★ 断言 1a/1b/1c 问的是「处理之后的片段」，所以这里必须给一副**真的骨架**
+  // 和**真的轨道**。用空 Object3D + 空轨的 clip 的话：
+  //   · `restPoseOf()` 量不到任何骨 ⇒ `bindMissingBones()` 无从补
+  //   · 根骨轨道根本不存在 ⇒ 「根骨还有没有水平位移」这一条永远绿
+  // 那样的断言不测任何东西。
+  const BONES = [
+    'mixamorig:Hips',
+    'mixamorig:Spine',
+    'mixamorig:LeftFoot',
+    'mixamorig:RightFoot',
+    'mixamorig:LeftToeBase',
+    'mixamorig:RightToeBase',
+  ];
+  for (const b of BONES) {
+    const bone = new Bone();
+    bone.name = b;
+    char.add(bone);
+  }
+
+  const times = new Float32Array([0, 0.5, 1]);
+  /** 一条位置轨道；`drift` 是水平方向的根位移（要断言它被抹成 0）。 */
+  const posTrack = (bone: string, drift: number) =>
+    new KeyframeTrack(
+      `${bone}.position`,
+      times,
+      Float32Array.from([0, 0, drift, 0, 0, drift, 0, 0, drift]),
+    );
+  /** 一条四元数轨道。三个轴一起转，用来凑满「每根骨都有归属」。 */
+  const quatTrack = (bone: string) => {
+    const n = times.length;
+    const v = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) v.set([0, 0, 0, 1], i * 4);
+    return new KeyframeTrack(`${bone}.quaternion`, times, v);
+  };
+  /** 移动三段：覆盖全部 6 根骨（含脚与分趾），并且带 3.2m 量级的根位移。 */
+  const fullClip = (name: string, dur: number) =>
+    new AnimationClip(name, dur, [
+      posTrack('mixamorig:Hips', 3.2),
+      ...BONES.slice(1).map((b) => quatTrack(b)),
+    ]);
+  /** 待机：按合片后的真实情况——**只覆盖 4 根，脚与分趾骨没有轨道**。 */
+  const idleClip = () =>
+    new AnimationClip('idle', 2, [
+      posTrack('mixamorig:Hips', 0),
+      quatTrack('mixamorig:Spine'),
+      quatTrack('mixamorig:LeftFoot'),
+      quatTrack('mixamorig:RightFoot'),
+    ]);
+
+  const v = new Vehicle();
+  v.attach({
+    bike: new Object3D(),
+    motorcycle: new Object3D(),
+    skate: new Object3D(),
+    char,
+    // 用**真的 clip 名**，因为 collectClips 是按名字挑的。
+    // `idle` 这一段是这一版人物模型才有的（`survivor_rigged_v2_fullanim.glb`
+    // 共 9 段：run · walk · 骑自行车 · clap · surf · dig · jump · idle · wait）。
+    clips: collectClips([
+      fullClip('run', 0.7),
+      fullClip('walk', 1.0),
+      fullClip('骑自行车', 1.0),
+      idleClip(),
+    ]),
+  });
+  v.set('foot');
+
+  const run = (speed: number, seconds: number, heading = 0) => {
+    const frames = Math.round(seconds * 60);
+    for (let i = 0; i < frames; i++) v.update(1 / 60, speed, heading);
+  };
+
+  // 1. 待机：**移动轨一帧都不许播，而且必须有东西接住**。
+  //    这是用户提的第一条要求，原来的实现是切过去就在原地跑步。
+  //
+  //    而「有东西接住」这半句是这一版才加的：上一版人物只有 3 段动画，
+  //    两条移动轨归零之后露出来的是 **bind pose**——张开双臂的站姿，
+  //    而那是游戏的第一帧。现在模型有 `idle`，站定时它必须接过权重。
+  asserts++;
+  run(0, 2);
+  {
+    const b = v.footBlend;
+    if (b.walk > 1e-6 || b.run > 1e-6) {
+      probs.push(`站着不动 2 秒后动画权重仍是 walk=${b.walk.toFixed(4)} run=${b.run.toFixed(4)}，应为 0`);
+    }
+  }
+  asserts++;
+  if (v.footIdleWeight < 0.99) {
+    probs.push(
+      `站定时 idle 权重是 ${v.footIdleWeight.toFixed(3)}，应为 1 —— 没有它就露出 bind pose（张开双臂）`,
+    );
+  }
+
+  // 1a. ★ **权重和必须恒为 1** —— 权重和不足 1 时，mixer 漏出来的那一份
+  //     就是 **bind pose**（张开双臂），所以"权重和 = 1"是这一族故障的
+  //     通用不变量。做法：待机权重 = `1 − walk − run`，**算出来而不是渐出来**。
+  //
+  // ⚠ **这条断言目前没有成功的红proof**。我试过把待机改回"阻尼渐入"，
+  //   它**照样绿**——因为 walk/run 与 idle 用同一个时间常数、目标互补，
+  //   指数上恰好抵消，和恒为 1。所以它防的是"将来有人改了阻尼常数或
+  //   改了目标而不自知"，**不是**已知某个具体成因的复现。
+  //   「松开方向键出现 T 字」的真正成因**尚未定位**。
+  asserts++;
+  {
+    let worst = 0;
+    let at = 0;
+    for (let step = 0; step < 180; step++) {
+      // 走 → 停 的过渡最容易漏：两条轨正在归零，待机正在接管
+      const sp = step < 90 ? 1.6 : 0;
+      v.update(1 / 60, sp, 0);
+      const sum = v.footBlend.walk + v.footBlend.run + v.footIdleWeight;
+      const dev = Math.abs(sum - 1);
+      if (dev > worst) {
+        worst = dev;
+        at = step;
+      }
+    }
+    if (worst > 1e-6) {
+      probs.push(`走→停过渡中权重和偏离 1 达 ${worst.toExponential(1)}（第 ${at} 帧）—— 漏出来的那份是 bind pose`);
+    }
+  }
+
+  // 1b. ★ **动画必须在原地播**：根骨的水平位移必须是 0。
+  //
+  // `walk` / `run` / `骑自行车` 都带根位移（来源项目实测约 3.2m，且位移在
+  // 骨架的祖先节点上）。不抹掉的话，动画把人往前拖、车把人往后拽，
+  // 停下的那一刻根节点弹回原位 —— 玩家看到的就是**「停止走动的时候
+  // 人就回来一段距离」**。
+  asserts++;
+  {
+    const clips = v.rideClips;
+    for (const [name, clip] of [
+      ['walk', clips.walk],
+      ['run', clips.run],
+      ['ride', clips.ride],
+      ['idle', clips.idle],
+    ] as [string, AnimationClip | undefined][]) {
+      if (!clip) {
+        probs.push(`缺 ${name} 片段`);
+        continue;
+      }
+      const rootTrack = clip.tracks.find(
+        (tr) => tr.name.endsWith('.position') && /(^|:)hips$/i.test(tr.name.slice(0, -'.position'.length)),
+      );
+      if (!rootTrack) {
+        probs.push(`${name} 里找不到根骨的 position 轨道`);
+        continue;
+      }
+      let maxX = 0;
+      let maxZ = 0;
+      for (let i = 0; i < rootTrack.values.length; i += 3) {
+        maxX = Math.max(maxX, Math.abs(rootTrack.values[i]));
+        maxZ = Math.max(maxZ, Math.abs(rootTrack.values[i + 2]));
+      }
+      if (maxX > 1e-6 || maxZ > 1e-6) {
+        probs.push(`${name} 的根骨仍有水平位移（x ${maxX.toFixed(3)} / z ${maxZ.toFixed(3)}），动画会拖着人走`);
+      }
+    }
+  }
+
+  // 1c. ★ **idle 必须覆盖每一根骨**（含脚 / 分趾骨）。
+  //
+  // 合片时新片段只覆盖它自己有的 65 根（实测 195 条通道，而原有三段是 258 = 86 根），
+  // 剩下 21 根没有任何轨道。`bindMissingBones()` 给它们补常量轨道，
+  // 于是 idle 从此「每根骨都有归属」，权重和不足 1 时也没有脚可漏。
+  asserts++;
+  {
+    const idle = v.rideClips.idle;
+    if (idle) {
+      const bound = new Set(idle.tracks.map((t) => t.name.split('.')[0]));
+      const feet = ['LeftFoot', 'RightFoot', 'LeftToeBase', 'RightToeBase'];
+      const missing = feet.filter((f) => ![...bound].some((b) => b.endsWith(f)));
+      if (missing.length) {
+        probs.push(`idle 没有绑定脚部骨骼：${missing.join('、')}`);
+      }
+    }
+  }
+
+  // 2. 走路：walk 权重应明显高于 run
+  asserts++;
+  run(1.2, 3);
+  {
+    const b = v.footBlend;
+    if (!(b.walk > 0.8 && b.run < 0.2)) {
+      probs.push(`以 1.2 m/s 走 3 秒后权重 walk=${b.walk.toFixed(3)} run=${b.run.toFixed(3)}，应以走为主`);
+    }
+  }
+
+  // 3. 跑步：run 权重应明显高于 walk
+  asserts++;
+  run(5, 3);
+  {
+    const b = v.footBlend;
+    if (!(b.run > 0.8 && b.walk < 0.2)) {
+      probs.push(`以 5 m/s 跑 3 秒后权重 walk=${b.walk.toFixed(3)} run=${b.run.toFixed(3)}，应以跑为主`);
+    }
+  }
+
+  // 4. **停下之后权重必须重新归零**。
+  //    只验第 1 条是不够的：切到徒步那一刻本来就是权重 0，
+  //    而"跑过一段再停"这条路径能漏掉"权重卡在残值上不再下降"的实现。
+  asserts++;
+  run(0, 4);
+  {
+    const b = v.footBlend;
+    if (b.walk > 1e-6 || b.run > 1e-6) {
+      probs.push(`跑完停下 4 秒后权重仍是 walk=${b.walk.toFixed(4)} run=${b.run.toFixed(4)}，未归零`);
+    }
+  }
+
+  // 5. 朝向：徒步时角色必须**朝着自己走的方向**。
+  //    原来是 `heading + π/2`（侧对路肩），用户要求方向与行走方向一致。
+  asserts++;
+  for (const h of [0, 0.7, -1.3, 2.4, Math.PI]) {
+    run(1.5, 0.5, h);
+    // ★ 期望值是 heading **+ CHAR_FACING_YAW**，不是 heading。
+    //   人物模型正面朝 +Z、车头约定是 -Z，差 180°。原来的判据写的是
+    //   char.rotation.y - h —— **它把 bug 写进了判据**，所以代码和判据
+    //   一起错、一起绿：实机上人一直是倒着走的。
+    const diff = Math.abs(wrapPi(char.rotation.y - (h + CHAR_FACING_YAW)));
+    if (diff > 1e-6) {
+      probs.push(`heading=${h.toFixed(2)} 时角色朝向是 ${char.rotation.y.toFixed(3)}，差 ${(diff * 57.3).toFixed(1)}°`);
+    }
+  }
+
+  // 6. 滑板也要朝前进方向（同一个 bug 的另一半）
+  asserts++;
+  v.set('skate');
+  for (const h of [0.5, -0.9, 2.0]) {
+    run(2, 0.3, h);
+    // ★ 期望值是 heading **+ CHAR_FACING_YAW**，不是 heading。
+    //   人物模型正面朝 +Z、车头约定是 -Z，差 180°。原来的判据写的是
+    //   char.rotation.y - h —— **它把 bug 写进了判据**，所以代码和判据
+    //   一起错、一起绿：实机上人一直是倒着走的。
+    const diff = Math.abs(wrapPi(char.rotation.y - (h + CHAR_FACING_YAW)));
+    if (diff > 1e-6) {
+      probs.push(`滑板 heading=${h.toFixed(2)} 时角色朝向差 ${(diff * 57.3).toFixed(1)}°`);
+    }
+  }
+
+  run(1.2, 3);
+  const walkMoving = v.footBlend.walk;
+  // 存一份**站定**时的实测值给 detail 用。**不能现读**：
+  // 上面第 2~4 条会把人跑起来，那时 idle 合法地是 0，
+  // 现读出来的数字会写成 "idle=0.00" —— 一句和它所在那一刻的真实状态
+  // 不符的话，下一个读的人会以为待机没接上。
+  run(0, 2);
+  const idleStanding = v.footIdleWeight;
+
+  const summary = `站定 walk/run=0 且 idle=${idleStanding.toFixed(2)} · 走 walk ${walkMoving.toFixed(2)} · 朝向 = heading + π（人物正面朝 +Z）`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -1834,6 +2192,516 @@ check('verify_phase', () => {
 check('verify_ride', () => {
   const r = assertRide();
   return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+});
+
+/**
+ * ## 载具的标定必须**可重复**
+ *
+ * 两条都是实机抓出来的，而且都属于"第一次切换是对的、第二次开始错"那一族：
+ *
+ * 1. **缩放会漂。** `scaleByFrontWheel()` 原来用 `Box3.setFromObject()`——
+ *    那是**世界**盒子，而 `rebuild()` 里 `group.clear()` 之后模型的
+ *    `scale` 还留着上一轮的值。于是第二次量到的是**已经缩放过一遍的盒子**，
+ *    返回 1，车缩成 56%。`bicycle.glb` 实测 1.798 → 掉到 1。
+ * 2. **车把枢轴落错地方。** 同一个世界盒子被当成 `pivot.position` 喂进去
+ *    （pivot 是子节点、坐标是本地的），车把一转就把**前轮甩出去**。
+ *
+ * 判据是**做两遍**：同一个模型挂两次、量两次，两个数必须一样。
+ * 一遍看不出这类 bug——它只在"第二次"才发作。
+ */
+check('verify_calib', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  /**
+   * 造一个「前轮 + 车架 + 车把」的小模型，尺寸按 `bicycle_clean.glb` 的比例
+   * （轮半径 0.1947、车架 0.98 长）。轮子**带自己的节点平移**，
+   * 所以世界盒子与本地盒子的差别是真实存在的，不是造出来的。
+   */
+  const buildBike = () => {
+    const root = new Group();
+    const wheelGeo = new CylinderGeometry(0.09, 0.09, 0.05, 16);
+    wheelGeo.rotateX(Math.PI / 2); // 轮面在 YZ 平面 → 轴是本地 X
+    const frameGeo = new BoxGeometry(0.98, 0.12, 0.12);
+    const front = new Mesh(wheelGeo);
+    front.name = 'tripo_part_0';
+    front.position.set(-0.311, 0.195, 0.0);
+    const rear = new Mesh(wheelGeo.clone());
+    rear.name = 'tripo_part_2';
+    rear.position.set(0.287, 0.195, 0.0);
+    const frame = new Mesh(frameGeo);
+    frame.name = 'frame';
+    frame.position.set(0, 0.3, 0);
+    for (const m of [front, rear, frame]) root.add(m);
+    return root;
+  };
+
+  // 1. 缩放可重复：挂一次、挂两次，两次必须给出同一个数
+  asserts++;
+  {
+    const root = buildBike();
+    const a = bicycleScale(root);
+    // 模拟 rebuild()：只把模型摘下来，**不动它的 scale**
+    root.scale.setScalar(a);
+    const b = bicycleScale(root);
+    if (Math.abs(a - b) > 1e-9) {
+      probs.push(`缩放不可重复：第一次 ${a.toFixed(4)}，第二次 ${b.toFixed(4)}`);
+    }
+    asserts++;
+    // 圆柱半径 0.09 ⇒ 竖直跨度 0.18 ⇒ 半径 0.09；0.35 / 0.09 = 3.889
+    if (Math.abs(a - 0.35 / 0.09) > 0.01) {
+      probs.push(`自行车缩放 ${a.toFixed(4)}，按轮半径 0.09 应为 ${(0.35 / 0.09).toFixed(4)}`);
+    }
+  }
+
+  // 2. 缩放必须与「模型已经缩放过」无关：量的是**本地**盒子
+  asserts++;
+  {
+    const root = buildBike();
+    const before = bicycleScale(root);
+    root.scale.setScalar(3.7); // 随便一个已经缩过的状态
+    const after = bicycleScale(root);
+    asserts++;
+    if (Math.abs(before - after) > 1e-9) {
+      probs.push(`缩放依赖模型当前的 scale（${before.toFixed(4)} vs ${after.toFixed(4)}）——量的是世界盒子`);
+    }
+  }
+
+  // 3. 车把枢轴必须落在**前轮轴心**上
+  asserts++;
+  {
+    const root = buildBike();
+    root.position.set(-14, 0, 77); // 模拟 ride 位：世界坐标远不等于本地
+    root.updateMatrixWorld(true);
+    const frontLocal = localUnion(root, ['tripo_part_0']);
+    asserts++;
+    if (frontLocal.isEmpty()) {
+      probs.push('量不到前轮包围盒');
+    } else {
+      const c = frontLocal.getCenter(new Vector3());
+      asserts++;
+      if (Math.abs(c.x - (-0.311)) > 0.02 || Math.abs(c.y - 0.195) > 0.02 || Math.abs(c.z) > 0.02) {
+        probs.push(
+          `前轮轴心量成了 (${c.x.toFixed(3)}, ${c.y.toFixed(3)}, ${c.z.toFixed(3)})，应为 (-0.311, 0.195, 0)`,
+        );
+      }
+    }
+  }
+
+  return {
+    ok: probs.length === 0,
+    detail: probs.length === 0 ? '缩放可重复且与当前 scale 无关 · 前轮轴心在本地空间量对' : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
+ * ## 三个载具的前方必须是**同一个方向**
+ *
+ * 这一条是被实机抓出来的：人物**倒着走**——玩家从背后看到的是他的脸。
+ *
+ * 之所以没有任何断言发现，是因为三个 `rotation.y` 是**三处各自独立的常数**：
+ * 人物的 `heading + CHAR_FACING_YAW`、自行车的 `BICYCLE_YAW`、
+ * 摩托车的 `MOTORCYCLE_YAW`。代码里没有任何东西把它们联系起来，
+ * 所以「人正着走、车却横着跑」既不产生错误、也不改变任何被量的量
+ * （速度、离地、面数、离路判定全都正常）。
+ *
+ * 判据是**算的**而不是看的：把每个模型的车头（本地空间，实测自轮子节点平移）
+ * 加上它自己的偏航，算出世界前进方向，三个都必须是 `(0, 0, −1)`。
+ *
+ * ## 它会红的方式
+ *
+ * · 把 `CHAR_FACING_YAW` 去掉 → 人物算成 +Z，红
+ * · 把 `BICYCLE_YAW` 写成 +90° → 自行车算成 +Z，红
+ * · 把 `MODEL_HEADS.bicycle` 写成 +X → 自行车算成 +Z，红
+ */
+check('verify_facing', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  // 本作的车头约定（ride.ts 的 _fwd 在 h=0 时指向 −Z）
+  const FWD: readonly [number, number, number] = [0, 0, -1];
+
+  const rows: [string, readonly number[], number][] = [
+    ['人物', MODEL_HEADS.char, CHAR_FACING_YAW],
+    ['自行车', MODEL_HEADS.bicycle, BICYCLE_YAW],
+    ['摩托车', MODEL_HEADS.motorcycle, MOTORCYCLE_YAW],
+  ];
+
+  for (const [name, head, yaw] of rows) {
+    asserts++;
+    const d = facingDir(head, yaw);
+    // 偏航是绕 Y 的，所以 y 分量恒为 0；只看水平面内的两个分量。
+    const err = Math.hypot(d[0] - FWD[0], d[2] - FWD[2]);
+    if (err > 1e-6) {
+      probs.push(
+        `${name}的车头算出来是 (${d.map((v) => v.toFixed(3)).join(', ')})，应为 (0, 0, -1)`,
+      );
+    }
+  }
+
+  // 三者必须**彼此**一致，而不只是各自都"看着对"——
+  // 万一有人把约定整体改成 +Z，这条会红而上面三条不会。
+  asserts++;
+  const dirs = rows.map(([, head, yaw]) => facingDir(head, yaw));
+  for (let i = 1; i < dirs.length; i++) {
+    const e = Math.hypot(dirs[i][0] - dirs[0][0], dirs[i][2] - dirs[0][2]);
+    if (e > 1e-6) probs.push(`${rows[i][0]}与${rows[0][0]}的前方不一致`);
+  }
+
+  // 车头单位向量归一化：忘了归一化的话方向对、长度不对，
+  // 而"长度"在代码里没有任何地方用到，所以不会有人发现。
+  asserts++;
+  for (const [name, head] of rows) {
+    const len = Math.hypot(head[0], head[2]);
+    if (Math.abs(len - 1) > 1e-6) probs.push(`${name}的车头向量长度是 ${len.toFixed(4)}，应为 1`);
+  }
+
+  // ★ **轮子自转轴必须平行于水平面**（y 分量恒为 0）。
+  //
+  // 偏航是绕 Y 的，所以它不会动任何东西的"水平性"；真正会弄歪轴的是
+  // **左右倾角**。而倾角只在静止时非零，轮子也只在移动时转——
+  // 这两件事叠起来，轴在自转时恒为水平。少任何一半都不成立。
+  asserts++;
+  const axles: [string, readonly number[], number][] = [
+    ['自行车', MODEL_AXLES.bicycle, BICYCLE_YAW],
+    ['摩托车', MODEL_AXLES.motorcycle, MOTORCYCLE_YAW],
+  ];
+  for (const [name, axle, yaw] of axles) {
+    const c = Math.cos(yaw);
+    const s = Math.sin(yaw);
+    // 绕 Y 转 θ：(x,0,z) → (x·cosθ + z·sinθ, 0, −x·sinθ + z·cosθ)
+    const ax = axle[0] * c + axle[2] * s;
+    const az = -axle[0] * s + axle[2] * c;
+    // y 分量在纯偏航下恒为 0，所以这条实际是在钉"偏航必须是纯 Y"这件事
+    if (Math.abs(ax) > 1e-9 && Math.abs(az) > 1e-9 && Math.hypot(ax, az) < 0.5) {
+      probs.push(`${name}的自转轴偏航后指向 (${ax.toFixed(3)}, 0, ${az.toFixed(3)})，它不该指向车头方向`);
+    }
+  }
+
+  // ★ 移动时倾角必须是 0（否则轮子会转成椭圆）
+  asserts++;
+  for (const sp of [1, 5, 15, 24]) {
+    if (motoLeanAt(sp) !== 0) {
+      probs.push(`${sp} m/s 时摩托车仍有 ${motoLeanAt(sp).toFixed(3)} rad 倾角，轮子会转成椭圆`);
+    }
+  }
+  asserts++;
+  if (motoLeanAt(0) === 0) probs.push('静止时摩托车没有侧倾，停着看起来是扶正的');
+  asserts++;
+  if (motoLeanAt(0) >= 0) probs.push('侧倾方向为正 —— 侧撑在车的左边，符号反了就是往右倒');
+
+  return {
+    ok: probs.length === 0,
+    detail:
+      probs.length === 0
+        ? `人物 +π / 自行车 −90° / 摩托车 +180° → 三者同为 (0, 0, −1)`
+        : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
+ * ## 可达性：**玩家够不够得着**
+ *
+ * 这一族 bug 的共同点是：数据全对、算术全对、面板建好了、按钮建好了，
+ * 而**玩家走不到**。三个已发生的成员：
+ *
+ * | 现象 | 量的是什么 | 没量的是什么 |
+ * |---|---|---|
+ * | `bottomOf()` 跨步读交错属性 | 布了多少株 | 画了几次 |
+ * | 角色横向偏移 2.6m | 速度与离地 | 在不在视野里 |
+ * | **三间铺子打不开** | 全清 799 / 全购 1010 / 缺口 211 | **玩家能不能花** |
+ *
+ * 第三条最贵：`SHOP_AT_STATION`、`ShopPanel.open()`、`state.buy()`、
+ * `nearby.shopName` 全都活着，**只有 `tryCheckIn()` 少了一个分支**，
+ * 于是 10 件商品、明信片的四样材料、灯笼/香囊/清心茶三条机制
+ * 一次性全部不可达，而 25 条回归全绿。
+ *
+ * 所以判定问的是**枚举**，不是抽查：16 座驿站 × 两种目标，
+ * 逐个问 `interactAt()`「在这一站按确认会发生什么」，
+ * 答案必须和 `SHOP_AT_STATION` / `FRAGMENT_SLOT_STATION_IDX` 对得上。
+ *
+ * ## 它会红的方式
+ *
+ * · 从 `interactAt()` 删掉 `if (i.shopName) return 'shop'` → 第 1 条红
+ * · 把 `home` 排在 `shop` 前面且不加 `objectiveReturn` 条件 → 第 3 条红
+ * · 把 `reach` 写成 `Infinity` → 第 4 条红
+ * · 删掉 `busy` 那一行 → 第 5 条红
+ * · 修铺子时手滑改掉 `hasFragment && needsVisit` → 第 6 条红
+ */
+check('verify_reach', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const g = new GameStateManager();
+  const reach = WORLD.STATION_PASS_RADIUS + ROAD_GEOM.TOTAL_HALF_WIDTH;
+
+  /** 站在 idx 号驿站门口按确认。`ret` = 当前目标是不是「回十八驿」。 */
+  const at = (idx: number, ret: boolean, dist = 0, busy = false) =>
+    interactAt({
+      shopName: g.shopAtStation(idx),
+      isHome: idx === GameStateManager.HOME_STATION && ret,
+      objectiveReturn: ret,
+      hasFragment: STATIONS[idx].hasFragment,
+      needsVisit: g.fragmentStationNeedsVisit(idx),
+      distance: dist,
+      reach,
+      busy,
+    });
+
+  // 1. 每一间登记在案的铺子，按确认都必须真的开铺子
+  const shopIdx = Object.keys(SHOPS.SHOP_AT_STATION).map(Number);
+  asserts++;
+  if (shopIdx.length === 0) probs.push('一间铺子都没登记，玩家无处花钱');
+  for (const idx of shopIdx) {
+    const k = at(idx, false);
+    asserts++;
+    if (k !== 'shop') {
+      probs.push(`${idx} 号驿站挂着铺子「${g.shopAtStation(idx)}」，按确认却得到 ${k}——铺子不可达`);
+    }
+  }
+
+  // 2. 铺子里真的有货，且**明信片四样材料 + 三件玩法道具**都 somewhere 有卖
+  asserts++;
+  for (const idx of shopIdx) {
+    const name = g.shopAtStation(idx);
+    asserts++;
+    if (g.goodsForShop(name).length === 0) probs.push(`铺子「${name}」一件商品都没有`);
+  }
+  const grants = new Set(SHOPS.GOODS.map((x) => x.grant).filter(Boolean) as string[]);
+  asserts++;
+  for (const need of [
+    'postcard_tier',
+    'paper_up',
+    'ink_up',
+    'has_envelope',
+    'has_seal',
+    'vision_up',
+    'vision_half_penalty',
+    'mood_up',
+  ]) {
+    asserts++;
+    if (!grants.has(need)) probs.push(`没有任何商品提供 ${need}——这条机制玩家拿不到`);
+  }
+
+  // 3. 收尾那一趟，**家必须赢过铺子**。0 号驿站既是十八驿又有驿铺；
+  //    反过来的话第一章永远完不成，而那是整个游戏的终点。
+  asserts++;
+  if (at(GameStateManager.HOME_STATION, true) !== 'home') {
+    probs.push('集齐五件之后站在十八驿门口，按确认没有得到「回家」——第一章收不了尾');
+  }
+  asserts++;
+  if (at(GameStateManager.HOME_STATION, false) !== 'shop') {
+    probs.push('还没收齐时站在十八驿门口，按确认没有开铺子——驿铺（明信片材料全在这儿）够不着');
+  }
+
+  // 4. 距离门槛：刚够不着时必须是 none。防止有人把 reach 写成 Infinity，
+  //    于是隔着半张地图弹出铺子面板。
+  asserts++;
+  for (const idx of shopIdx) {
+    const k = at(idx, false, reach + 0.5);
+    asserts++;
+    if (k !== 'none') probs.push(`${idx} 号驿站在够不着的距离上（${reach + 0.5}m）仍返回 ${k}`);
+  }
+
+  // 5. 打卡过场 / 对白进行中不抢。镜头在动的时候弹一个模态面板，
+  //    玩家会以为卡住了。
+  asserts++;
+  for (const idx of shopIdx) {
+    const k = at(idx, false, 0, true);
+    asserts++;
+    if (k !== 'none') probs.push(`${idx} 号驿站在打卡过场进行中仍返回 ${k}，会盖住过场`);
+  }
+
+  // 6. 反向：修铺子不能把打卡砸了。五座碎片站、还欠到访时必须是 checkin。
+  asserts++;
+  for (const idx of ROAD.FRAGMENT_SLOT_STATION_IDX) {
+    const k = at(idx, false);
+    asserts++;
+    if (k !== 'checkin') probs.push(`${idx} 号碎片驿站按确认得到 ${k}，应为 checkin`);
+  }
+
+  // 7. 既没有铺子又没有碎片债的驿站，按确认理应什么都不发生——
+  //    这一条钉住的是"别为了让圈常亮就把 none 变成 checkin"。
+  asserts++;
+  let idle = 0;
+  for (let idx = 0; idx < STATIONS.length; idx++) {
+    if (g.shopAtStation(idx)) continue;
+    if (STATIONS[idx].hasFragment) continue;
+    if (at(idx, false) !== 'none') probs.push(`${idx} 号驿站既无铺子也无碎片债，按确认却得到 ${at(idx, false)}`);
+    idle++;
+  }
+  asserts++;
+  if (idle === 0) probs.push('16 座驿站里没有一座是"路过就行"的——路过的驿站失去了存在理由');
+
+  const shops = shopIdx.map((i) => `${i}:${g.shopAtStation(i)}`).join(' ');
+  return {
+    ok: probs.length === 0,
+    detail:
+      probs.length === 0
+        ? `${shopIdx.length} 间铺子全部可达（${shops}）· ${ROAD.FRAGMENT_SLOT_STATION_IDX.length} 座碎片站仍可打卡 · ${idle} 座路过站保持 none`
+        : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
+ * ## 玩家角色必须**在画面里**
+ *
+ * 这一条守的是一个已经真实发生过的静默故障：徒步（**默认模式**）把角色
+ * 摆在 ride 位侧向 `2.6m`（当时的 `PARKED_OFFSET`，注释写的是"载具停下时
+ * 停在路边的偏移"——它挂错了模式）。而默认机位 `forward` 的横向偏移是 0，
+ * 相机锁在正后方 3.2m，于是偏轴角 = `atan(2.6/3.2)` = **39.1°**。
+ *
+ * 竖屏（画幅 0.80）实测横向 FOV 只有 71.6°，半宽 35.8°——**人整个在画面外**。
+ * 横屏也只是贴在右边缘 2/3 处。更糟的是 foot 模式下自行车是隐藏的
+ * （`bike.visible = mode === 'bike'`），所以"人站在停着的车旁边"这个画面
+ * 连车都没有。
+ *
+ * 为什么别的判据抓不到：`verify_ride` 量速度与离地，`verify_veg_ground` 量
+ * 植被落地，`verify_veg_density` 量株数——**没有一条量"角色在不在视野里"**。
+ * 它们全绿，而玩家看不见自己。
+ *
+ * ## 它会红的方式
+ *
+ * 把 `FOOT_LATERAL_OFFSET` 改回 2.6 → 第 1 条红。
+ * 把 `CAM.forward.side` 改成 0.8 → 第 3 条红（那会让"偏移 0"也不再等于"居中"）。
+ * 把 `FOV_MIN_HORIZONTAL` 调小 → 第 4 条红。
+ */
+check('verify_avatar', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 1. 徒步模式的横向偏移必须是 0
+  asserts++;
+  if (FOOT_LATERAL_OFFSET !== 0) {
+    probs.push(`徒步模式角色横向偏移 ${FOOT_LATERAL_OFFSET}m，应为 0（挂在 foot 上就不是"停放"）`);
+  }
+
+  // 2. 默认机位的横向偏移必须是 0 —— "角色偏移 0" 只有在"相机也偏移 0"时
+  //    才等于"角色在画面正中"。这两条要一起看。
+  asserts++;
+  if (Math.abs(camParams('forward').side) > 1e-9) {
+    probs.push(`forward 机位横向偏移 ${camParams('forward').side}，角色在正中这条判据就不成立`);
+  }
+
+  // 3. 偏轴角必须小于**所有画幅下最窄的横向半视场**。
+  //    取 min 而不是取 16:9：竖屏才是出事的那一档，而它是这条判据存在的理由。
+  asserts++;
+  const back = camParams('forward').back;
+  const offAxis = (Math.atan(Math.abs(FOOT_LATERAL_OFFSET) / back) * 180) / Math.PI;
+  let minHalfH = Infinity;
+  let minAt = 0;
+  for (const aspect of [0.5, 0.62, 0.75, 0.8, 1.0, 1.33, 1.78, 2.0, 2.4]) {
+    const h = horizontalFromVertical(verticalFovForAspect(aspect), aspect);
+    const half = h / 2;
+    if (half < minHalfH) {
+      minHalfH = half;
+      minAt = aspect;
+    }
+  }
+  // 留 10% 余量：角色有宽度，而边缘上人眼对"贴边"的容忍度远低于对"出画"的判断
+  asserts++;
+  if (offAxis > minHalfH * 0.9) {
+    probs.push(
+      `角色偏轴 ${offAxis.toFixed(1)}°，超过最窄画幅（${minAt}）横向半视场 ${minHalfH.toFixed(1)}° 的 90%`,
+    );
+  }
+
+  // 4. 横向视野本身不许被压到"看不见自己"的程度。
+  //    FOV_MIN_HORIZONTAL 是 `fov.ts` 的补宽下限，改它要有人知道后果。
+  asserts++;
+  if (FOV_MIN_HORIZONTAL < 60) {
+    probs.push(`横向视野下限 ${FOV_MIN_HORIZONTAL}° 过窄，窄画幅下角色会贴边甚至出画`);
+  }
+
+  return {
+    ok: probs.length === 0,
+    detail:
+      probs.length === 0
+        ? `偏轴 ${offAxis.toFixed(1)}° < 最窄横向半视场 ${minHalfH.toFixed(1)}°（画幅 ${minAt}）`
+        : probs.join('；'),
+    asserts,
+  };
+});
+
+/**
+ * ## 路线外必须降速
+ *
+ * 实测：按住 W 不打方向，**2 秒**就离路（`off` 0 → 4.3m，`road=n`），
+ * 而离路是**零后果**的——`onRoad()` 只被探针读，从没进过运动学。
+ * 离路之后相机钻进树冠（最近的植被块距玩家 0.5m、尺寸 45×60×45m），
+ * 整屏是没有地平线的绿色多边形。玩家察觉不到自己已经偏了。
+ *
+ * ## 为什么要单独一条，而不是并进 verify_ride
+ *
+ * `verify_ride` 量的是"满油 1s 到多少 m/s"——那是**在路上**的加速曲线。
+ * 离路降速是一条**只在路面之外才存在**的规则，它在环线中心的采样点上
+ * 永远取不到值。所以它必须有一条自己的判据，而且必须问
+ * `offRoadFactorFor()` 这个真函数，而不是在回归里重抄一遍公式。
+ */
+check('verify_offslow', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const half = ROAD_GEOM.TOTAL_HALF_WIDTH;
+
+  // 1. 系数必须真的小于 1，否则"降速"是空动作
+  asserts++;
+  if (!(OFFROAD.FACTOR < 1)) probs.push(`离路系数 ${OFFROAD.FACTOR}，应小于 1`);
+
+  // 2. 上限（路肩 + 缓冲）之内不许惩罚，否则在路沿上就会掉速
+  asserts++;
+  if (offRoadFactorFor(half) !== 1) probs.push(`路肩上（${half}m）就开始降速了`);
+  asserts++;
+  if (offRoadFactorFor(half + OFFROAD.GRACE) !== 1) {
+    probs.push(`路肩 +${OFFROAD.GRACE}m 缓冲处仍在降速，玩家在路面上会被无故拖慢`);
+  }
+
+  // 3. 必须单调下降，且一路降到 FACTOR（不能中途变平、也不能反弹）
+  asserts++;
+  let prev = 1;
+  let monotonic = true;
+  for (let d = 0; d <= OFFROAD.RAMP * 2; d += 0.25) {
+    const f = offRoadFactorFor(half + OFFROAD.GRACE + d);
+    if (f > prev + 1e-9) monotonic = false;
+    prev = f;
+  }
+  if (!monotonic) probs.push('离路系数不是单调下降的（有一段反而变快）');
+
+  // 4. 吃满之后必须正好等于 FACTOR
+  asserts++;
+  const full = offRoadFactorFor(half + OFFROAD.GRACE + OFFROAD.RAMP);
+  if (Math.abs(full - OFFROAD.FACTOR) > 1e-9) {
+    probs.push(`离路 ${OFFROAD.RAMP}m 处系数是 ${full.toFixed(3)}，应为 ${OFFROAD.FACTOR}`);
+  }
+
+  // 5. 吃满之后极速必须**真的低于**在路上的极速，且仍然为正（不能把车锁死）
+  asserts++;
+  for (const m of RIDE_MODES) {
+    const tune = MODE_TUNE[m];
+    const capped = tune.maxSpeed * full;
+    if (!(capped < tune.maxSpeed)) {
+      probs.push(`${m} 离路极速 ${capped.toFixed(2)} 未低于路上 ${tune.maxSpeed}`);
+    }
+    asserts++;
+    if (capped <= 1.0) {
+      probs.push(`${m} 离路极速只有 ${capped.toFixed(2)}m/s，等于把车锁在草地里开不回来`);
+    }
+  }
+
+  // 6. 倒车也必须一起压，否则"倒着走比正着走快"
+  asserts++;
+  if (!(RIDE.REVERSE_SPEED * full < RIDE.REVERSE_SPEED)) {
+    probs.push('离路时倒车速度没有被压低');
+  }
+
+  return {
+    ok: probs.length === 0,
+    detail:
+      probs.length === 0
+        ? `路肩上不罚 / +${OFFROAD.GRACE}m 起罚 / +${OFFROAD.RAMP}m 降到 ${OFFROAD.FACTOR}× · 单调`
+        : probs.join('；'),
+    asserts,
+  };
 });
 
 // ---------------------------------------------------------------- 跑
