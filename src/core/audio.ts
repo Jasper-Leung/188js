@@ -33,6 +33,14 @@ export type BusName = 'bgm' | 'sfx' | 'ambient';
 
 const AUDIO_BASE = 'audio/';
 
+/**
+ * 拉取失败后的冷却。冷却期内同一 url 直接判负，**不再发请求**。
+ *
+ * 定 6 秒：短到"网络抖一下、环境声晚十几秒才回来"不至于被永久放弃，
+ * 长到风暴期间（每帧一次）实际请求数被压到 6 秒一条。
+ */
+const FAIL_COOLDOWN_MS = 6000;
+
 /** 一次性音效名白名单。`sfx()` 拿它挡掉不存在的名字。 */
 const SFX_NAMES = [
   'collect', 'open', 'export', 'synthesis',
@@ -54,6 +62,12 @@ export class AudioSystem {
   private buses: Record<BusName, GainNode> | null = null;
   private buffers = new Map<string, AudioBuffer>();
   private layers = new Map<string, Layer>();
+  /** 在途的 buffer 请求，见 {@link getBuffer} */
+  private pending = new Map<string, Promise<AudioBuffer | null>>();
+  /** 在途的建层请求，见 {@link getLayer} */
+  private layerPending = new Map<string, Promise<Layer | null>>();
+  /** 拉取失败的 url → 冷却到期的时间戳，见 {@link getBuffer} */
+  private failed = new Map<string, number>();
   private unlocked = false;
 
   bgmMuted = false;
@@ -103,36 +117,78 @@ export class AudioSystem {
   }
 
   // ---------------------------------------------------------------- buffer
+  /**
+   * 取一个已解码的 buffer。**在途去重 + 失败冷却**是这个函数存在的全部意义。
+   *
+   * 它的调用方是每帧都跑的 {@link setAmbient}，而它原来是"解码成功才写缓存"：
+   * 在途的请求不记账、失败的请求不记账。于是只要网络比一帧慢（线上 CDN、
+   * 弱网、任何一个 30ms 以上的往返），下一帧就会再发一条**同 url** 的请求。
+   * 60fps 下那是每秒 60 条、永不停歇，浏览器把连接与加载器耗尽后报
+   * `ERR_INSUFFICIENT_RESOURCES`；同一源上的 `.glb` 被挤到队尾取不到，
+   * 于是树、房子、摩托车一起消失。
+   *
+   * 所以这里发请求之前先问两件事：这条 url 有没有已经在飞、它是不是刚失败过。
+   * 前者让 N 个并发调用共享一条请求，后者让风暴期间的实际请求数降到
+   * {@link FAIL_COOLDOWN_MS} 一条。
+   */
   private async getBuffer(url: string): Promise<AudioBuffer | null> {
     if (!this.ctx) return null;
     const hit = this.buffers.get(url);
     if (hit) return hit;
-    try {
-      const res = await fetch(AUDIO_BASE + url);
-      if (!res.ok) return null;
-      const raw = await res.arrayBuffer();
-      const buf = await this.ctx.decodeAudioData(raw);
-      this.buffers.set(url, buf);
-      return buf;
-    } catch {
-      return null;
-    }
+    const flying = this.pending.get(url);
+    if (flying) return flying;
+    const until = this.failed.get(url);
+    if (until !== undefined && until > Date.now()) return null;
+
+    const p = (async (): Promise<AudioBuffer | null> => {
+      try {
+        const res = await fetch(AUDIO_BASE + url);
+        if (!res.ok) throw new Error(String(res.status));
+        const buf = await this.ctx!.decodeAudioData(await res.arrayBuffer());
+        this.buffers.set(url, buf);
+        this.failed.delete(url);
+        return buf;
+      } catch {
+        this.failed.set(url, Date.now() + FAIL_COOLDOWN_MS);
+        return null;
+      }
+    })();
+    this.pending.set(url, p);
+    // 摘牌放在 set 之后：即使请求已经 settle，回调也是微任务，
+    // 一定晚于上面那行 set，不会把刚登记的条目先删掉。
+    void p.then(
+      () => this.pending.delete(url),
+      () => this.pending.delete(url),
+    );
+    return p;
   }
 
-  private async getLayer(key: string, bus: BusName, url: string): Promise<Layer | null> {
+  /** 同 {@link getBuffer}：在途去重，否则每帧各建一个 GainNode 挂到总线上。 */
+  private getLayer(key: string, bus: BusName, url: string): Promise<Layer | null> {
     const existing = this.layers.get(key);
-    if (existing) return existing;
-    if (!this.ready) return null;
-    const buf = await this.getBuffer(url);
-    if (!buf) return null;
-    const gain = this.ctx!.createGain();
-    gain.gain.value = 0;
-    // BGM 走滤波链（分站变奏），其余直连总线
-    if (bus === 'bgm') gain.connect(this.getBgmIn());
-    else gain.connect(this.buses![bus]);
-    const layer: Layer = { buf, gain, src: null, playing: false, target: 0 };
-    this.layers.set(key, layer);
-    return layer;
+    if (existing) return Promise.resolve(existing);
+    const flying = this.layerPending.get(key);
+    if (flying) return flying;
+    if (!this.ready) return Promise.resolve(null);
+
+    const p = (async (): Promise<Layer | null> => {
+      const buf = await this.getBuffer(url);
+      if (!buf || !this.ctx || !this.buses) return null;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0;
+      // BGM 走滤波链（分站变奏），其余直连总线
+      if (bus === 'bgm') gain.connect(this.getBgmIn());
+      else gain.connect(this.buses[bus]);
+      const layer: Layer = { buf, gain, src: null, playing: false, target: 0 };
+      this.layers.set(key, layer);
+      return layer;
+    })();
+    this.layerPending.set(key, p);
+    void p.then(
+      () => this.layerPending.delete(key),
+      () => this.layerPending.delete(key),
+    );
+    return p;
   }
 
   private start(layer: Layer, offset = 0): void {

@@ -1,13 +1,21 @@
 /**
  * 结算页 —— 明信片正反面、切面、背面手写、导出、终局二选一。
  *
- * ## 为什么明信片模块是**动态** import 的
+ * ## 这里为什么只 `import type` 明信片模块（以及一处已经过时的约定）
  *
  * `game/postcard/render.ts` 有 58KB，里面是正面/背面两套完整画笔。
- * 首屏要的是标题页和 3D 世界，玩家要看到明信片是**这一趟的最后**。
- * `main.ts` 已经用 `await import('./game/postcard')` 定下了这个约定，
- * 这里沿用：第一次 `show()` 才把模块拉进来；类型走 `import type`，
- * 编译期擦除，零运行时成本。
+ * 首屏要的是标题页和 3D 世界，玩家要看到明信片是**这一趟的最后**——
+ * 所以本文件对 postcard 只做类型引入，编译期擦除，零运行时成本。
+ *
+ * ⚠️ **但"整条链是动态加载"这件事已经不成立了**：`main.ts:43` 现在是
+ * **静态** `import ... from './game/postcard'`，而该入口 re-export 了
+ * `render.ts`，于是 58KB 的画笔早就在主包里了。上面那段"第一次 show()
+ * 才把模块拉进来"的约定是历史描述，不是现状。
+ *
+ * 留着这句提醒是因为它会误导下一个人去"优化"一个已经不存在的问题，
+ * 而真要恢复懒加载就得先把 `main.ts` 那行改成动态 import。
+ * 判定函数（`endingOf` / `backCaptionKey`）不受影响：它们在
+ * `postcard/types.ts` 里，而那张表本来就在主包中。
  *
  * ## 预览画布为什么是 960×540 而不是 1920×1080
  *
@@ -33,6 +41,13 @@ import { button, clear, el, note, rule, setDisabled, setFlag, setShown, setText 
 import { wireKeyActivate, stationName } from './hud';
 import { FONT_HANDWRITE } from './theme';
 import type { PostcardInput } from '../game/postcard';
+// **值** import 是安全的：结局那两句的判定住在 postcard/types.ts 的纯函数里，
+// 而 main.ts 早就静态引入了整条 `./game/postcard` 链（含 render.ts），
+// 所以这里不会把任何新代码拖进主包。
+// 判定不许在这一层再抄一遍——抄一份就多一个能漂的地方，
+// 而这个漂过一次：`endingId === 'break'` 在存档里永远不成立，
+// 于是选了「放手」的玩家拿到的还是「留门」的背面。
+import { endingOf, backCaptionKey } from '../game/postcard/types';
 import { STATIONS } from '../data/route';
 import { ROAD } from '../data/raw';
 import type { UIHooks } from './index';
@@ -390,11 +405,12 @@ export class EndCard {
     setFlag(this.frontTab, 'is-on', this.side === 'front');
     setFlag(this.backTab, 'is-on', this.side === 'back');
     // 背面那一句按结局分支：选了「放手」就把"留白是故意的"说出来。
-    // `back_break_blank` 之前是死字——文案写着"背面留白，封口的蜡已经掰开。
+    // 判定在 `postcard/types.ts` 的 `backCaptionKey(endingOf(id))` 里，
+    // 明信片那一侧读的是同一对函数——两边不可能各说各话。
+    // `back_break_blank` 之前是死字：文案写着"背面留白，封口的蜡已经掰开。
     // 这句话不再替你写"，而玩家点进背面只看到一片空白，
     // 读起来像**功能没做完**，不像一个抉择。说出这句话，它才是抉择。
-    const backCaption =
-      this.game.endingId === 'break' ? t('back_break_blank') : t('back_preview_caption');
+    const backCaption = t(backCaptionKey(endingOf(this.game.endingId)));
     setText(this.captionEl, this.side === 'front' ? t('postcard_variant_hint') : backCaption);
 
     setText(this.writeBtn, t('write_back'));

@@ -21,8 +21,8 @@ import { loadModel, modelUrl } from './assets';
 import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
 import { WORLD, ECON, MINIGAMES } from '../data/raw';
-import { game } from '../game/state';
-import { t, isEnglish } from '../i18n';
+import { game, GameStateManager } from '../game/state';
+import { t, byLang, stationNameOf } from '../i18n';
 import { checkConsistency } from './basins';
 import { clamp } from '../core/math';
 
@@ -30,8 +30,23 @@ export type WorldEvent =
   | { type: 'stationPassed'; index: number }
   | { type: 'dialogue'; speaker: string; lines: string[] }
   | { type: 'villain'; sceneIndex: number }
-  /** 顺路读到的一句话（驿站/石碑）。**不锁操作、不吃点击** */
-  | { type: 'storyLine'; stationIndex: number; title: string; text: string }
+  /**
+   * 顺路读到的一句话（驿站/石碑）。**不锁操作、不吃点击**
+   *
+   * `parts` 存在时按段落顺序播（一张演完再下一张），
+   * 而 `text` 是它们的合并体——留给不认队列的消费者。
+   * 为什么需要它：中英长度差 3.5 倍，一段叙事在英文侧读不完，
+   * 而单卡有 22 秒上限。详见 `ui/storyCard.ts:readingMs`。
+   */
+  | {
+      type: 'storyLine';
+      stationIndex: number;
+      title: string;
+      text: string;
+      parts?: string[];
+      /** 可点掉。只有"停下来读"性质的长段落才开，见 storyCard.ts */
+      dismissible?: boolean;
+    }
   /** 反派引子：压暗 1 秒，不锁操作、不结束任何东西 */
   | { type: 'villainCue'; sceneIndex: number; text: string }
   | { type: 'duskBegan' }
@@ -292,6 +307,30 @@ export class World {
       this.passInside.add(best);
       game.onStationPass(best);
       this.emit({ type: 'stationPassed', index: best });
+
+      // **十八驿门口的声音**：把"五件乐事散在一条路上"这件事交到玩家手上。
+      //
+      // 挂在 0 号驿站而不是随便哪一座，因为这是玩家这一趟真正**进门**的
+      // 那一刻——出生点在中心线上、离驿站 18m，而判定半径是 15m，
+      // 所以他一定得先骑进来。这是"引路"最该发生的位置。
+      //
+      // 排在驿站自带那句**之前**：声音是"这里有人"，铭文是"这里是十八驿"。
+      // 顺序反过来就成了先看见一块招牌再听见有人说话——那是店，不是家。
+      //
+      // 一次性闩锁在 `claimVoiceGuide()`，落盘，读档不重播。
+      if (best === GameStateManager.HOME_STATION && game.claimVoiceGuide()) {
+        this.emit({
+          type: 'storyLine',
+          stationIndex: best,
+          title: t('voice_speaker'),
+          text: [t('voice_1'), t('voice_2'), t('voice_3')].join('\n\n'),
+          parts: [t('voice_1'), t('voice_2'), t('voice_3')],
+          // 这三句每句 10~13 秒，是"停下来听"的东西而不是骑过去顺便读到的，
+          // 所以开可点掉——不能逼玩家在门口站十几秒。
+          dismissible: true,
+        });
+      }
+
       if (!game.isCollected(best) && st.placement.def.text) {
         // **不是 dialogue**。`dialogue` 会锁操作（`narrativeBusy`）且要按一下才走，
         // 而"骑过一座驿站，它跟你讲一句话"是**顺路读到**的东西——
@@ -304,8 +343,8 @@ export class World {
         this.emit({
           type: 'storyLine',
           stationIndex: best,
-          title: st.placement.def.name,
-          text: isEnglish() ? st.placement.def.text_en : st.placement.def.text,
+          title: stationNameOf(st.placement.def),
+          text: byLang(st.placement.def.text, st.placement.def.text_en),
         });
       }
     } else if (!inside && bestD > WORLD.STATION_PASS_RADIUS + 6) {
@@ -455,13 +494,19 @@ export class World {
           });
         } else {
           const st = this.stations.list[this.checkInTarget];
-          const lines = isEnglish() ? st?.placement.def.dialogue_en : st?.placement.def.dialogue;
+          const lines = byLang(st?.placement.def.dialogue, st?.placement.def.dialogue_en);
           // 打卡由宿主在**小游戏之后**才记（`main.ts` 的 `game.checkIn()`），
           // 而这一刻还在打卡过场的运镜里，所以这里的 count 是**不含本次**的：
           // 0 = 首访，1 = 第二遍，2 = 第三遍。首访对白的 `=== 0` 就靠这个。
           const count = game.getStationCount(this.checkInTarget);
           if (lines && lines.length && count === 0) {
-            this.emit({ type: 'dialogue', speaker: st!.placement.def.name, lines: [...lines] });
+            // 说话人也要走语言：下面那句 `t(key)` 已经是英文了，
+            // 而抬头挂着中文站名，一句话里两种语言。
+            this.emit({
+              type: 'dialogue',
+              speaker: st ? stationNameOf(st.placement.def) : '',
+              lines: [...lines],
+            });
           } else if (count === 1 || count === 2) {
             /**
              * 第二 / 第三次到访，各给一句。

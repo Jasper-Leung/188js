@@ -43,6 +43,84 @@ export function isInWorld(phase: Phase): boolean {
   return phase === 'roaming' || phase === 'paused' || phase === 'checkin' || phase === 'synthesis';
 }
 
+/**
+ * HUD / 道具栏 / 触屏控件的可见性状态。`isInWorld()` 判的是"该不该显示"，
+ * 这个类记的是"DOM 上现在是不是那样"——**两件事，少一件就会漏。**
+ *
+ * ## 为什么它是一个类，而不是 UI 上的一个 boolean
+ *
+ * 原来 `ui/index.ts` 上是 `private worldVisible = false` 加一句
+ * `if (this.worldVisible === v) return;`。而 DOM 里的 HUD 是**构造出来就可见**的，
+ * 于是冷启动时 `showTitle()` 里的 `setWorldVisible(false)` 撞上同值直接返回——
+ * **它从来没有真正隐藏过任何东西**：整套顶栏、碎片栏和小地图就那么透在
+ * 标题卡后面，一直透到玩家点下「开启旅程」。
+ *
+ * 症状安静到不需要任何报错：功能全对，只是第一眼像"这游戏已经开始了"。
+ * 它能活下来是因为"当前可见性"这个状态**从来没有被谁读过**——
+ * 判据量的是别的东西，于是这条路径上没有任何断言。
+ *
+ * 所以这里把两件事分开记：「当前值」与「是否已经落到 DOM 上」。
+ * **第一次请求必须执行**，之后才允许同值早退。
+ */
+export class WorldVisibility {
+  /** DOM 构造出来就是可见的，所以初值必须是 `true`——
+   *  取 `false` 的话，第一次 `set(false)` 又会被同值早退吃掉，
+   *  也就是原来那个 bug 本身。 */
+  private visible = true;
+  private applied = false;
+
+  /**
+   * 请求切到 `v`。返回 true 表示**这一次真的需要改 DOM**，
+   * 调用方据此决定要不要往下走——`setShown` / 道具栏 / 触屏控件都不是免费的。
+   */
+  set(v: boolean): boolean {
+    if (this.applied && this.visible === v) return false;
+    this.visible = v;
+    this.applied = true;
+    return true;
+  }
+
+  /** 当前世界 HUD 是否可见。 */
+  get value(): boolean {
+    return this.visible;
+  }
+
+  /** 已经落到 DOM 上了吗。给回归问——原来的 bug 就是它一直 false。 */
+  get hasApplied(): boolean {
+    return this.applied;
+  }
+}
+
+// ---------------------------------------------------------------- 结算（不碰 DOM 的那一半）
+
+/** 一局乐事的三种收场。**取消不是失败**，见 `settleTextKey`。 */
+export type SettleOutcome = 'win' | 'lose' | 'cancel';
+
+/**
+ * 结算屏那一行大字读哪个 key。
+ *
+ * ## 为什么要有这个函数，而不是让宿主 `result === 'win' ? A : B`
+ *
+ * `MiniGameResult` 刻意把 `lose`（玩法失败）和 `cancel`（玩家按 Esc）拆成两个值，
+ * 而宿主只认 `win`——于是**玩家按 Esc 退出的那一局，屏幕上弹的是「这次没有完成」**。
+ * 玩家读到的不是"我取消了"，而是"我失败了"；而他明明什么都没做错。
+ * 演示模式跳过小游戏走同一条路：注释写着"中性的一句：它在被跳过，不是在被判负"，
+ * 传的却是 `false`——**注释描述的意图和代码做的事不一致**，而且这样活了好几轮。
+ *
+ * 两个分支各自要一句不同的文案，所以"三态塌成两态"这件事必须有一个显式的落点。
+ * 这里就是那个落点，`verify_settle` 守着 `cancel` 不许落回 `mg_failed`。
+ */
+export function settleTextKey(o: SettleOutcome): 'mg_success' | 'mg_failed' | 'result_cancel' {
+  if (o === 'win') return 'mg_success';
+  if (o === 'cancel') return 'result_cancel';
+  return 'mg_failed';
+}
+
+/** 结算屏停留毫秒。赢了给足，输了与取消都快走——站在那儿看"失败"没人愿意。 */
+export function settleMs(o: SettleOutcome): number {
+  return o === 'win' ? 2100 : 1300;
+}
+
 // ---------------------------------------------------------------- 交互
 
 /**

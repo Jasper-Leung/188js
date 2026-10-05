@@ -137,7 +137,7 @@ export class TitleScreen {
     qBox.appendChild(seg);
     this.summaryBox = el('div', 'g-rows');
     qBox.appendChild(this.summaryBox);
-    this.reasonEl = note(this.cap.reason, 'g-note-why');
+    this.reasonEl = note(this.reasonText(), 'g-note-why');
     qBox.appendChild(this.reasonEl);
     qBox.appendChild(note(t('quality_hint'), 'g-note-dim'));
     card.appendChild(qBox);
@@ -158,6 +158,17 @@ export class TitleScreen {
   }
 
   // ---------------------------------------------------------------- 画质
+
+  /**
+   * 档位判定理由。
+   *
+   * `cap.reasonKey` 是键、`reasonVars` 是参数，显示在这里才 `t()`。
+   * 它必须跟着语言走：这一行是标题页上唯一解释「画面为什么这么糊」的话，
+   * 写死中文的话英文玩家看到的就是一句读不懂的辩解。
+   */
+  private reasonText(): string {
+    return t(this.cap.reasonKey, this.cap.reasonVars);
+  }
 
   private pickTier(tier: Tier): void {
     if (this.picked === tier) return;
@@ -244,7 +255,7 @@ export class TitleScreen {
       setFlag(this.tierBtns[i], 'is-on', (i as Tier) === this.picked);
     }
     this.paintSummary();
-    setText(this.reasonEl, this.cap.reason);
+    setText(this.reasonEl, this.reasonText());
     setText(this.helpBody, t('help_overlay'));
     if (this.saveRow) {
       const btns = this.saveRow.querySelectorAll<HTMLElement>('.g-btn, .g-btn-quiet');

@@ -17,7 +17,7 @@ import { detectCapability, type Capability, type Tier } from './core/capability'
 import { PRESETS, loadSettings, saveSettings, clampTier, type SettingsData } from './core/settings';
 import { GameLoop } from './core/loop';
 import { audio } from './core/audio';
-import { initLang, setLang, getLang, t } from './i18n';
+import { initLang, setLang, getLang, t, onLangChange } from './i18n';
 import { World, type WorldEvent } from './world/world';
 import { Renderer } from './core/renderer';
 import { Terrain } from './world/terrain';
@@ -42,12 +42,38 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportBothSides, seededBackText, type EndingId } from './game/postcard';
 
-import { canRide as canRideNow, interactAt, type Phase } from './game/phase';
+import { canRide as canRideNow, interactAt, type Phase, type SettleOutcome } from './game/phase';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
 const bootSub = document.getElementById('boot-sub') as HTMLElement;
 const bootFill = document.getElementById('boot-fill') as HTMLElement;
 const bootPct = document.getElementById('boot-pct') as HTMLElement;
+
+/**
+ * 把 `data-i18n="键名"` 的静态骨架按当前语言填上。
+ *
+ * 启动屏是**唯一一块在 UI 建好之前就在屏幕上的界面**，
+ * 所以它不能只靠 `t()` 在别处渲染：那些调用点还不存在。
+ * 做法是骨架里写英语占位、这里按语言覆写——占位必须等于默认语言，
+ * 否则玩家会看到"先中文、后英文"的一跳。
+ *
+ * 语言切换时也要重跑一次：启动屏通常在切换之前就被摘掉了，
+ * 但那只是通常，而这一行是它唯一的兜底。
+ */
+function applyStaticI18n(root: ParentNode = document): void {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-i18n]')) {
+    el.textContent = t(el.dataset.i18n ?? '');
+  }
+  document.title = t('game_title');
+  // `<html lang>` 跟着语言走：它决定读屏软件的语音、浏览器的翻译提示，
+  // 以及一部分系统字体回退。中文玩家拿到 `lang="en"` 会在无障碍工具上读错。
+  document.documentElement.lang = getLang() === 'zh' ? 'zh-CN' : 'en';
+}
+
+/** 页面标题：`<游戏名> · <当前步骤>`。切语言后要跟着换游戏名那一半。 */
+function setDocTitle(step: string): void {
+  document.title = `${t('game_title')} · ${step}`;
+}
 
 function boot(progress: number, label?: string) {
   const p = Math.round(clamp(progress, 0, 1) * 100);
@@ -76,8 +102,14 @@ async function registerFonts() {
 
 // ---------------------------------------------------------------- 启动
 async function main() {
-  boot(0.02, t('loading'));
+  // **语言必须先于任何一句 `t()`**。原来这里是反的：
+  // `boot(0.02, t('loading'))` 在前、`initLang()` 在后，于是启动屏第一句
+  // 用的还是模块顶上的默认值——一个已经选了英语的玩家，
+  // 每次启动看到的头一句都是「正在加载中...」。
   initLang();
+  applyStaticI18n();
+  onLangChange(() => applyStaticI18n());
+  boot(0.02, t('loading'));
   await registerFonts();
 
   const capability: Capability = detectCapability();
@@ -87,9 +119,13 @@ async function main() {
   // 而"这台机器被判成哪一档、理由是什么"是第一个要回答的问题。
   // 让它进游戏流程去问，等于每次都要先付那几十秒。
   if (new URLSearchParams(location.search).has('caps')) {
+    // 判定理由是**键 + 参数**，所以把翻译后的那句也打出来：
+    // 只看 `reasonKey` 谁都得自己回表里查，而这一屏存在的意义
+    // 恰恰是"这台机器被判成了什么、为什么"。
     document.body.innerHTML = `<pre style="padding:2em;font:13px/1.7 ui-monospace,monospace;color:#2a2622;background:#e8e0cd;white-space:pre-wrap">${escapeHtml(
       JSON.stringify(capability, null, 2) +
         '\n\n' +
+        `reason: ${t(capability.reasonKey, capability.reasonVars)}\n\n` +
         JSON.stringify(PRESETS[capability.suggestedTier], null, 2),
     )}</pre>`;
     return;
@@ -159,7 +195,7 @@ async function main() {
     step('vegetation', () => new Vegetation(preset, new Terrain()));
     step('stations', () => new Stations(preset, new Terrain()));
     step('sky', () => new Sky(new Scene(), preset.shadowMapSize, preset.shadowDistance || 120));
-    showFatal(`world 构造失败：${e instanceof Error ? e.message : String(e)}`, e);
+    showFatal(t('fatal_world', [e instanceof Error ? e.message : String(e)]), e);
     return;
   }
   boot(0.62);
@@ -192,12 +228,12 @@ async function main() {
     })
     .catch((e) => {
       // 模型拉不到不该让整局玩不成：世界照样能骑，只是路边没有树
-      console.warn('[gift188] 部分模型加载失败：', e);
+      console.warn('[gift188]', t('warn_models_partial'), e);
       boot(1);
     });
   // 硬超时：GLTFLoader 没有内建超时，悬住的请求会永远 pending。
   // 20 秒足够 localhost 与正常宽带走完 4MB，也足够在慢网下给出"它不来了"的信号。
-  void withTimeout(assetChain, 20_000, '模型加载超时');
+  void withTimeout(assetChain, 20_000, t('warn_model_timeout'));
 
   // **摩托车单独一条链**，不进上面的 `assetChain`。
   //
@@ -208,7 +244,7 @@ async function main() {
   //
   // 它是纯附加的可选载具：晚几秒出现，`E` 就在 `canEnter` 上跳过它，
   // 玩家什么都不必等。**不进链也就不会被那次超时波及。**
-  void world.loadMotorcycleModel().catch((e) => console.warn('[gift188] 摩托车模型加载失败：', e));
+  void world.loadMotorcycleModel().catch((e) => console.warn('[gift188]', t('warn_motorcycle'), e));
 
   // ---- 游戏状态机 ----
   const app = new App(world, settings, capability);
@@ -219,6 +255,168 @@ async function main() {
   // 慢一点的话它们会在标题页背后自己出现——比一根不动的进度条好。
   boot(1);
   bootDone();
+
+  if (new URLSearchParams(location.search).has('cine')) installCineMode(app);
+}
+
+/**
+ * `?cine=1` —— 录制模式。给外部录制脚本用。
+ *
+ * 基础行为（拍空镜 B Roll 用的）：
+ *   · 循环切到确定性模式：每帧固定推进 1/60 秒，帧序号 `frame` 可查
+ *   · 隐藏整个 UI（它是**一个** `#ui-root` 节点，`display:none` 一次全没）
+ *   · 接管相机，位姿完全由 `window.gift188.cine` 给
+ *
+ * 两个开关，用来把上面三条拆开单独关掉：
+ *
+ * | 追加参数 | 效果 | 什么时候用 |
+ * |:---|:---|:---|
+ * | `ui=1` | **保留 UI** | 录 walkthrough：玩家得看见 HUD、打卡提示、碎片计数 |
+ * | `cam=game` | **不接管相机** | 录真实操作：让游戏自己的机位跟着人走 |
+ *
+ * 例：
+ *   拍空镜    `?tier=2&cine=1`
+ *   录操作    `?tier=2&cine=1&ui=1&cam=game`
+ */
+function installCineMode(app: App): void {
+  const q = new URLSearchParams(location.search);
+  const keepUi = q.get('ui') === '1';
+  const gameCam = q.get('cam') === 'game';
+
+  if (!keepUi) {
+    const uiRoot = document.getElementById('ui-root');
+    if (uiRoot) uiRoot.style.display = 'none';
+  }
+
+  // 世界与循环都在 App 私有字段上，这里用一次性的桥接取出来。
+  // （TS 的 `private` 只是编译期约束；录制出口本来就该走同一条路。）
+  const anyApp = app as unknown as {
+    world: {
+      ride: {
+        pos: { x: number; y: number; z: number };
+        setCameraLocked(v: boolean): void;
+        setHideCharacter(v: boolean): void;
+        spawn(x: number, z: number, heading?: number): void;
+        placeCamera(x: number, y: number, z: number, lx: number, ly: number, lz: number): void;
+      };
+    };
+    loop: {
+      deterministic: boolean;
+      frame: number;
+      timeScale: number;
+      stepOnce(): void;
+      setManual(v: boolean): void;
+      stop(): void;
+      start(): void;
+    };
+  };
+  const ride = anyApp.world.ride;
+
+  // 自由机位：接管之后 Ride.render() 里的跟随逻辑会整段跳过，
+  // 所以位姿完全由外部给，不会被 damp 拉回去。
+  // `cam=game` 时不接管 —— 走操作流程时要用游戏自己的机位。
+  anyApp.loop.deterministic = true;
+  if (!gameCam) ride.setCameraLocked(true);
+
+  const D = Math.PI / 180;
+  const base = { x: ride.pos.x, y: ride.pos.y + 2, z: ride.pos.z };
+
+  const cine = {
+    /** 已渲染的帧数。录制脚本等它跳到目标值再截图。 */
+    get frame() {
+      return anyApp.loop.frame;
+    },
+    /** 慢放：0.25 就是四分之一速。0 = 停。 */
+    set speed(v: number) {
+      anyApp.loop.timeScale = v;
+    },
+    /**
+     * 手动步进：`true` 之后 rAF 停掉，画面只在 `cine.step()` 被调用时才前进。
+     *
+     * 为什么需要它：`--disable-frame-rate-limit` 会让 rAF 跑到几百 Hz，
+     * 于是"等第 N 帧"在两次 CDP 往返之间就已经冲过去一百多帧，
+     * 录出来变成每 143 帧抽 1 帧——**人几乎没动，而代码不报错**。
+     * 逐帧要就没有这个竞态。
+     */
+    set manual(v: boolean) {
+      const l = anyApp.loop as { stop?: () => void };
+      if (v) { anyApp.loop.stop?.(); anyApp.loop.setManual?.(true); }
+      else { anyApp.loop.setManual?.(false); anyApp.loop.start?.(); }
+      void l;
+    },
+    /** 精确推进一帧，返回新的帧号。 */
+    step() {
+      anyApp.loop.stepOnce();
+      return anyApp.loop.frame;
+    },
+    /**
+     * 空镜：`true` 之后**任何机位都看不到人**。
+     * 第一视角下角色本来就挡镜头（机位在头后 15cm），但绕拍、定机位时
+     * 画面里还是会站着一个人——录风景素材要的是"没有人"，所以单独给一个开关。
+     */
+    set noCharacter(v: boolean) {
+      ride.setHideCharacter(v);
+    },
+    /** 从角色背后绕过去拍。yaw/pitch 是角度，dist 是米。 */
+    orbit(yawDeg: number, pitchDeg: number, dist = 6, height = 2) {
+      const yaw = yawDeg * D;
+      const pitch = pitchDeg * D;
+      const x = base.x - Math.sin(yaw) * Math.cos(pitch) * dist;
+      const z = base.z - Math.cos(yaw) * Math.cos(pitch) * dist;
+      const y = base.y + height + Math.sin(pitch) * dist;
+      ride.placeCamera(x, y, z, base.x, base.y, base.z);
+    },
+    /** 直接给机位。最自由，也最需要调用方自己算好朝向。 */
+    pose(x: number, y: number, z: number, lx: number, ly: number, lz: number) {
+      ride.placeCamera(x, y, z, lx, ly, lz);
+    },
+    /** 直接把角色瞬移到某个世界坐标。录 B Roll 时省得一路骑过去。 */
+    goto(x: number, z: number, heading = 0) {
+      ride.spawn(x, z, heading);
+      base.x = ride.pos.x;
+      base.y = ride.pos.y + 2;
+      base.z = ride.pos.z;
+    },
+    /** 放回角色第一/第三人称。 */
+    follow() {
+      ride.setCameraLocked(false);
+    },
+    /** 停在当前帧不动了。定格用。 */
+    freeze() {
+      anyApp.loop.timeScale = 0;
+    },
+    /** 恢复推进。 */
+    play() {
+      anyApp.loop.timeScale = 1;
+    },
+  };
+
+  /**
+   * 把 `cine` 并进 `window.gift188`，其余字段保持是**活的**。
+   *
+   * ⚠️ 这里原来写的是 `const prev = window.gift188` —— 那是在**安装这一刻**
+   * 把上一个 getter 的返回值（一个普通对象）取出来存成了快照，
+   * 于是之后每次读到的 `bike.x / bike.z / speed / heading / phase / input`
+   * 全是**启动那一刻**的值。
+   *
+   * 症状极坏：录制脚本读到的车永远停在出生点——"车不动"，
+   * 于是所有结论都建立在一份冻结数据上：控制器对不对、A/D 符号、
+   * 能不能到站，读的全是同一份开机快照，而且**不报任何错**。
+   * （`canRide` 恒为 true、弧长恒为 112m、按键计数恒为 0，
+   *  每一项单独看都"合理"，合起来才是 bug。）
+   *
+   * 所以这里存的是**上一个 getter 本身**，每次读都重新调用它。
+   */
+  const prevDesc = Object.getOwnPropertyDescriptor(window, 'gift188');
+  Object.defineProperty(window, 'gift188', {
+    configurable: true,
+    get: () => {
+      const live = prevDesc?.get ? prevDesc.get() : prevDesc?.value;
+      const base188 = typeof live === 'object' && live !== null ? (live as Record<string, unknown>) : {};
+      // 每读一次都重新取：bike/phase/input 必须是当前值，cine 才是录制控制
+      return { ...base188, cine };
+    },
+  });
 }
 
 /** 给一条可能永远 pending 的 promise 加硬超时 */
@@ -227,7 +425,7 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | v
     p,
     new Promise<void>((r) =>
       setTimeout(() => {
-        console.warn(`[gift188] ${label}（${ms}ms），继续跑`);
+        console.warn(`[gift188] ${t('boot_slow_step', [label, ms])}`);
         r();
       }, ms),
     ),
@@ -312,16 +510,17 @@ class App {
     // 理由很实际：用户报"一直卡在加载中"时，能给的只有一行截图，
     // 而"卡在第几步"和"卡在这一步的哪一行"是两种完全不同的故障。
     // 这里的标记刻意留在产物里——它们不花钱，而线上排查靠的就是它们。
-    const mark = (s: string) => {
+    const mark = (key: string) => {
+      const s = t(key);
       console.log(`[gift188] ${s}`);
       // 同时写进 title：它是这条链上唯一"一定拿得到"的信号。
       // 远程排障时能读到的往往只有一行截图或一个页面标题，
       // 而"卡在装配 UI"和"卡在显示标题页"是两个完全不同的故障。
-      document.title = `188号礼物 · ${s}`;
+      setDocTitle(s);
     };
     const root = document.getElementById('ui-root') as HTMLElement;
 
-    mark('装配 UI…');
+    mark('boot_step_ui');
     this.ui = new UI({
       parent: root,
       hooks: {
@@ -370,10 +569,10 @@ class App {
       adaptiveTarget: this.settings.adaptiveTargetFps || 30,
     });
 
-    mark('装配小游戏宿主…');
+    mark('boot_step_minigame');
     this.mg = new MiniGameHost(root);
 
-    mark('判断输入方式…');
+    mark('boot_step_input_mode');
     // 触屏判定要**在 UI 建好之前**就装上：玩家第一次用手指碰屏时就应该
     // 立刻挂出摇杆，而那时 UI 还不存在。装晚了，摇杆会等到下一次 touchstart
     // 才出现——而"按了一下才出现"正好是玩家最想避开的那种出现方式。
@@ -381,11 +580,11 @@ class App {
     this.touchMode = touchEnabled();
     this.ui.setTouchMode(this.touchMode);
 
-    mark('读档…');
+    mark('boot_step_load');
     const loaded = game.load();
     this.backText = readBackText();
 
-    mark('建立主循环…');
+    mark('boot_step_loop');
     this.loop = new GameLoop(
       {
         fixed: (dt) => this.fixed(dt),
@@ -404,7 +603,7 @@ class App {
     );
     this.world.renderer.setRenderScale(PRESETS[this.settings.tier].renderScale);
 
-    mark('绑定输入…');
+    mark('boot_step_bind');
     this.bindInput();
     window.addEventListener('resize', () => this.world.renderer.resize());
 
@@ -440,13 +639,15 @@ class App {
       );
     });
 
-    mark('启动循环…');
+    mark('boot_step_run');
     this.loop.start();
     this.phase = 'title';
-    mark('显示标题页…');
+    mark('boot_step_title');
     this.ui.showTitle();
-    mark('就绪');
+    mark('boot_step_ready');
     if (loaded && game.getCollectedCount() > 0) this.ui.syncFromState();
+
+    this.applyAutomation();
 
     // `?dump=1` 场景自检。回答"玩家眼前这个东西到底是什么"——
     // 图形 bug 从代码里看不出来，只能让世界自己报。按 F9 开关。
@@ -475,7 +676,7 @@ class App {
       const at = xs !== null && zs !== null ? { x: Number(xs), z: Number(zs) } : {};
       const text = probeAt(this.world, at.x, at.z, { buildings: q.has('buildings'), radius: 40 });
       console.log(text);
-      document.title = '188号礼物 · 探针';
+      setDocTitle(t('debug_title_probe'));
     }
     // `?dump=1` 已经消费过 query，但探针还要读 `x`/`z`，所以复用同一个 q。
     // 弧长定位入口：`?arc=` 见下。
@@ -540,11 +741,31 @@ class App {
     const p = w.ride.pos;
     return {
       route: { stations: STATIONS.length, points: CENTERLINE.length, length: TOTAL_ARCLENGTH },
+      /**
+       * 16 座驿站的落位（含碎片站标记）。
+       *
+       * 录制脚本需要它来「把车骑到驿站跟前」：驿站横向偏出路面约 18m，
+       * 而 `interactAt` 的判定是 `distance <= reach`（驿站半径 + 路半宽）。
+       * 沿中心线骑过去，最近也只到 ~18m，**永远够不着**——
+       * 真玩家会往路肩上偏一点，脚本就得会。
+       */
+      stations: STATIONS.map((s, i) => ({
+        i, x: +s.x.toFixed(2), z: +s.z.toFixed(2), hasFragment: s.hasFragment, slot: s.slot,
+      })),
       bike: {
         x: +p.x.toFixed(2),
         y: +p.y.toFixed(2),
         z: +p.z.toFixed(2),
         speed: +w.ride.speedValue.toFixed(2),
+        /**
+         * 真实航向（rad）。约定是 `fwd = (-sin h, -cos h)`，
+         * 即 **-Z 为车头**（`ride.ts` 的 `_fwd`）。
+         *
+         * 录制脚本要它，是因为从位置增量反推航向既慢又脆：多转 90° 的
+         * 约定错误在画面上只表现为"车往回骑"，代码里**不会报任何错**。
+         * 直接读比猜便宜得多。
+         */
+        heading: +w.ride.headingValue.toFixed(4),
         onRoad: w.ride.onRoad(),
         /** 到中心线的最近距离（米）。>8 就说明骑偏了 */
         offCenterline: +minDistToCenterline(p.x, p.z).toFixed(2),
@@ -554,6 +775,27 @@ class App {
       perf: { ...perf },
       nearby: { ...w.nearby },
       phase: this.phase,
+      /**
+       * 「按了没反应」的完整现场。
+       *
+       * `canRide` 只覆盖**运动**的门卫，而按键还有一道独立的门：
+       * `bindInput()` 的 keydown 处理器开头就 `if (this.mg.isRunning) return`，
+       * 它**不经过 canRide**。于是可能出现 `canRide === true` 但 W 就是不响
+       * ——截图上看不出来，日志上也没有任何异常。
+       * `keysDown` 是「按键到底有没有进到宿主」的唯一直接证据。
+       */
+      input: {
+        narrativeBusy: w.narrativeBusy,
+        checkInStage: w.checkInStage,
+        mgRunning: this.mg.isRunning,
+        keysDown: Array.from(this.keys),
+        canRide: canRideNow({
+          phase: this.phase,
+          checkInPressed: false,
+          narrativeBusy: w.narrativeBusy,
+          checkInStage: w.checkInStage,
+        }),
+      },
       /** 探针。返回文本，可直接贴进对话 */
       probe: (x?: number, z?: number, buildings?: boolean) => probeAt(w, x, z, { buildings: !!buildings, radius: 40 }),
       /** 16 座驿站的完整体检表（带上玩家位置，所以"该加载却没加载"会报出来） */
@@ -723,10 +965,32 @@ class App {
     // 律师函、母亲、还有"代价是没有人记得你"。它决定玩家知不知道
     // 自己这一趟在替谁跑。不锁操作、自动推进、按 `E` 跳过，
     // 所以正在过弯的玩家什么都不用做，骑过去也会读完。
+    //
+    // `prologue_0_1..3` 是**动机**：他为什么从公司辞了手回来。
+    // 排在原有三句**之前**，因为顺序就是因果——
+    // 先有"我的手会听东西说话"和"八百年前有人在这儿高兴地活着"，
+    // 律师函才不是一封凭空来的信，十八驿才不是一个待回收的任务，
+    // 而是他本来就该回来的地方。
+    //
+    // 两条一起发**而不是**分两张卡：它们的因果是一条链，
+    // 拆成两张会让中间那次 3.4 秒的空档把"辞职"和"家业"这两件事
+    // 在玩家脑子里断成两段各自忘掉。
+    //
+    // 六句**顺序播**，不是一张卡：中文侧读完要 66 秒、英文侧 86 秒，
+    // 而单卡上限 22 秒。塞进一张就是必然腰斩，而腰斩没有任何提示。
+    // 拆开之后每张都读到完整，算法见 `storyCard.ts:readingMs`。
     if (!game.prologueDone) {
       game.markPrologueDone();
-      this.ui.showStoryCard(
-        `${t('prologue_1')}\n\n${t('prologue_2')}\n\n${t('prologue_3')}`,
+      this.ui.showStorySequence(
+        [
+          t('prologue_0_1'),
+          t('prologue_0_2a'),
+          t('prologue_0_2b'),
+          t('prologue_0_3'),
+          t('prologue_1'),
+          t('prologue_2'),
+          t('prologue_3'),
+        ],
         t('prologue_speaker'),
       );
     }
@@ -911,7 +1175,11 @@ class App {
       // **不给「失败」**。演示里没有人按键，这一局必然是跳过去的，
       // 而屏幕上弹出「失败」是在告诉评审"这个游戏做不出来"。
       // 中性的一句：它在被跳过，不是在被判负。
-      this.ui.showResult(false, st.slot);
+      //
+      // ⚠️ 这一行原来传的是 `false`——注释写着"中性"，代码做的是"判负"，
+      // 两件事不一致却谁也没发现，因为没有一条判据问过"取消长什么样"。
+      // 现在三态是真的三态（`settleTextKey`），`verify_settle` 守着。
+      this.ui.showResult('cancel', st.slot);
       this.ui.syncFromState();
       this.toRoaming();
       return;
@@ -920,19 +1188,26 @@ class App {
     // 种子由 (驿站, 第几次到访) 决定：同一趟重玩是同一局，
     // 玩家重打一遍不会因为随机数换了一串而拿到另一道题。
     const handle = await this.mg.run(id, seedFor(stationIdx, visit));
-    const win = handle.result === 'win';
+    // **三态，不是两态**。`MiniGameResult` 早就把「玩法失败」与「玩家按 Esc」
+    // 拆成两个值，而这里原来只认 `win`——于是玩家主动取消的一局，
+    // 弹出来的是「这次没有完成」。他没做错任何事，却读到了"我失败了"。
+    const outcome: SettleOutcome = handle.result;
+    const win = outcome === 'win';
     // 乐事结束了，被压着的反派对白现在可以交付
     this.world.setBusyForMinigame(false);
 
     // 打卡与经济
     game.checkIn(stationIdx);
+    // ⚠️ 取消与失败在这里仍然同价（`LVBI_MINI_LOSE`）。这是**刻意**的：
+    // 经济常数是 1:1 移植契约的一部分，改它会动到 `verify_economy`。
+    // 本轮只修"玩家被告知了什么"，不改他拿到了多少。
     game.onMiniGame(stationIdx, win);
     if (win) audio.sfx('collect');
 
     // **结算屏**。之前只有一条 toast 飘过去——这是玩家唯一确认
     // 自己做到什么的地方，而 toast 长得很像"又一条提示"。
     // 一句大字 + 这件乐事的名字，是这件事应有的分量。
-    this.ui.showResult(win, st.slot, () => this.afterMiniGame(stationIdx, win));
+    this.ui.showResult(outcome, st.slot, () => this.afterMiniGame(stationIdx, win));
     this.ui.syncFromState();
   }
 
@@ -989,8 +1264,55 @@ class App {
       await saveBlob(blob, name);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return; // 玩家自己取消
-      console.warn('[gift188] 明信片导出失败：', e);
+      console.warn('[gift188]', t('warn_postcard_export'), e);
       this.ui.showToast(t('export_failed'), 2400);
+    }
+  }
+
+  /**
+   * 自动化 / AI 入口。三个查询参数，都只对本次会话生效、**不落盘**。
+   *
+   * | 参数 | 作用 |
+   * |---|---|
+   * | `?clean=1` | 藏起全部 DOM 界面，只留 3D 世界，并直接进世界 |
+   * | `?nocine=1` | 不播任何叙事文字（序章、驿里的声音、碎片提示、碑文、路口） |
+   * | `?autostart=1` | 跳过标题页与引导页直接进世界，界面照常显示 |
+   *
+   * ## 为什么截图需要这个
+   *
+   * 一张混着顶栏、小地图、心神数字、道具栏和飘过去的字的截图，
+   * AI 判断"这个世界长什么样"就会被这些稳定不动的像素干扰。
+   * 玩家看到的是一个游戏，AI 需要看到的是**山**。
+   *
+   * 叙事文字尤其糟：它是**会动的**。截图打在字上，AI 会把字里的内容
+   * 当成画面的一部分描述出来（"一张写着律师函的黑色卡片"），
+   * 而画面的主体是山。所以 `?nocine` 不是锦上添花，是必需的。
+   *
+   * ## 为什么都做成"只对本次生效"
+   *
+   * 落盘的话，玩家的真实存档会被一条调试参数污染——下一次正常开游戏
+   * 界面是空的、序章不播，而**没有任何界面能把它改回来**。
+   * 玩家唯一能做的事是清 localStorage，于是进度全丢。
+   */
+  private applyAutomation() {
+    const q = new URLSearchParams(location.search);
+    const clean = q.has('clean');
+    // `?clean` 蕴含 `?nocine`：既然界面整个藏起来了，
+    // 再让文字在背后继续排队只是浪费——而且若 `show()` 仍会读出文字，
+    // 它读的是 0 宽容器，将来取消干净模式时会突然冒出一堆旧卡。
+    const nocine = q.has('nocine') || clean;
+
+    if (nocine) this.ui.setNarrativeQuiet(true);
+    if (clean) {
+      this.ui.setCleanMode(true);
+      setDocTitle(t('debug_title_clean'));
+    }
+
+    // 直接进世界，省掉标题页与引导页——那两个都是 DOM，
+    // 干净模式下它们本来就是一块不可见的板子，但它们会**占住阶段机**：
+    // 不点「开始骑行」就永远是 `phase === 'title'`，车不动、画面停在标题。
+    if (clean || q.has('autostart')) {
+      this.continueRun();
     }
   }
 
@@ -1006,7 +1328,14 @@ class App {
     } else if (e.type === 'storyLine') {
       // 顺路读到的字：黑底、不锁、不吃点击。
       // 玩家在过弯也照样读完，不需要停下、也不需要按任何键。
-      this.ui.showStoryCard(e.text, e.title);
+      //
+      // 有 `parts` 走顺序播：一段叙事在英文侧读不完（单卡上限 22 秒），
+      // 合并成一张会被腰斩，而腰斩没有任何提示。详见 storyCard.ts:readingMs。
+      if (e.parts && e.parts.length > 1) {
+        this.ui.showStorySequence(e.parts, e.title, { dismissible: e.dismissible });
+      } else {
+        this.ui.showStoryCard(e.text, e.title);
+      }
     } else if (e.type === 'villainCue') {
       // **引子不吃点击、不锁操作**，只压暗一下。
       // 它唯一的作用是让玩家在郑铎开口之前先觉得有什么不对——
@@ -1206,7 +1535,7 @@ function showFatal(msg: string, err: unknown) {
 
 // 兜底：模块本身出错时也要留一句在页面上，而不是一片白屏
 window.addEventListener('error', (e) => {
-  if (bootEl.isConnected) showFatal(`未捕获错误：${e.message}`, e.error);
+  if (bootEl.isConnected) showFatal(t('fatal_uncaught', [e.message]), e.error);
 });
 
 void main();

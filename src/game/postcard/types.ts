@@ -66,6 +66,48 @@ export type CardTier = 'journeyman' | 'explorer' | 'pilgrim' | 'master';
  */
 export type EndingId = 'leave_door' | 'let_go';
 
+/**
+ * 存档里的 `ending_id` → 明信片用的两值结局。
+ *
+ * ## `'break'` 是一个已经害过人的陷阱
+ *
+ * 上面那段注释里的 `keep` / `break` 是**原作 Godot 侧的字段名**，
+ * 而本工程存进存档的是 UI 按钮原样传上来的 `'leave_door' | 'let_go'`
+ * （`endCard.ts` 两颗按钮 → `state.setEnding()` → `ending_id`）。
+ *
+ * 曾经有一处写成 `saved === 'break' ? 'let_go' : 'leave_door'`。
+ * `'break'` 永远不等于存档里的任何一个值，于是那个三元的假分支恒中：
+ * **选了「放手」的玩家，导出的那张 PNG 背面照样预填了「留门」那一句**，
+ * 而屏幕上一切正常（屏幕那侧用的是 `let_go`）——抉择在产物上被静默还原，
+ * 没有任何一条判据会红，`back_break` 就那样留在死字白名单里。
+ *
+ * 所以这个转换只允许写在这**一个**纯函数里：明信片、结算面板、断言都从它取。
+ */
+export function endingOf(savedEndingId: string): EndingId {
+  return savedEndingId === 'let_go' ? 'let_go' : 'leave_door';
+}
+
+/**
+ * 「留门」才预填背面那一句；放手与未竟一律留白。
+ *
+ * **留白不是省事**——"留白 + 掰开的蜡封"是这个抉择真正落在产物上的东西；
+ * 只改一句预填文案的话，玩家的收获和手抄一遍没区别。
+ * 两个结局在这里必须**恰好一个**有值，`verify_ending` 守着。
+ */
+export function prefilledBackKey(ending: EndingId): 'back_keep' | null {
+  return ending === 'leave_door' ? 'back_keep' : null;
+}
+
+/**
+ * 背面那一行说明按结局分支。
+ *
+ * 选了「放手」就要把"留白是故意的"说出来：文案写着"背面留白，封口的蜡已经掰开"，
+ * 而玩家点进背面只看到一片空白，读起来像**功能没做完**，不像一个抉择。
+ */
+export function backCaptionKey(ending: EndingId): 'back_break_blank' | 'back_preview_caption' {
+  return ending === 'let_go' ? 'back_break_blank' : 'back_preview_caption';
+}
+
 export interface PostcardInput {
   /** 五块碎片各到访了几次，索引 0..4 = 云/茶/琴/竹/禽 */
   slotVisits: number[];

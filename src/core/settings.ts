@@ -12,6 +12,7 @@
  * 的取舍。每一档的注释都写清楚"这一刀砍掉什么、为什么这台机器必须砍"。
  */
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from './capability';
+import { t } from '../i18n';
 
 export interface QualityPreset {
   /** 阴影贴图尺寸，0 = 关 */
@@ -190,12 +191,19 @@ export function clampTier(v: unknown): Tier {
   return (n < 0 ? 0 : n > 2 ? 2 : n) as Tier;
 }
 
-/** 一张把"档位"翻译成人话的小表，UI 直接拿去显示。 */
+/**
+ * 一张把"档位"翻译成人话的小表，UI 直接拿去显示。
+ *
+ * 档位是**开 / 关**的只有两项（阴影、地面细节），而原来这里写死英文 `'off'`。
+ * 显示方拿到的就是这两个值之一，所以中文界面里那两格是"关 / off"混排——
+ * 面板上一半中文一半英文的那种半成品感。
+ * 现在关的那一格走 `t('off')`。
+ */
 export function tierSummary(tier: Tier): { renderScale: string; shadows: string; ground: string } {
   const p = PRESETS[tier];
   return {
     renderScale: `${Math.round(p.renderScale * 100)}%`,
-    shadows: p.shadowMapSize === 0 ? 'off' : `${p.shadowMapSize}px / ${p.shadowDistance}m`,
-    ground: p.groundDetail === 0 ? 'off' : `${p.groundDetailRadius}m`,
+    shadows: p.shadowMapSize === 0 ? t('off') : `${p.shadowMapSize}px / ${p.shadowDistance}m`,
+    ground: p.groundDetail === 0 ? t('off') : `${p.groundDetailRadius}m`,
   };
 }

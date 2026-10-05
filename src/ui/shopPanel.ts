@@ -25,7 +25,7 @@
  * 玩家在驿铺里看见五件"无价"的东西，才会明白碎片不是钱能买的，
  * 而这一趟的目标就是把它们一件一件换回来。
  */
-import { t, isEnglish } from '../i18n';
+import { t, byLang } from '../i18n';
 import { ECON, SHOPS } from '../data/raw';
 import type { GoodDef } from '../data/raw';
 import { button, el, setDisabled, setFlag, setShown, setText } from './dom';
@@ -129,7 +129,7 @@ export class ShopPanel {
   private displayName(name: string): string {
     const def = SHOPS.TABLE[name];
     if (!def) return name;
-    return isEnglish() ? def.name_en || name : name;
+    return byLang(name, def.name_en || name);
   }
 
   /** 铺子还没亮（`seen_unlock` 没到）时的状态。灯铺要过 6 站。 */
@@ -186,11 +186,11 @@ export class ShopPanel {
   private buildCard(g: GoodDef): HTMLElement {
     const box = el('div', 'g-good');
     const head = el('div', 'g-good-h');
-    head.appendChild(el('span', 'g-good-n', isEnglish() ? g.name_en || g.name : g.name));
+    head.appendChild(el('span', 'g-good-n', byLang(g.name, g.name_en || g.name)));
     const price = el('span', 'g-good-p', t('shop_buy', { 0: g.price }));
     head.appendChild(price);
     box.appendChild(head);
-    box.appendChild(el('div', 'g-good-d', isEnglish() ? g.desc_en || g.desc : g.desc));
+    box.appendChild(el('div', 'g-good-d', byLang(g.desc, g.desc_en || g.desc)));
 
     const btn = button(t('shop_buy_one'), {
       cls: 'g-good-b',

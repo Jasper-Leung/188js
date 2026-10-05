@@ -255,13 +255,24 @@ class BambooGame implements MiniGame {
     // ESC 取消。成功画面期间不给 ESC（见文件头注释）。
     if (key === 'Escape') { this.finish('cancel'); return true; }
     if (key !== 'Space') return false;
-    this.spaceHeld = true;
-    // 引导期提前按也算数
+    // 引导期提前按也算数——但**这一次按键不能顺手把"按住"也吃掉**。
+    //
+    // 原来 `spaceHeld = true` 写在引导期判断之前，于是：玩家从引导期就按住空格
+    // （提示写着"竹子一冒头就按空格"，一直按着是最自然的打法），
+    // 那一次 keydown 既结束引导、又置上了 held，于是浏览器后续的按键重复
+    // 全被开头那句 `if (key === 'Space' && this.spaceHeld) return true;` 吞掉——
+    // **第一根必定失手，而且界面上没有任何提示**。
+    //
+    // 现在引导期这一刀**不置 held**：继续按着，浏览器的按键重复会在窗口内
+    // 补上这一刀；松开再按也一样。这一刀不再凭空消失，
+    // 而"每根都要重新按一次"的手感仍然保留（held 只在这一刀之后才置上）。
     if (this.introActive) {
       this.introActive = false;
+      this.spaceHeld = false;
       this.nextBamboo();
       return true;
     }
+    this.spaceHeld = true;
     // 两根竹子之间的 0.4s 空档里窗口没开，按键砍不到东西。但照样要吃掉：
     // 空格同时是全局 interact 动作，放行的话这一次按键会漏到外面那一层。
     if (!this.windowActive) return true;

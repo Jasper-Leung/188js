@@ -338,12 +338,35 @@ class CloudGame implements MiniGame {
     }
   }
 
+  /**
+   * 落笔许可。
+   *
+   * ## 为什么"已经描过"就可以从任何位置续笔
+   *
+   * 起点热区（`PATH_TOLERANCE`）是给**第一笔**准备的：它防的是玩家一上来
+   * 就在轮廓中间按下去，于是进度从中间起算、跳过前半段。
+   *
+   * 但它原来同时管着**每一笔**：而松开笔（松空格 / 抬手指）时 `started`
+   * 会被清掉，于是"描到一半松手"之后唯一能恢复的办法是把光标拖回起点。
+   * 进度条就那么静冻结着，界面上没有任何一句话。
+   * 键盘玩家还能把自己走回去；**触屏玩家没有 Esc，也没有"回到起点"这种直觉**，
+   * 只能一路等到 30 秒兜底把它判成失败。
+   *
+   * 所以：描过一段之后（`nextSeg > 0`）不再受起点热区约束。
+   * 这不会白送进度——段是顺序认领的，光标跳过的那几段仍然追不回来。
+   */
+  private canStartStrokeAt(x: number, y: number): boolean {
+    if (OUTLINE_SAMPLES <= 0) return false;
+    if (this.nextSeg > 0) return true;
+    return Math.hypot(x - this.path[0], y - this.path[1]) < PATH_TOLERANCE;
+  }
+
   onPointerDown(x: number, y: number): void {
     if (this.finished) return;
     // 热区判在"当成落笔"之前，顺序反了就变成点了取消反而落一笔。
     if (pointInRect(this.cancelBtn, x, y)) { this.finish('cancel'); return; }
     this.dragging = true;
-    if (OUTLINE_SAMPLES > 0 && Math.hypot(x - this.path[0], y - this.path[1]) < PATH_TOLERANCE) {
+    if (this.canStartStrokeAt(x, y)) {
       this.started = true;
     }
   }
@@ -365,8 +388,9 @@ class CloudGame implements MiniGame {
     if (key === 'Escape') { this.finish('cancel'); return true; }
     if (key === 'Space') {
       this.kDown = true;
-      // 落笔的起点要求和鼠标版一样贴着第一个点，否则一按空格进度就从中间起算
-      if (OUTLINE_SAMPLES > 0 && Math.hypot(this.kx - this.path[0], this.ky - this.path[1]) < PATH_TOLERANCE) {
+      // 落笔的起点要求和鼠标版一样贴着第一个点，否则一按空格进度就从中间起算；
+      // 已经描过一段之后不受这条约束（见 canStartStrokeAt）。
+      if (this.canStartStrokeAt(this.kx, this.ky)) {
         this.started = true;
       }
       return true;
@@ -392,6 +416,8 @@ class CloudGame implements MiniGame {
     if (this.finished) return true;
     this.kDown = false;
     if (this.started && this.ratio >= SUCCESS_THRESHOLD) this.finish('win');
+    // 松手清掉"这一笔还按着"，**但不影响续描**：`started` 清零之后，
+    // 下一次按空格只要已经描过一段就能重新落笔（见 canStartStrokeAt）。
     this.started = false;
     return true;
   }

@@ -57,6 +57,11 @@ export class GameLoop {
   private lastTime = 0;
   private accumulator = 0;
   private running = false;
+  /**
+   * 手动步进模式：`true` 时 rAF 不再推进画面，只有 `stepOnce()` 会。
+   * 见 `stepOnce()` 的注释——那是给逐帧录制用的。
+   */
+  private manual = false;
 
   // 自适应状态
   private targetFps: number;
@@ -73,6 +78,24 @@ export class GameLoop {
 
   /** 慢动作（打卡过场用）。0 = 暂停 */
   timeScale = 1;
+  /**
+   * **录制模式**：每帧固定推进 `fixedDt`，并数帧。
+   *
+   * ## 为什么录出来的 60fps 还是会卡
+   *
+   * 正常跑的时候 `frameDt` 取的是**墙上时钟**。于是第 N 帧可能推进 16.7ms，
+   * 第 N+1 帧遇到一次 GC 推进 33ms，第 N+2 帧只推进 8ms。
+   * 拿这种**帧时间不均匀**的画面去录，编码器要凑成恒定帧率就得
+   * **丢帧或复制帧**——复制出来的重复画面，正是"文件写着 60fps、
+   * 看着却一顿一顿"的来源。它不是帧率不够，是帧时间不匀。
+   *
+   * 打开之后 `frameDt` 恒等于 `fixedDt`：每张截图都正好推进 1/60 秒。
+   * 机器再慢（比如无头 Chrome 走软件渲染只有 20fps）也无所谓——
+   * 墙钟上变慢放，但**每一帧的运动量完全一致**，编码出来是绝对平滑的。
+   */
+  deterministic = false;
+  /** 确定性模式下的帧序号。录制脚本靠它决定"该截第几张了"。 */
+  frame = 0;
   /** 统计 */
   fps = 60;
   frameMs = 16.7;
@@ -139,16 +162,39 @@ export class GameLoop {
     return this.curScale;
   }
 
+  /**
+   * **外部驱动一帧**：`fixed` 走一步、`render` 画一帧，然后帧号 +1。
+   *
+   * 给录制用。rAF 会被 `--disable-frame-rate-limit`、后台节流、或者
+   * 机器本身的速度带着跑——`--disable-frame-rate-limit` 下它能到几百 Hz，
+   * 于是"等第 N 帧"这件事在两次 `page.evaluate` 之间就已经冲过去上百帧了。
+   * 录出来的序列会变成"每 143 帧抽 1 帧"，人根本没怎么动，而代码看不出错。
+   *
+   * 走手动步进之后，每张截图严格对应一次 `stepOnce()`，不多不少。
+   * 配套：先 `cine.manual = true` 把 rAF 停掉，再一步步要。
+   */
+  setManual(v: boolean) {
+    this.manual = v;
+  }
+
+  stepOnce(): void {
+    this.cb.fixed(this.fixedDt);
+    this.cb.render(this.fixedDt, 0);
+    this.frame++;
+    this.elapsed += this.fixedDt;
+  }
+
   private tick = (now: number) => {
-    if (!this.running) return;
+    if (!this.running || this.manual) return;
     this.rafId = requestAnimationFrame(this.tick);
 
-    let frameDt = (now - this.lastTime) / 1000;
+    let frameDt = this.deterministic ? this.fixedDt : (now - this.lastTime) / 1000;
     this.lastTime = now;
     // 钳制：长卡顿（切窗、GC、断点）之后 dt 可能是几秒，
     // 不钳制的话 fixed 循环会追 maxSubSteps 步然后车瞬移。
     if (!(frameDt > 0)) frameDt = 0;
     if (frameDt > this.maxFrameDt) frameDt = this.maxFrameDt;
+    if (this.deterministic) this.frame++;
 
     this.elapsed += frameDt;
 

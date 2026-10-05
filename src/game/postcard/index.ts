@@ -22,8 +22,10 @@ import { exportPostcardPng } from './export';
 import { t } from './layout';
 import {
   computeTier,
+  endingOf,
   isStationSeen,
   kitTierClamp,
+  prefilledBackKey,
   seenCountOf,
   type EndingId,
   type Lang,
@@ -39,6 +41,9 @@ export {
   computeTier,
   computeVariant,
   computeTheme,
+  endingOf,
+  prefilledBackKey,
+  backCaptionKey,
   themeRgb,
   kitTierClamp,
   paperTierName,
@@ -144,9 +149,9 @@ export function buildInputFromState(overrides: BuildInputOverrides = {}): Postca
   return input;
 }
 
-/** 存档里的 `endingId` → 明信片用的两值结局。 */
+/** 存档里的 `endingId` → 明信片用的两值结局。转换只在 `types.ts` 的 `endingOf` 里。 */
 export function endingFromGameState(): EndingId {
-  return game.endingId === 'break' ? 'let_go' : 'leave_door';
+  return endingOf(game.endingId);
 }
 
 /**
@@ -157,7 +162,8 @@ export function endingFromGameState(): EndingId {
  * 只改一句预填文案的话，玩家的收获和手抄一遍没区别，那不叫选择。
  */
 export function seededBackText(ending: EndingId, lang: Lang): string {
-  return ending === 'leave_door' ? t(lang, 'back_keep') : '';
+  const key = prefilledBackKey(ending);
+  return key ? t(lang, key) : '';
 }
 
 /**

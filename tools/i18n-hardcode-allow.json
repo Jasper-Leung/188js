@@ -1,0 +1,42 @@
+[
+  {
+    "file": "index.html",
+    "text": "这个游戏需要 JavaScript 与 WebGL 2。 / This game needs JavaScript and WebGL 2.",
+    "why": "noscript 只在 JS 被关掉时显示，那时没有脚本能翻译它——所以只能两种语言并排写死，少写一种就等于那一半玩家看不到提示。同一段文字不可能同时进 t()：进了表就是死字，而死字检查会报它"
+  },
+  {
+    "file": "src/ui/endCard.ts",
+    "text": "明信片预览拿不到 2D 上下文",
+    "why": "throw new Error —— 只在真机上没拿到 canvas 上下文时抛，开发者看控制台，不是界面文案"
+  },
+  {
+    "file": "src/ui/minimap.ts",
+    "text": "小地图拿不到 2D 上下文",
+    "why": "同上，throw new Error 的诊断串"
+  },
+  {
+    "file": "src/ui/minimap.ts",
+    "text": "小地图离屏层拿不到 2D 上下文",
+    "why": "同上，throw new Error 的诊断串"
+  },
+  {
+    "file": "src/ui/minimap.ts",
+    "text": "小地图：applySize() 早于离屏层建立",
+    "why": "同上，throw new Error 的调用顺序诊断"
+  },
+  {
+    "file": "src/ui/sceneDump.ts",
+    "text": "${d.toFixed(1).padStart(6)}m ${(o.name || '(无名)').slice(0, 20).padEnd(20)}",
+    "why": "?dump=1 / F9 的场景自检面板，给 three.js 定位渲染对象用，正式发行时不存在"
+  },
+  {
+    "file": "src/ui/sceneDump.ts",
+    "text": "包围盒落在 ${NEAR_M}m 内的可渲染对象：${rows.length}",
+    "why": "同上，场景自检面板"
+  },
+  {
+    "file": "src/ui/sceneDump.ts",
+    "text": "… 还有 ${rows.length - MAX_ROWS} 条",
+    "why": "同上，场景自检面板"
+  }
+]

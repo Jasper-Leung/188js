@@ -38,7 +38,7 @@
 import { Vector3 } from 'three';
 import { STATIONS } from '../data/route';
 import { ECON, ROAD, ROADMESH, WORLD } from '../data/raw';
-import { t, isEnglish } from '../i18n';
+import { t, stationNameOf } from '../i18n';
 import { Minimap } from './minimap';
 import { button, el, setAttr, setFlag, setShown, setStyle, setText } from './dom';
 import { FRAGMENT_COLORS } from './theme';
@@ -59,8 +59,8 @@ const ARROWS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'] as const
 const SLOT_TO_STATION = ROAD.FRAGMENT_SLOT_STATION_IDX;
 
 /**
- * 站名。走 `def.name` / `def.name_en`，与 Godot 的
- * `RoadData.station_display_name()` 同一套口径（英文回退到中文名）。
+ * 站名（按下标）。判定本身在 `i18n/stationNameOf()`——
+ * `world.ts` 也要用它（对白框的说话人、故事卡的抬头），两处必须是同一份口径。
  *
  * 它是**数据**不是文案：16 个站名是关卡内容，和 `ROAD.STATIONS` 同源。
  * 顶栏、对白框、脚下提示圈三处都调它——同一个站名在三处显示成三个写法，
@@ -68,9 +68,7 @@ const SLOT_TO_STATION = ROAD.FRAGMENT_SLOT_STATION_IDX;
  */
 export function stationName(i: number): string {
   const s = STATIONS[i];
-  if (!s) return '';
-  const d = s.def;
-  return isEnglish() ? d.name_en || d.name : d.name;
+  return s ? stationNameOf(s.def) : '';
 }
 
 export interface NextTarget {

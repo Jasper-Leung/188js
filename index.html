@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
@@ -11,8 +11,16 @@
     -->
     <meta http-equiv="X-Content-Type-Options" content="nosniff" />
     <meta name="theme-color" content="#e8e0cd" />
-    <meta name="description" content="188号礼物 — 一段 3D 骑行旅程。把十五个片刻合成一张可以写字、可以导出的明信片。" />
-    <title>188号礼物</title>
+    <!--
+      description / title 的静态值是**英语**，因为默认语言是英语
+      （见 src/i18n/index.ts 的 DEFAULT_LANG）。JS 一跑起来就会用
+      `t('game_title')` 覆写 title；这段静态值只活在"JS 还没执行"的那一瞬。
+    -->
+    <meta
+      name="description"
+      content="Gift No.188 - a 3D ride. Gather fifteen moments into a postcard you can write on and export."
+    />
+    <title>Gift No.188</title>
 
     <!--
       字体。24MB 的全量字库被子集成了两份：
@@ -33,7 +41,7 @@
   </head>
   <body>
     <!-- 3D 画布。尺寸由 Renderer 按 renderScale 决定 -->
-    <canvas id="stage" aria-label="3D 世界"></canvas>
+    <canvas id="stage" aria-label="3D world"></canvas>
 
     <!-- UI 根节点：标题、HUD、对白、面板、触屏、遮罩全挂在这里 -->
     <div id="ui-root"></div>
@@ -43,18 +51,32 @@
       它不是装饰：地形高程场、路面三角形索引、植被块这些都要在
       第一个可交互画面之前算好（合起来约 300~600ms），这段时间里
       屏幕上得有东西可看，而不是白屏。
+
+      这里的字是**英语占位**，随后由 main.ts 的 `applyStaticI18n()`
+      按当前语言覆写（`data-i18n="键名"` → `t('键名')`）。
+      占位值必须和默认语言一致，否则会出现"先中文后英文"的一跳——
+      而启动屏是玩家对第一印象唯一来得及做判断的地方。
+      标题拆成三段是刻意的：`boot-num` 那一段带颜色，
+      中文是「188[号]礼物」、英语是「Gift [No.]188」。
     -->
     <div id="boot" role="status" aria-live="polite">
       <div class="boot-inner">
-        <div class="boot-title">188<span class="boot-num">号</span>礼物</div>
-        <div class="boot-sub" id="boot-sub">正在铺路…</div>
+        <div class="boot-title"><span data-i18n="boot_title_head"></span><span class="boot-num" data-i18n="boot_title_mark"></span><span data-i18n="boot_title_tail"></span></div>
+        <div class="boot-sub" id="boot-sub" data-i18n="boot_sub"></div>
         <div class="boot-bar"><i id="boot-fill"></i></div>
         <div class="boot-pct" id="boot-pct">0%</div>
       </div>
     </div>
 
+    <!--
+      noscript 的内容**永远**不会被 i18n 覆盖：它只在 JS 被关掉时才显示，
+      而那时没有任何脚本能翻译它。所以这里只能两种语言并排写死——
+      少写一种就等于那一半玩家看不到提示。
+    -->
     <noscript>
-      <div class="noscript">这个游戏需要 JavaScript 与 WebGL 2。</div>
+      <div class="noscript">
+        这个游戏需要 JavaScript 与 WebGL 2。 / This game needs JavaScript and WebGL 2.
+      </div>
     </noscript>
 
     <script type="module" src="/src/main.ts"></script>

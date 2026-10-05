@@ -53,7 +53,8 @@ import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
 import { Toast } from './toast';
 import { ItemBar } from './itemBar';
-import { StoryCards, ResultCard } from './storyCard';
+import { StoryCards, ResultCard, setNarrativeQuiet, type SettleOutcome } from './storyCard';
+import { WorldVisibility } from '../game/phase';
 import { MoodMask } from './moodMask';
 import { PerfPanel } from './perfPanel';
 
@@ -237,7 +238,13 @@ export class UI {
 
   private duskT = 0;
   private lastDusk = -1;
-  private worldVisible = false;
+  /**
+   * 世界 HUD 的可见性状态。**初值"可见"是对的**——DOM 里的 HUD 构造出来就在，
+   * 而第一次 `setWorldVisible(false)` 必须真的执行（`showTitle()` 就靠它），
+   * 所以这个类把「第一次必生效」写进了规则，而不是靠初始值碰巧对上。
+   * 原因见 `game/phase.ts` 的 `WorldVisibility`。
+   */
+  private readonly worldVis = new WorldVisibility();
   private unbindLang: (() => void) | null = null;
   private unbindTouch: (() => void) | null = null;
   private disposed = false;
@@ -328,9 +335,50 @@ export class UI {
 
   // ---------------------------------------------------------------- 阶段
 
+  /**
+   * 干净模式：把**全部** DOM 界面藏起来，只留 3D 世界。
+   *
+   * 给 AI 截图与自动试玩用（`?clean=1`）。一条截图里混着顶栏、小地图、
+   * 心神数字、道具栏和飘过去的字，AI 判断"这个世界长什么样"就会被
+   * 这些稳定不动的像素干扰；玩家看到的是一个游戏，AI 需要看到的是**山**。
+   *
+   * ## 为什么用 CSS 类，而不是逐个 `setShown(false)`
+   *
+   * 因为 `setWorldVisible()` 会在进世界时把 HUD 和道具栏**重新打开**
+   * （`enterWorld()` → `setWorldVisible(true)`）。逐个隐藏的话，
+   * 隐藏动作会在下一次阶段切换时被原样撤销——症状是"标题页干净，
+   * 一进世界 HUD 全回来了"，而这正好是这个功能最需要工作的那个时刻。
+   *
+   * 一条 `visibility: hidden` 挂在 `g-root` 上就压住了所有子元素，
+   * 而 `setShown` 改的 `display` 依然照常进行，阶段机完全不受影响。
+   * **用 `visibility` 而不是 `display: none`**：后者会让
+   * `getBoundingClientRect` 返回 0，某些面板的布局测量会跟着错位。
+   */
+  setCleanMode(on: boolean): void {
+    this.root.classList.toggle('is-clean', on);
+  }
+
+  /**
+   * 叙事静音。收在 `StoryCards` 的**唯一入口**上，所以序章、驿里的声音、
+   * 碎片提示、碑文、路口那句——五处一起安静，不会漏。
+   */
+  setNarrativeQuiet(on: boolean): void {
+    setNarrativeQuiet(on);
+    // 已经浮在屏幕上的立刻收掉。只切开关不管屏上的那些，
+    // 症状是"参数写了但这一趟还是挡着字"——而那正是要截图的人最恨的。
+    if (on) this.storyCards.clear();
+  }
+
+  /** 世界 HUD 现在是否可见。给每帧路径（触屏控件、性能面板）读。 */
+  private get worldVisible(): boolean {
+    return this.worldVis.value;
+  }
+
   private setWorldVisible(v: boolean): void {
-    if (this.worldVisible === v) return;
-    this.worldVisible = v;
+    // `set()` 返回 false = 这次不需要动 DOM（同值且已经落过一次）。
+    // 原来这里是 `if (this.worldVisible === v) return;`，而初值就等于
+    // 第一次请求的值，于是**冷启动那一次隐藏从来没有执行过**。
+    if (!this.worldVis.set(v)) return;
     setShown(this.hud.root, v);
     // 道具栏跟着 HUD 一起进出世界：它和 HUD 一样是"在世界里的信息"，
     // 标题页上摆一排空格子只会让人以为少了什么。
@@ -353,9 +401,32 @@ export class UI {
    * **不吃点击、不锁操作、自动推进** —— 三条都是硬要求，
    * 理由见 `storyCard.ts` 的文件头。要锁操作的只有反派那几场，
    * 走 `showInterruptCard()`。
+   *
+   * @param ms 停留毫秒。**长度不同必须显式给**：默认 3.4s 是给
+   *        一两句话的，卡片不会按字数缩放——序章六句用默认时长
+   *        会在第三句还没读完就被抽走，而"读不完"读作"字太多了"。
+   *        下限由 StoryCards 兜（2.4s）。
    */
-  showStoryCard(text: string, title?: string): void {
-    this.storyCards.show(text, { title });
+  showStoryCard(text: string, title?: string, ms?: number): void {
+    this.storyCards.show(text, { title, ms });
+  }
+
+  /**
+   * 顺序播一组叙事段落：一张演完再上下一张，每张按**自己**的长度定时。
+   *
+   * 存在的理由是容量：序章六句中文要 66 秒、英文要 86 秒才读得完，
+   * 而单卡上限 22 秒。一张卡装不下就是会被腰斩——而腰斩没有任何提示，
+   * 玩家只会以为"这个游戏就这么多内容"。
+   *
+   * 时长由 `storyCard.ts:readingMs` 按语言分流量：中文按字符、英文按词。
+   * 路边那些"顺路读到"的字**不要**走这里，它们仍然用 `showStoryCard`。
+   */
+  showStorySequence(
+    parts: string[],
+    title?: string,
+    opts: { dismissible?: boolean } = {},
+  ): void {
+    this.storyCards.showSequence(parts, { title, ...opts });
   }
 
   /** 强制打断：压暗 + 锁操作。只给"有人在你耳边说话"那几场用。 */
@@ -363,9 +434,9 @@ export class UI {
     this.storyCards.show(text, { title, interrupt: true, ms });
   }
 
-  /** 小游戏结算屏。一句大字 + 这件乐事的名字。 */
-  showResult(win: boolean, slot: number, onDone?: () => void): void {
-    this.resultCard.show(win, slot, win ? 2100 : 1300, onDone);
+  /** 小游戏结算屏。一句大字 + 这件乐事的名字。三态——**取消不是失败**。 */
+  showResult(outcome: SettleOutcome, slot: number, onDone?: () => void): void {
+    this.resultCard.show(outcome, slot, undefined, onDone);
   }
 
   /** 结算屏还在的时候宿主要让出控制权（否则玩家在过场里按了空格）。 */

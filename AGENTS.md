@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：32 条 / 468 条断言 + 文案死字扫描
+npm run verify     # 无头回归：39 条 / 610 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 32 / FAIL 0 / 没跑成 0`，
-断言 468 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 39 / FAIL 0 / 没跑成 0`，
+断言 610 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -45,6 +45,36 @@ npm run verify     # 无头回归：32 条 / 468 条断言 + 文案死字扫描
 ```bash
 npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```
+
+### 界面里不许写死中文
+
+`tools/i18n-dead.mjs` 现在打三张表，缺一不可：
+
+| 表 | 治什么 |
+|---|---|
+| 文案死字 | 翻译了、写进表了，代码里一次都没 `t()` |
+| 缺字 | `t('key')` 引用了表里根本没有的键 → 界面上显示 `⟨key⟩` |
+| **界面硬编码中文** | 玩家眼前的中文直接写在代码里，切到英文也不会消失 |
+
+第三条扫的是**玩家真的能读到字的文件**：`index.html`（启动屏骨架）、
+`src/ui/**`、`src/main.ts`，以及 `src/core/{capability,touch,settings}.ts`
+（它们产出的短标签会被画进面板）。不扫 `src/world` / `src/game`——
+那些文件里的中文全是 `console.warn`、`throw new Error` 的诊断串。
+
+确实不面向玩家的登记进 `tools/i18n-hardcode-allow.json`（要写 `why`），
+和死字白名单一个规矩：**白名单之外出现任何新的 → FAIL，只能减不能增。**
+
+配套的两条约定：
+
+- 面向玩家的字面文案一律走 `t()`，键补在 `tools/i18n-supplement.json`
+  **和** `src/data/generated/i18n.json` 两侧（后者是 `extract-data.mjs` 的产物，
+  而那一步要 Godot 源项目才能跑，所以两份要一起改）。
+- 数据自带双语的字段（站名、商品名）走 `byLang(中文, 英文)` 或
+  `stationNameOf(def)`，**不要**自己写 `isEnglish() ? a_en : a_zh`——
+  参数顺序写反一次的症状和漏翻一模一样。
+
+默认语言是**英语**（`src/i18n/index.ts` 的 `DEFAULT_LANG`），
+刻意的：默认中文时任何漏翻在开发机上都不会露出来。`verify_i18n` 里有断言钉住它。
 
 ---
 
@@ -96,7 +126,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 32 条 / 468 断言
+npm run verify      # 39 条 / 610 断言
 ```
 
 三条都过再提交。`dist/` 与 `package-lock.json` 不进版本库；

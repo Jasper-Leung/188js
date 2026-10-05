@@ -30,8 +30,17 @@ export interface Capability {
   mobile: boolean;
   /** 估算的档位 */
   suggestedTier: 0 | 1 | 2;
-  /** 判定理由，写进设置面板让玩家知道自己被当成了什么机器 */
-  reason: string;
+  /**
+   * 判定理由的**文案键**，写进标题页让玩家知道自己被当成了什么机器。
+   *
+   * 是键不是句子：这一行原来直接写死中文，于是英文界面里
+   * 「核显：Intel HD Graphics 4000」下面跟一句中文——
+   * 而它是标题页上唯一一句解释画面为什么变糊的话，
+   * 恰好是最需要翻译的一行。显示方自己 `t(reasonKey, reasonVars)`。
+   */
+  reasonKey: string;
+  /** `reasonKey` 里的 `%s` / `%d` 参数，按出现顺序 */
+  reasonVars: (string | number)[];
 }
 
 export const TIER_LOW = 0 as const;
@@ -137,7 +146,7 @@ export function detectCapability(): Capability {
   const rl = renderer.toLowerCase();
   const softwareRenderer = SOFTWARE_HINTS.some((h) => rl.includes(h));
 
-  const { tier, reason } = decideTier({
+  const { tier, reasonKey, reasonVars } = decideTier({
     webgl2,
     renderer: rl,
     rawRenderer: renderer,
@@ -157,7 +166,8 @@ export function detectCapability(): Capability {
     touch,
     mobile,
     suggestedTier: tier,
-    reason,
+    reasonKey,
+    reasonVars,
   };
 }
 
@@ -196,49 +206,58 @@ interface DecideInput {
  * 档位判定。**顺序有意义**：越硬的否决条件越靠前。
  * 一个判据一旦命中就返回，不再看后面的——不然"内存 8G 的核显笔记本"
  * 会被后面的独显关键字（显卡名里带 GTX 的少见但存在）翻上去。
+ *
+ * 返回的是**文案键 + 参数**，不是句子。见 `Capability.reasonKey` 的说明。
  */
-function decideTier(c: DecideInput): { tier: Tier; reason: string } {
+function decideTier(c: DecideInput): { tier: Tier; reasonKey: string; reasonVars: (string | number)[] } {
+  const plain = (reasonKey: string): { tier: Tier; reasonKey: string; reasonVars: (string | number)[] } => ({
+    tier: TIER_LOW,
+    reasonKey,
+    reasonVars: [],
+  });
+
   if (!c.webgl2) {
     // 走到这里说明这台机器连 WebGL2 都开不出来。不给档位，给一句人话——
     // 后面 main.ts 会拿它渲染一张"为什么"而不是"游戏卡住了"。
-    return { tier: TIER_LOW, reason: '这台浏览器没有可用的 WebGL2' };
+    return plain('cap_reason_no_webgl2');
   }
 
   if (c.softwareRenderer) {
-    return {
-      tier: TIER_LOW,
-      reason: '显卡在用软件渲染（没开硬件加速）——画质已压到最低，能跑但会慢',
-    };
+    return plain('cap_reason_software');
   }
 
   if (c.mobile) {
-    return { tier: TIER_LOW, reason: '移动设备' };
+    return plain('cap_reason_mobile');
   }
 
   // 内存是最硬的信号之一：<4GB 的机器上，1.0 倍分辨率的 WebGL
   // 很容易被浏览器自己判成"页面卡住"然后杀掉标签页。
   if (c.deviceMemory > 0 && c.deviceMemory < 4) {
-    return { tier: TIER_LOW, reason: `设备内存 ${c.deviceMemory}GB` };
+    return { ...plain('cap_reason_memory'), reasonVars: [c.deviceMemory] };
   }
 
   if (STRONG_GPU_HINTS.some((h) => c.renderer.includes(h))) {
-    return { tier: TIER_HIGH, reason: `独显：${prettyRenderer(c.rawRenderer)}` };
+    return { ...plain('cap_reason_gpu_strong'), tier: TIER_HIGH, reasonVars: [prettyRenderer(c.rawRenderer)] };
   }
 
   if (WEAK_GPU_HINTS.some((h) => c.renderer.includes(h))) {
-    return { tier: TIER_LOW, reason: `核显：${prettyRenderer(c.rawRenderer)}` };
+    return { ...plain('cap_reason_gpu_weak'), reasonVars: [prettyRenderer(c.rawRenderer)] };
   }
 
   // 双核以下基本可以判定这台机器是十年前的
   if (c.cores > 0 && c.cores <= 2) {
-    return { tier: TIER_LOW, reason: `只有 ${c.cores} 个逻辑核心` };
+    return { ...plain('cap_reason_cores'), reasonVars: [c.cores] };
   }
 
   if (c.deviceMemory >= 8 && c.cores >= 8) {
-    return { tier: TIER_HIGH, reason: `${c.deviceMemory}GB 内存 / ${c.cores} 核` };
+    return { ...plain('cap_reason_big'), tier: TIER_HIGH, reasonVars: [c.deviceMemory, c.cores] };
   }
 
   // 显卡型号被浏览器藏起来了（隐私模式 / 某些 Linux 驱动），
   // 就按中档起步：这是"多数台式机"的形状，而且中档在集显上也是能跑的。
-  return { tier: TIER_MEDIUM, reason: c.renderer ? '未识别显卡，按中档起步' : '浏览器未提供显卡型号，按中档起步' };
+  return {
+    tier: TIER_MEDIUM,
+    reasonKey: c.renderer ? 'cap_reason_unknown_gpu' : 'cap_reason_no_gpu',
+    reasonVars: [],
+  };
 }

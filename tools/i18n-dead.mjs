@@ -33,7 +33,7 @@
  * 用法：node tools/i18n-dead.mjs        （由 verify-all.mjs 自动调用）
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,6 +71,150 @@ function templateShapes(blob) {
 
 const isDynamicKey = (k, shapes) =>
   shapes.some(({ head, tail }) => head !== '' && k.startsWith(head) && k.endsWith(tail));
+
+/**
+ * 第二个判据：**界面里写死的中文**。
+ *
+ * ## 为什么和"死字"是两种病
+ *
+ * 死字是"翻译了没人用"——文案在表里躺着，屏幕上没有。
+ * 这一条治的是反过来的一半：**中文直接写在代码里**，
+ * 于是它在中文界面下天衣无缝，而切到英文时它不会消失，
+ * 就那么站在一段英文中间。
+ *
+ * 它的杀伤力在于**没人会看见**：开发者的机器默认中文（那是改之前的行为），
+ * 他自己看自己那份永远是对的；发出去之后英文玩家看到的是
+ * 「Gift No.188 · 就绪」这种句子。默认语言已经改成英语（`DEFAULT_LANG`），
+ * 这类问题在本地就会当场露出来——但那只是让人**看见**，
+ * 真正让它们不能再偷偷溜进来的判据在这里。
+ *
+ * ## 口径
+ *
+ * 只扫**玩家真的能读到字的文件**：
+ *   · `index.html` —— 启动屏骨架（它是 UI 建好之前唯一在屏幕上的界面）
+ *   · `src/ui/**` —— 全部界面
+ *   · `src/main.ts` —— 启动屏文案、页面标题、崩溃页
+ *   · `src/core/{capability,touch,settings}.ts` —— 会被画进面板的短标签
+ *
+ * 不扫 `src/world`、`src/game`、`src/shaders`：那些文件里的中文全是
+ * `console.warn` 与 `throw new Error` 的诊断串（真机上没人读），
+ * 以及 `measureText('国Ag')` 这种字体度量探针——那两个字是**被量的字**，
+ * 不是被看的字。判据只覆盖玩家眼前，诊断留在开发者眼前。
+ *
+ * 剥注释的口径与上面 `stripComments` 相同。行尾注释不剥，
+ * 但这一条**只在引号内部**报中文，所以行尾注释里的中文天然不误报。
+ */
+const HARDCODE_SCAN = [
+  'index.html',
+  'src/main.ts',
+  'src/core/capability.ts',
+  'src/core/touch.ts',
+  'src/core/settings.ts',
+];
+
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+
+/**
+ * 一句"人话"里的续接字符。中文必须显式写进来：
+ * JS 的 `\w` 只覆盖 `[A-Za-z0-9_]`，不含 CJK——
+ * 而这段循环的起点就是一个中文字符，漏掉它会让 `i = j` 原地打转。
+ */
+const CONT_RE = /[\w\s/·、，。：；（）「」!?.]|[^\x00-\x7F]/;
+
+/** 扫字符串字面量，返回含中文的那些。引号没闭合的（多半是行尾注释里的）跳过。 */
+function cjkStringLiterals(blob) {
+  const hits = [];
+  let i = 0;
+  const n = blob.length;
+  const lineAt = (p) => blob.slice(0, p).split('\n').length;
+  while (i < n) {
+    const c = blob[i];
+    if (c !== '"' && c !== "'" && c !== '`') { i++; continue; }
+    let j = i + 1;
+    let val = '';
+    let closed = false;
+    while (j < n) {
+      const d = blob[j];
+      if (d === '\\') { val += blob[j + 1] ?? ''; j += 2; continue; }
+      if (d === c) { closed = true; break; }
+      if (c !== '`' && d === '\n') break;
+      val += d;
+      j++;
+    }
+    if (!closed) {
+      // 落到行尾的引号：不是字符串，跳到行尾，别让状态一路错下去
+      const nl = blob.indexOf('\n', i);
+      i = nl < 0 ? n : nl + 1;
+      continue;
+    }
+    if (CJK_RE.test(val)) hits.push({ line: lineAt(i), text: val.replace(/\s+/g, ' ').trim() });
+    i = j + 1;
+  }
+  return hits;
+}
+
+/**
+ * HTML 走另一支：**只扫标签之间的正文**。
+ *
+ * 启动屏那种骨架里，玩家能读到的字是**裸文本节点**（`<noscript>` 里那句），
+ * 它不在任何引号里——按字符串字面量扫的话整个 index.html 会被判成干净，
+ * 而启动屏恰恰是这一轮要治的那一块。
+ * 反过来，属性值（`content="…"`）该扫，所以先把标签整段剔掉再找中文。
+ */
+function cjkHtmlText(blob) {
+  const hits = [];
+  // 剔掉标签：剩下的就是正文
+  const text = blob.replace(/<[^>]*>/g, (tag) => ' '.repeat(tag.length));
+  let i = 0;
+  while (i < text.length) {
+    if (!CJK_RE.test(text[i])) { i++; continue; }
+    let j = i;
+    // 续接字符：拉丁字母、数字、中文标点，**以及中文本身**。
+    // 双语句子是混排的（「这个游戏需要 JavaScript 与 WebGL 2。」），
+    // 只认中文会把一句话切成三段。
+    // 而 CJK 必须显式写进来：JS 的 `\w` 只覆盖 `[A-Za-z0-9_]`，
+    // 漏掉它内层循环一步都不走，`i = j` 原地打转就是一次死循环。
+    while (j < text.length && CONT_RE.test(text[j])) j++;
+    const chunk = text.slice(i, j).replace(/\s+/g, ' ').trim();
+    if (chunk) hits.push({ line: text.slice(0, i).split('\n').length, text: chunk });
+    i = j;
+  }
+  return hits;
+}
+
+function hardcodeTargets() {
+  const files = [...HARDCODE_SCAN];
+  const uiDir = join(ROOT, 'src/ui');
+  // `collect` 给的是绝对路径，而白名单与报错都用**仓库相对路径**——
+  // 混着来的话白名单永远匹配不上，报错里的路径也点不开。
+  // 顺手把分隔符统一成 `/`：Windows 上 `collect` 吐的是反斜杠。
+  if (existsSync(uiDir)) files.push(...collect(uiDir).map((f) => relative(ROOT, f).replace(/\\/g, '/')));
+  return files.filter((f) => existsSync(join(ROOT, f)));
+}
+
+/**
+ * 白名单与死字那边同一个形状：只登记**确实不面向玩家**的中文串，
+ * 每条带 `why`；白名单之外出现任何新的硬编码中文 → FAIL。
+ * 同样只减不增，附一条"已经不再是硬编码"的提示。
+ */
+function scanHardcoded() {
+  const hits = [];
+  for (const rel of hardcodeTargets()) {
+    const raw = readFileSync(join(ROOT, rel), 'utf8');
+    // index.html 里的说明是 `<!-- -->` 而不是 `/* */`。
+    // 不剥的话那几段解释代码的注释会变成"界面硬编码中文"上报——
+    // 而它们根本不在界面上（注释掉的节点不渲染）。
+    const blob = stripComments(rel.endsWith('.html') ? raw.replace(/<!--[\s\S]*?-->/g, ' ') : raw);
+    const found = rel.endsWith('.html') ? cjkHtmlText(blob) : cjkStringLiterals(blob);
+    for (const h of found) hits.push({ file: rel, ...h });
+  }
+  const allowPath = join(ROOT, 'tools/i18n-hardcode-allow.json');
+  const allow = existsSync(allowPath) ? JSON.parse(readFileSync(allowPath, 'utf8')) : [];
+  const isAllowed = (h) => allow.some((a) => a.file === h.file && a.text === h.text);
+  const unexpected = hits.filter((h) => !isAllowed(h));
+  const stale = allow.filter((a) => !hits.some((h) => h.file === a.file && h.text === a.text));
+  return { hits, allow, unexpected, stale };
+}
 
 /**
  * 去掉注释再扫。
@@ -168,7 +312,21 @@ export function scanDead() {
   const zh = i18n.zh || i18n;
   const en = i18n.en || {};
   const files = collect(join(ROOT, 'src')).filter((f) => !f.includes(`${'verify'}\\`) && !f.includes('/verify/'));
-  const blob = stripComments(files.map((f) => readFileSync(f, 'utf8')).join('\n'));
+  /**
+   * HTML 也算引用来源。
+   *
+   * 启动屏骨架用 `data-i18n="键名"` 引用文案（`main.ts` 的
+   * `applyStaticI18n()` 按它填字），而 `collect` 只收 `.ts`——
+   * 于是那四条 `boot_*` 一条不落地被判成死字，
+   * 症状是"明明在用，报告说没人用"，和真的死字长得一模一样。
+   *
+   * 口径与 `.ts` 一致（保守）：`<!-- -->` 剥掉，属性值里的键名算引用。
+   */
+  const htmlBlob = [...HARDCODE_SCAN]
+    .filter((f) => f.endsWith('.html') && existsSync(join(ROOT, f)))
+    .map((f) => readFileSync(join(ROOT, f), 'utf8').replace(/<!--[\s\S]*?-->/g, ' '))
+    .join('\n');
+  const blob = [stripComments(files.map((f) => readFileSync(f, 'utf8')).join('\n')), htmlBlob].join('\n');
   const shapes = templateShapes(blob);
   const fromData = dataKeys();
 
@@ -241,5 +399,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`  ${GREEN}没有引用不存在的键${OFF}`);
   }
 
-  process.exit(r.unexpected.length > 0 || r.missing.length > 0 ? 1 : 0);
+  // ---- 界面里写死的中文 ----
+  const h = scanHardcoded();
+  console.log('');
+  console.log('=== 界面硬编码中文（英文界面里会原样露出来的那种）===');
+  console.log(`  扫描 ${hardcodeTargets().length} 个文件 · 命中 ${h.hits.length} 处 · 白名单 ${h.allow.length} 条`);
+  if (h.stale.length) {
+    for (const a of h.stale) {
+      console.log(`  ${YELLOW}白名单里的「${a.text}」已经不在 ${a.file} 里了（改成 t() 了？）—— 可以从 tools/i18n-hardcode-allow.json 划掉${OFF}`);
+    }
+  }
+  if (h.unexpected.length) {
+    for (const x of h.unexpected) console.log(`  ${RED}✗ ${x.file}:${x.line}  ${x.text}${OFF}`);
+    console.log(`  ${DIM}玩家会看到的中文必须走 t()（键补进 tools/i18n-supplement.json + src/data/generated/i18n.json，两侧都要）。`);
+    console.log(`  确实不面向玩家的（throw / console / 调试面板）就登记进 tools/i18n-hardcode-allow.json，要写 why。${OFF}`);
+  } else {
+    console.log(`  ${GREEN}白名单之外没有新的硬编码中文${OFF}`);
+  }
+
+  process.exit(r.unexpected.length > 0 || r.missing.length > 0 || h.unexpected.length > 0 ? 1 : 0);
 }

@@ -30,21 +30,103 @@
  * · **自动推进有下限**：短于 2.4 秒的话玩家来不及读完，
  *   而"来不及读完"读作"字太多了"，于是玩家开始主动跳过。
  */
-import { t } from '../i18n';
+import { t, isEnglish } from '../i18n';
 import { el, setShown, setText } from './dom';
+import { settleMs, settleTextKey, type SettleOutcome } from '../game/phase';
+
+/** 结算三态从 `game/phase` 来——判定不许在这层再抄一份。 */
+export type { SettleOutcome };
 
 const MAX_CARDS = 3;
 const DEFAULT_MS = 3400;
 const MIN_MS = 2400;
+/** 显式给了 ms 的长文上限。超过这个值就不再等它读完——见 readingMs 注释。 */
+const MAX_MS = 22000;
 
 interface Card {
   root: HTMLDivElement;
   life: number;
 }
 
+/**
+ * 叙事静音（`?nocine`）。给 AI 截图与自动试玩用。
+ *
+ * ## 为什么放在这里，而不是在 main.ts 里逐处判断
+ *
+ * 叙事的入口有五处：序章、驿里的声音、碎片提示、路边碑文、路口那句。
+ * 逐处加 `if (!quiet)` 的读法是"新加一段剧情时记得判一次"——
+ * 而这份清单上次更新时就已经漏过好几段了。
+ *
+ * 收在这里，所有卡**共用** `show()` 这一个入口，漏不掉。
+ * `showSequence()` 也走 `show()`，所以队列里剩下的那些同样不会被读出来。
+ */
+let quiet = false;
+export function setNarrativeQuiet(on: boolean): void {
+  quiet = on;
+}
+export function narrativeQuiet(): boolean {
+  return quiet;
+}
+
+/**
+ * 按文本长度算这张卡该停留多久。
+ *
+ * ## 为什么不能写死一个常数
+ *
+ * 序章从三句变成六句之后，实测两侧长度差 **3.57 倍**
+ * （中文 328 字 / 英文 232 词）。写死 9 秒的话，中文勉强够扫读，
+ * 英文只够读完前两句半——玩家看到的是"序章被腰斩"，
+ * 而界面上没有任何线索说明后面还有内容。
+ *
+ * 写死一个"英文专用的大常数"也不行：文案是持续生长的，
+ * 下次再加一句，总有一边会被腰斩。**时长必须跟着文本走。**
+ *
+ * ## 两种语言必须分别计量
+ *
+ * · 中文按**字符**：`5 字/秒`（默读，留理解余量）
+ * · 英文按**词**：`2.7 词/秒`（默读速度比中文慢，这是自然规律，
+ *   不是我给英语开的特例——同一个信息量的英文就是真的要读更久）
+ *
+ * 用字符数去算英文会高估约 1.6 倍（一个词平均 5 个字符，
+ * 但眼睛是按词跳的），用词数去算中文则无从谈起。
+ *
+ * ## 为什么封顶 22 秒
+ *
+ * 时长无上限的读法是"卡片永远在屏幕上"，于是那块 `rgba(18,16,14,0.88)`
+ * 的深色底会长时间压住 22% 高度处的路面，而它**不吃点击**——
+ * 玩家看不全路又点不动，只会以为游戏卡了。
+ * 截断掉的部分仍然读得到（暂停面板里能看到本趟已播的卡），
+ * 比让路面消失二十分钟要划算。
+ */
+export function readingMs(text: string, isEn: boolean): number {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean === '') return MIN_MS;
+  const units = isEn ? clean.split(' ').length : clean.length;
+  const perSec = isEn ? 2.7 : 5;
+  // +1.2s 是首屏认知成本：字要落在视网膜上再开始读，
+  // 那一瞬不算在默读速度里。
+  const ms = (units / perSec) * 1000 + 1200;
+  return Math.round(Math.min(Math.max(ms, MIN_MS), MAX_MS));
+}
+
 export class StoryCards {
   readonly root: HTMLDivElement;
   private cards: Card[] = [];
+  /**
+   * 待播的队列。**一次只演一张**，演完自动接下一张。
+   *
+   * 队列存在的原因不是"想一次说很多"，而是**一张卡装不下**：
+   * 序章六句在中文侧要 66 秒、在英文侧要 86 秒才能读完，
+   * 而单卡上限 22 秒（`MAX_MS`）。硬塞进一张就是必然腰斩。
+   * 拆成六张按序播，每张都读到完整。
+   *
+   * 顺带的观感好处：一次只亮一张，那块 `rgba(18,16,14,0.88)`
+   * 的深色底不会把六段话叠成一片黑压条。
+   */
+  private queue: {
+    text: string;
+    opts: { title?: string; interrupt?: boolean; ms?: number; dismissible?: boolean };
+  }[] = [];
   /** 自动推进的秒数。0 = 不自动推进（只有强制打断才用得到）。 */
   autoSec = DEFAULT_MS / 1000;
 
@@ -54,21 +136,78 @@ export class StoryCards {
   }
 
   /**
+   * 顺序播一组卡：一张演完再上下一张。
+   *
+   * 路边那些"顺路读到"的东西仍然直接 `show()`——它们本来就不该排队，
+   * 玩家正骑着车读到的东西不能因为前面还有三句话就压在后面。
+   * 所以这个方法**只给叙事段落用**（序章、驿里的声音）。
+   */
+  showSequence(
+    parts: string[],
+    opts: { title?: string; interrupt?: boolean; ms?: number; dismissible?: boolean } = {},
+  ): void {
+    // 静音时**整组不入队**。只让 `show()` 挡是不够的：
+    // 文字会先全压进 `queue`，而 `pump()` 每取一条都被 `show()` 挡回去，
+    // 于是 `queue` 永远非空 —— `afterCardGone()` 认定「还有东西」，
+    // 容器就再也不会 `setShown(false)`。症状是取消静音后
+    // 突然冒出一整趟攒下来的旧卡。**队列要么全进要么全不进。**
+    if (quiet) return;
+    for (const p of parts) {
+      if (p) this.queue.push({ text: p, opts });
+    }
+    if (!this.cards.length) this.pump();
+  }
+
+  /** 队列里还有就上下一张。 */
+  private pump() {
+    const next = this.queue.shift();
+    if (!next) return;
+    this.show(next.text, next.opts);
+  }
+
+  /**
    * 浮出一条。
    * @param text 正文
    * @param opts.title 顶部的小标题（通常是碑名或说话人）
    * @param opts.interrupt **强制打断**：压暗画面并且锁操作。
    *        只有反派那几场用——它们的性质是"有人在你耳边说话"，
    *        玩家需要停一下才接得住。路边的东西一律传 false。
+   * @param opts.ms 显式时长。**不传就按文本长度算**（`readingMs`），
+   *        这才是长文案（中英长度差 3.5 倍）不被腰斩的唯一办法。
+   * @param opts.dismissible **可点掉**。默认 false。
+   *
+   *        为什么默认仍然是 false：`.g-cards` 的 `pointer-events: none`
+   *        是**文件头里写死的硬要求**——路边读到的东西必须不吃点击，
+   *        压在它下面的路照样能点、照样能转。给所有卡开点击，
+   *        等于把这条硬要求反过来：**过弯时点一下会吞掉一次转向输入**。
+   *
+   *        所以只有"停下来读"性质的段落才开：驿里的声音三句每句
+   *        10~13 秒，等它自己走完是一种惩罚；而碑文、路口那三个字
+   *        属于骑过去顺便读到，开点击只会让人乱点。
    */
-  show(text: string, opts: { title?: string; interrupt?: boolean; ms?: number } = {}): void {
+  show(
+    text: string,
+    opts: { title?: string; interrupt?: boolean; ms?: number; dismissible?: boolean } = {},
+  ): void {
     if (!text) return;
+    // 静音时**不排进队列**。排进去的话队列会一直非空，
+    // 而每次 `pump()` 都会被这条判断挡回去——于是 `afterCardGone()`
+    // 认定"队列还有东西"，`setShown(root,false)` 永远不会执行。
+    if (quiet) return;
     const card = el('div', 'g-card-line');
     if (opts.interrupt) card.classList.add('is-interrupt');
+    if (opts.dismissible) card.classList.add('is-dismissible');
     if (opts.title) card.appendChild(el('div', 'g-card-t', opts.title));
     card.appendChild(el('div', 'g-card-b', text));
+    if (opts.dismissible) {
+      // 点一下 = 立刻退场（并接上队列里的下一张）。
+      // 绑在这一张上而不是 `.g-cards` 容器上：容器要保持
+      // `pointer-events: none`，否则路边那些字也会开始吃点击。
+      card.addEventListener('click', () => this.dismiss(card));
+    }
     this.root.appendChild(card);
-    this.cards.push({ root: card, life: Math.max(MIN_MS, opts.ms ?? DEFAULT_MS) / 1000 });
+    const ms = opts.ms ?? readingMs(text, isEnglish());
+    this.cards.push({ root: card, life: Math.max(MIN_MS, ms) / 1000 });
 
     // 超出上限就把最早那条挤掉，而不是往下堆到屏幕外
     while (this.cards.length > MAX_CARDS) {
@@ -76,6 +215,27 @@ export class StoryCards {
       old?.root.remove();
     }
     setShown(this.root, true);
+  }
+
+  /**
+   * 点掉某一张。
+   *
+   * 走的是和 `update()` 里自动退场**同一条**路径，所以队列推进只有一处实现——
+   * "点掉"和"等它走完"的行为不可能各说各话。
+   */
+  private dismiss(card: HTMLElement): void {
+    const i = this.cards.findIndex((c) => c.root === card);
+    if (i < 0) return;
+    card.remove();
+    this.cards.splice(i, 1);
+    this.afterCardGone();
+  }
+
+  /** 一张退场之后：队列里还有就接上，否则把容器收起来。 */
+  private afterCardGone(): void {
+    if (this.cards.length) return;
+    if (this.queue.length) this.pump();
+    else setShown(this.root, false);
   }
 
   /** 走 `update(dt)`，不用 `setTimeout`：暂停时游戏循环会停而定时器不会。 */
@@ -88,18 +248,32 @@ export class StoryCards {
       c.root.remove();
       this.cards.splice(i, 1);
     }
-    if (!this.cards.length) setShown(this.root, false);
+    // 队列里还有就接上。**必须等屏幕上真的空了再接**，
+    // 否则两张黑底卡重叠的 220ms 里文字会糊在一起。
+    if (!this.cards.length) this.afterCardGone();
   }
 
-  /** 一次清空。进世界 / 重开时用，免得上一趟的字留到下一趟。 */
+  /**
+   * 一次清空。进世界 / 重开时用，免得上一趟的字留到下一趟。
+   *
+   * **队列也一起清**。只清屏幕不清队列的症状很特别：
+   * 重开一趟之后，序章的第一句会在玩家已经骑出去几十米的时候
+   * 才浮上来——因为上一趟排队的后半截还留在里面。
+   */
   clear(): void {
     for (const c of this.cards) c.root.remove();
     this.cards = [];
+    this.queue = [];
     setShown(this.root, false);
   }
 
   get count(): number {
     return this.cards.length;
+  }
+
+  /** 队列里还没演的条数。回归用。 */
+  get pending(): number {
+    return this.queue.length;
   }
 }
 
@@ -133,15 +307,19 @@ export class ResultCard {
   }
 
   /**
-   * @param win 这一局成没成
+   * @param outcome 这一局怎么收的。**取消不是失败**——玩家按 Esc 退出时弹
+   *        「这次没有完成」，读起来就是"我失败了"，而他明明什么都没做错。
+   *        哪个 key 由 `game/phase.ts` 的 `settleTextKey` 判。
    * @param slot 乐事槽位（0..4），用来取 `fragment_<i>` 那两个字
-   * @param ms 停留毫秒。**成的时候给得比败的时候长**——
-   *        赢是这一刻唯一的高光，输只是路过的过程。
+   * @param ms 停留毫秒。不给就按 `settleMs(outcome)`——
+   *        **成的时候给得比败的时候长**：赢是这一刻唯一的高光，输只是路过的过程。
    */
-  show(win: boolean, slot: number, ms = win ? 2100 : 1300, onDone?: () => void): void {
-    setText(this.big, win ? t('mg_success') : t('mg_failed'));
-    setText(this.sub, win ? t(`fragment_${slot}`) : '');
-    this.root.classList.toggle('is-win', win);
+  show(outcome: SettleOutcome, slot: number, ms = settleMs(outcome), onDone?: () => void): void {
+    setText(this.big, t(settleTextKey(outcome)));
+    // 副标题只属于"成了"：输了与取消都还没拿到碎片，而取消那句话本身
+    // 已经是一个完整的交代，再挂一行"这件乐事"只会让人以为自己漏了什么。
+    setText(this.sub, outcome === 'win' ? t(`fragment_${slot}`) : '');
+    this.root.classList.toggle('is-win', outcome === 'win');
     setShown(this.root, true);
     this.life = ms / 1000;
     this.onDone = onDone ?? null;

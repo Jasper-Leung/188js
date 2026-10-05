@@ -37,6 +37,8 @@ export interface SaveBlob {
     mood: number;
     seen_villain: number;
     prologue_done: boolean;
+    /** 驿里那个声音是否已经引过路（一次性，落盘） */
+    voice_done: boolean;
     ending_id: string;
     /** 1-based 章节号。老存档没有这个字段，读回时按 1 处理 */
     chapter?: number;
@@ -85,6 +87,7 @@ export class GameStateManager {
   mood = ECON.MOOD_INITIAL;
   seenVillain = 0;
   prologueDone = false;
+  voiceDone = false;
   endingId = '';
   progressKm = 0;
   onboardingShown = false;
@@ -167,6 +170,7 @@ export class GameStateManager {
     this.mood = ECON.MOOD_INITIAL;
     this.seenVillain = 0;
     this.prologueDone = false;
+    this.voiceDone = false;
     this.endingId = '';
     this.progressKm = 0;
     this.onboardingShown = false;
@@ -418,6 +422,27 @@ export class GameStateManager {
   }
 
   /**
+   * 驿里那个声音是否已经引过路。**一次性**，落盘。
+   *
+   * ## 为什么它要落盘，而 `junctionLap` 那种"每圈一次"的不落盘
+   *
+   * 交叉口那句「路自此复」每圈都成立——它提醒的正是"你又走回来了"，
+   * 而 `junctionLap` 只活在本次会话里，于是重开一趟它从第一圈重新数，
+   * 这正是要的。
+   *
+   * 这一句不一样：它是一次**引路**——把"五件乐事散在一条路上"这件事
+   * 交给玩家，交给完就没有下文了。读第二遍的收益是零，
+   * 而一个在老驿站门口反复报菜名的声音会让那个地方从"有人在这儿"
+   * 掉成"有个 UI 在循环"。所以它跟 `prologueDone` 一样落盘。
+   */
+  claimVoiceGuide(): boolean {
+    if (this.voiceDone) return false;
+    this.voiceDone = true;
+    this.save();
+    return true;
+  }
+
+  /**
    * 反派场次（1-based）。返回 true 表示这一场该播。
    * 严格顺序：必须 i === seenVillain + 1。跳场会把漏掉的对白永久吞掉。
    */
@@ -468,6 +493,7 @@ export class GameStateManager {
           mood: this.mood,
           seen_villain: this.seenVillain,
           prologue_done: this.prologueDone,
+          voice_done: this.voiceDone,
           ending_id: this.endingId,
           chapter: this.chapter,
           chapter1_done: this.chapter1Done,
@@ -505,6 +531,10 @@ export class GameStateManager {
         this.mood = Math.min(Math.max(Number(ec.mood) || ECON.MOOD_INITIAL, ECON.MOOD_FLOOR), ECON.MOOD_CEIL);
         this.seenVillain = Math.max(0, Number(ec.seen_villain) || 0);
         this.prologueDone = ec.prologue_done === true;
+        // 老存档没有这个字段。`?? false` 让它退回"还没引过路"，
+        // 于是老存档读回来会在十八驿门口听见一次——那一趟本来就没听过，
+        // 补一次是对的；反过来默认 true 就等于永久吞掉它。
+        this.voiceDone = ec.voice_done === true;
         this.endingId = String(ec.ending_id ?? '');
         // 老存档没有这两个字段。`?? 1` / `?? false` 让它们退回"第一章、未完成"，
         // 于是老存档读回来会**重新**要求玩家回一次十八驿——这是对的：

@@ -139,14 +139,16 @@ export class Onboarding {
   /** 触屏：左下摇杆 / 右侧打卡 / 右上三颗。 */
   private buildTouch(): HTMLDivElement {
     const box = el('div', 'g-keys');
+    // 方位词也是文案：原来直接写死 '左下' / '右侧' / '右上'，
+    // 于是触屏玩家的英文引导页上，两列说明都是英文、只有左边那把"键帽"是中文。
     const items: [string, string, string][] = [
-      ['touch_joystick_key', 'touch_joystick_desc', '左下'],
-      ['touch_checkin_key', 'touch_checkin_desc', '右侧'],
-      ['touch_buttons_key', 'touch_buttons_desc', '右上'],
+      ['touch_joystick_key', 'touch_joystick_desc', 'touch_pos_left'],
+      ['touch_checkin_key', 'touch_checkin_desc', 'touch_pos_right'],
+      ['touch_buttons_key', 'touch_buttons_desc', 'touch_pos_topright'],
     ];
-    for (const [k, dk, glyph] of items) {
+    for (const [k, dk, posKey] of items) {
       const r = el('div', 'g-key');
-      r.appendChild(el('span', 'g-key-g', glyph));
+      r.appendChild(el('span', 'g-key-g', t(posKey)));
       const d = el('span', 'g-key-d');
       d.appendChild(el('b', null, t(k)));
       d.appendChild(el('i', null, t(dk)));

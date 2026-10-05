@@ -52,7 +52,7 @@
  * 所以暂停面板里有一个三态开关（自动 / 开 / 关），并且默认存在。
  * 探测只是给一个默认值，**不替玩家做最终决定**——这和画质档的处理是同一条原则。
  */
-import { getLang } from '../i18n';
+import { t } from '../i18n';
 
 export type TouchMode = 'auto' | 'on' | 'off';
 
@@ -222,12 +222,20 @@ export function installTouchDetection(): void {
   }
 }
 
-/** 供设置面板显示的一句人话 */
+/**
+ * 供设置面板显示的一句人话。
+ *
+ * 原来在这里内联写了两套语言（`getLang() === 'zh' ? '已检测到触摸' : 'Touch detected'`）。
+ * 内联双语能显示对，但它是一份**不在文案表里**的翻译：
+ * 拼错、漏翻、两种语言文案不同步，都没有任何工具会发现——
+ * 而这一句恰好是"手机上玩不到这个游戏"这类问题的自查入口。
+ * 走 `t()` 之后它和其他文案受同一套守卫管。
+ */
 export function touchModeLabel(): string {
   const s = touchSignals();
-  if (s.touched) return getLang() === 'zh' ? '已检测到触摸' : 'Touch detected';
-  if (s.coarse) return getLang() === 'zh' ? '粗指针设备' : 'Coarse pointer';
-  if (s.points > 0) return getLang() === 'zh' ? `支持触摸（${s.points} 点）` : `Touch capable (${s.points} points)`;
-  if (s.small) return getLang() === 'zh' ? '小屏' : 'Small screen';
-  return getLang() === 'zh' ? '未检测到触摸' : 'No touch detected';
+  if (s.touched) return t('touch_reason_touched');
+  if (s.coarse) return t('touch_reason_coarse');
+  if (s.points > 0) return t('touch_reason_points', [s.points]);
+  if (s.small) return t('touch_reason_small');
+  return t('touch_reason_none');
 }

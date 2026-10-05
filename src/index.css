@@ -271,6 +271,25 @@ body {
   background: rgba(10, 9, 8, 0.95);
   border-color: rgba(180, 96, 48, 0.5);
 }
+/* 可点掉的那几张（驿里的声音）。
+ *
+ * 父容器 `.g-cards` 是 `pointer-events: none`——文件头写死的硬要求，
+ * 路边读到的东西必须不吃点击，压在下面的路照样能转。所以这里
+ * **只给标了 is-dismissible 的单张**开回来，别把容器也改了。
+ *
+ * `cursor: pointer` 不是装饰：玩家看不见"能点"，就只会以为点了没反应。 */
+.g-card-line.is-dismissible {
+  pointer-events: auto;
+  cursor: pointer;
+}
+.g-card-line.is-dismissible:hover {
+  border-color: rgba(232, 224, 205, 0.42);
+}
+.g-card-line.is-dismissible:active {
+  /* 按下去立刻给反馈。手停 10 秒等人读字的时候，
+   * 一次轻微的缩进就是"它收到了"的全部证据。 */
+  transform: scale(0.985);
+}
 .g-card-t {
   font-size: 12px;
   letter-spacing: 0.28em;

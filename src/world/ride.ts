@@ -140,6 +140,15 @@ export class Ride {
   private heading = 0;
   private canMove = true;
   private cameraLocked = false;
+  /**
+   * 强制隐藏角色，**与机位无关**。
+   *
+   * 第一视角下角色挡镜头（`first` 机位在头后 15cm），那是 `render()` 里
+   * 按机位自动做的。但拍空镜时用的是自由机位，机位判断帮不上忙——
+   * 绕拍也好、定机位也好，画面里都还有一个人。
+   * 录风景素材要的是"没有人"，所以这个开关由外部（`?cine=1`）推进来。
+   */
+  private hideCharacter = false;
   private touchDir = { x: 0, y: 0 };
 
   private position = new Vector3(0, 0, 0);
@@ -215,6 +224,11 @@ export class Ride {
   }
   setCameraLocked(v: boolean) {
     this.cameraLocked = v;
+  }
+
+  /** 强制不渲染角色（录空镜用）。`true` 之后任何机位都看不到人。 */
+  setHideCharacter(v: boolean) {
+    this.hideCharacter = v;
   }
   setTouchDirection(x: number, y: number) {
     this.touchDir.x = x;
@@ -386,7 +400,9 @@ export class Ride {
     //
     // 这一句必须在 `vehicle.update()` **之前**：update() 每帧都会重算
     // `char.visible`，晚一步写就被它覆盖回去。
-    this.vehicle.setSelfHidden(this.camMode === 'first');
+    //
+    // 两条来源：机位是 first（相机贴在头后），或者外部显式要求空镜。
+    this.vehicle.setSelfHidden(this.camMode === 'first' || this.hideCharacter);
     // 载具动画与轮子。**在这里而不是 render() 里**：固步长下才是稳定的转速。
     this.vehicle.update(dt, this.speed, this.heading);
 
