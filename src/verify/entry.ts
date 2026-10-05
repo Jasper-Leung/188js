@@ -34,9 +34,13 @@ import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT,
 import { canRide, isInWorld, interactAt } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
-import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, rootBoneName, rootTrackOf, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, type RideMode } from '../world/vehicle';import { assertRide } from './ride';
+import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
+import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSeam } from '../world/pose';
+import { assertRide } from './ride';
 import { GameStateManager } from '../game/state';
+import { readingMs, StoryCards, setNarrativeQuiet } from '../ui/storyCard';
 import { PRESETS, clampTier } from '../core/settings';
+import { DEFAULT_LANG, setLang, t } from '../i18n';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
 
 export interface Check {
@@ -392,7 +396,54 @@ check('verify_i18n', () => {
     probs.push('stations_seen 带了分母，而驿数会变，抄死的分母早晚对不上');
   }
 
-  return expect(probs.length === 0, probs.length ? probs.join('；') : `${zh.length} 条，中英完全一致`, asserts);
+  // **英文侧一个字都不许有中文。**
+  //
+  // 这是"英文界面里出现中文"最省事的一条判据：它不需要知道
+  // 哪句话在界面上、谁调了 `t()`，只要英文表里混进一个汉字就报。
+  //
+  // 它挡过真东西：`language` 这一条原来是「语言 / Language」——
+  // 一个"看起来双语所以没问题"的按钮，而英文界面点下去看到的是中文。
+  //
+  // 只查汉字（不含标点 / emoji）：`·`、`…`、`🌐` 两侧都有，不该报。
+  asserts++;
+  const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
+  const cjkInEn = en.filter((k) => CJK.test(I18N.en[k]));
+  if (cjkInEn.length) probs.push(`en 侧含中文：${cjkInEn.slice(0, 5).join(', ')}`);
+
+  // 默认语言必须是英语。
+  //
+  // 这不是"偏好"，是**可见性**：默认中文时，任何一处漏翻的中文
+  // 在开发者自己机器上都不会露出来（他看的是自己那一份），
+  // 于是漏翻能活到发版。默认英语之后，它在本地就现形。
+  asserts++;
+  if (DEFAULT_LANG !== 'en') {
+    probs.push(`默认语言是 ${DEFAULT_LANG}，漏翻的中文在开发机上不会露出来`);
+  }
+
+  // `t(key, 数组)` 这条路径：档位判定理由的参数是在 `decideTier()` 里
+  // 攒出来的数组（`cap_reason_memory: '设备内存 %dGB'`），
+  // 走的是和命名参数**不同**的一段替换逻辑。
+  //
+  // 它坏掉的样子非常有迷惑性：不报错，只是 `%d` 消失，
+  // 标题页上那行变成「Device memory GB」——一个读起来仍然像句话的东西。
+  // 所以这里钉死两条：数组按出现顺序消费，两个 `%d` 都要落到。
+  asserts++;
+  setLang('en');
+  const mem = t('cap_reason_memory', [2]);
+  if (mem !== 'Device memory 2GB') probs.push(`数组参数替换坏了：「${mem}」不是 Device memory 2GB`);
+
+  asserts++;
+  const big = t('cap_reason_big', [16, 8]);
+  if (big !== '16GB memory / 8 cores') probs.push(`两个数组参数替换坏了：「${big}」不是 16GB memory / 8 cores`);
+
+  // 顺带钉住"缺键渲染成 ⟨key⟩"这个约定：它要是哪天变成返回 key 本身，
+  // 界面上就会剩一个 `cap_reason_memory` 这样的符号名，比空串更难认。
+  asserts++;
+  if (t('definitely_not_a_key_zzz') !== '⟨definitely_not_a_key_zzz⟩') {
+    probs.push('缺键不再渲染成 ⟨key⟩，界面上会剩下一个内部符号名');
+  }
+
+  return expect(probs.length === 0, probs.length ? probs.join('；') : `${zh.length} 条，中英完全一致，英文侧无中文`, asserts);
 });
 
 // ---------------------------------------------------------------- 经济
@@ -1820,6 +1871,357 @@ check('verify_foot_anim', () => {
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
+// ---------------------------------------------------------------- 滑板姿势
+/**
+ * 滑板姿势 = `run` 里**双脚张得最开的那一帧**，定格。
+ *
+ * ## 为什么必须单独一条
+ *
+ * 原来的滑板模式走的是徒步那条分支：站上板之后按速度混合 `walk` / `run`，
+ * 而板的最大速度是 17 m/s（`MODE_TUNE.skate`）——一上板就是满速 `run`，
+ * 于是**人站在板上原地跑步**。速度、轮子转角、站位、面数全部正常，
+ * 画面上只是「姿势不对」，没有一条既有断言会红。
+ *
+ * 改成定格姿势之后，这一族里又冒出四个更安静的坑，各钉一条：
+ *
+ * | 坑 | 症状 | 断言 |
+ * |---|---|---|
+ * | 取的不是最宽那一帧 | 站姿「有点开」但说不清差在哪 | 1（对着**解析解**验）· 3（240 点密扫验「就是全局最大」） |
+ * | 量的是**横向**那一维 | 跑步时两脚各在自己那侧，横向间距几乎是常数，取最大等于随便取一帧 | 2（钉住「横向退化」这个前提） |
+ * | 定格片段把骨写成 0 | **滑板上没人** | 4（逐骨复现 `run`，且 t=0 与 t=0.999 完全一致） |
+ * | 定格姿势带着根位移 | 人站在板上自己往前平移（板在动，看不出来） | 4b |
+ * | 姿势定格了，脚却浮在板上面 | 人踩空气 | 5 / 8（站高 = 板面 − 实测落差） |
+ * | 姿势轨被按速度的混合稀释 | 人有点抖，权重不足 1 时漏出来的是张开双臂 | 6 / 7 |
+ *
+ * ## 夹具为什么自带**解析解**
+ *
+ * 骨架只有 `hips → UpLeg → Foot(+ToeBase)`。左脚在**前后**方向上一条三角波，
+ * 右脚固定在 0（支撑腿），键 9（t = 9/30 = 0.3）处到顶 0.25。
+ * 判据量的是**水平面**距离，所以：
+ *
+ * ```
+ * span(t) = hypot(横向 0.18, 前后 z(t))，峰值在 t = 0.3
+ * span_max = hypot(0.18, 0.25) = 0.308220
+ * ```
+ *
+ * ★ **横向那一维不能忘**：两根踝骨的 x 差恒为 0.18，而判据量的是水平面
+ *   距离（`hypot`），所以峰值是 0.308 而不是 0.25。第一版夹具漏了它，
+ *   解析解差 8%，判据红——而红的正是**夹具**，不是实现。
+ *
+ * ★ 峰值为什么放在**关键帧上**（而不是两帧之间）：glTF 的位置轨道是
+ *   **分段线性**的，而**分段线性函数的极大值必在折点上**。所以
+ *   「最宽的那一帧」本来就是关键帧，实现里不该有段内搜索；
+ *   第 3 条改为「拿 240 点密扫整个片段，量到的最大值必须就是它」——
+ *   那是**性质**，不是实现细节，换一种搜索策略也照样绿。
+ *
+ * ★ 三角波（而不是正弦）是为了峰值**唯一**：`|sin|` 一个周期里有两个
+ *   等高极大，「最宽的那一帧」变成二选一，判据没法钉。
+ *
+ * 夹具用 31 帧 / 1.0 s，与真素材 `run`（31 帧 / 1.25 s）同一套帧结构。
+ */
+check('verify_skate_stance', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const notes: string[] = [];
+
+  // ---- 夹具骨架。骨名必须是 **three 清洗之后**的名字（没有冒号），
+  //      理由与 verify_foot_anim 里那条墓碑一样：写成 `mixamorig:LeftFoot`
+  //      的话量到的是「一根都不存在」，而判据还是绿的。
+  const char = new Object3D();
+  const bone = (name: string, parent: Object3D, x: number, y: number, z: number): Bone => {
+    const b = new Bone();
+    b.name = name;
+    b.position.set(x, y, z);
+    parent.add(b);
+    return b;
+  };
+  const hips = bone('mixamorigHips', char, 0, 0, 0);
+  const LF = bone('mixamorigLeftFoot', bone('mixamorigLeftUpLeg', hips, 0, -0.02, -0.05), 0.09, -0.42, 0);
+  const RF = bone('mixamorigRightFoot', bone('mixamorigRightUpLeg', hips, 0, -0.02, -0.05), -0.09, -0.42, 0);
+  bone('mixamorigLeftToeBase', LF, 0, -0.02, 0.03);
+  bone('mixamorigRightToeBase', RF, 0, -0.02, 0.03);
+
+  const N = 30;
+  const times = new Float32Array(N + 1);
+  for (let i = 0; i <= N; i++) times[i] = i / N;
+  const pos = (name: string, fn: (i: number) => [number, number, number]) => {
+    const v: number[] = [];
+    for (let i = 0; i <= N; i++) v.push(...fn(i));
+    return new KeyframeTrack(`${name}.position`, times, Float32Array.from(v));
+  };
+  /** 摆幅。三角波在键 9 顶到 0.25，键 18 之后回 0。 */
+  const SWING = 0.25;
+  /** 三角波：0 → 0.25（键 9）→ 0（键 18）→ 0。**峰值唯一**。 */
+  const swingZ = (i: number): number => (i >= 18 ? 0 : (Math.min(i, 18 - i) / 9) * SWING);
+  /** 跑动：骨盆固定在 0.5 高、**带 1 m/s 的根位移**（真素材三段都带）。
+   *  左腿前后摆、右腿固定当支撑——见文件头。 */
+  const runClip = new AnimationClip('run', 1, [
+    pos('mixamorigHips', (i) => [0, 0.5, i / N]),
+    pos('mixamorigLeftFoot', (i) => [0.09, -0.42, swingZ(i)]),
+    pos('mixamorigRightFoot', () => [-0.09, -0.42, 0]),
+    pos('mixamorigLeftToeBase', () => [0, -0.02, 0.03]),
+    pos('mixamorigRightToeBase', () => [0, -0.02, 0.03]),
+  ]);
+  /** 站平：骨盆 0.48，两脚并拢。最低脚点 = 0.48 − 0.02 − 0.42 − 0.02 = 0.02。 */
+  const standClip = new AnimationClip('idle', 1, [
+    pos('mixamorigHips', () => [0, 0.48, 0]),
+    pos('mixamorigLeftFoot', () => [0.09, -0.42, 0]),
+    pos('mixamorigRightFoot', () => [-0.09, -0.42, 0]),
+    pos('mixamorigLeftToeBase', () => [0, -0.02, 0.03]),
+    pos('mixamorigRightToeBase', () => [0, -0.02, 0.03]),
+  ]);
+  const WANT_T = 9 / N;
+  /** 判据量的是**水平面**距离，所以横向那个恒定的 0.18 必须在里面。 */
+  const WANT_SPAN = Math.hypot(0.18, SWING);
+  const L = 'mixamorigLeftFoot';
+  const R = 'mixamorigRightFoot';
+
+  const pose = stancePoseOf(char, runClip, standClip);
+  asserts++;
+  if (!pose) {
+    probs.push('stancePoseOf 返回 null —— 骨架里有左右踝骨，它不该返回 null');
+    return expect(false, probs.join('；'), asserts);
+  }
+
+  // 1. 取的就是**最宽那一帧**：对着解析解 `t = 9/30` 验，容差 3ms。
+  //    这一帧的三角波到顶 0.25，而前后 0.25 是唯一的，所以容差取宽一点
+  //    也只会放过「差一格」的实现（相邻格是 0.2222 与 0.1944）。
+  asserts++;
+  if (Math.abs(pose.time - WANT_T) > 3e-3) {
+    probs.push(`取到的时刻是 ${pose.time.toFixed(5)}s，应为 ${WANT_T.toFixed(5)}s（三角波顶点，键 9）`);
+  }
+  asserts++;
+  if (Math.abs(pose.span - WANT_SPAN) > 2e-3) {
+    probs.push(`张角是 ${pose.span.toFixed(5)}，解析解 hypot(0.18, 0.25) = ${WANT_SPAN.toFixed(5)}`);
+  }
+
+  // 2. ★ 横向那一维是**退化**的，所以判据只能量水平面。
+  //    夹具里两条腿的横向间距恒为 0.18（一根常数）：谁把判据写成
+  //    「按横向取最大」，取到的就是**第一个格点**，第 1 条立刻红。
+  //    这条断言本身钉住「横向确实没有信息量」这个前提。
+  asserts++;
+  {
+    const probe = new PoseSampler(char, runClip);
+    const lateral = (t: number): number => {
+      probe.seek(t);
+      return Math.abs(boneWorld(probe, R).x - boneWorld(probe, L).x);
+    };
+    const base = lateral(0);
+    let varies = 0;
+    for (const t of keyTimesOf(runClip)) varies = Math.max(varies, Math.abs(lateral(t) - base));
+    if (Math.abs(base - 0.18) > 1e-6 || varies > 1e-6) {
+      probs.push(`夹具的横向间距不是常数（${base.toFixed(4)}，波动 ${varies.toExponential(1)}）—— 第 1 条就失去意义了`);
+    }
+  }
+
+  // 3. ★ **性质**判据：它必须是**整个片段的最大值**。
+  //    自己拿 240 点密扫一遍（不调 `stancePoseOf`，免得自己验自己）。
+  //    这一条量的是「取的是最宽那一帧」这句话本身，
+  //    所以换任何一种搜索策略（关键帧扫描 / 密扫 / 二分）都照样绿。
+  asserts++;
+  {
+    const probe = new PoseSampler(char, runClip);
+    let dense = -1;
+    let denseT = 0;
+    for (let k = 0; k <= 240; k++) {
+      const t = (k / 240) * runClip.duration;
+      probe.seek(t);
+      const s = probe.span(L, R);
+      if (s > dense) {
+        dense = s;
+        denseT = t;
+      }
+    }
+    if (Math.abs(pose.span - dense) > 1e-6) {
+      probs.push(
+        `取到的张角 ${pose.span.toFixed(6)} 不是全片段最大（240 点密扫得 ${dense.toFixed(6)} @ ${denseT.toFixed(4)}s）`,
+      );
+    }
+    notes.push(`密扫最大 ${dense.toFixed(6)} @ ${denseT.toFixed(4)}s`);
+  }
+
+  // 4. ★ 定格片段必须**逐骨复现** `run` 在那一刻的姿势。
+  //    而它必须是**冻结**的：片段里写的是两个同值帧 + 离散插值，
+  //    所以 mixer 自己夹取时（t=0.999）也必须是同一个姿势。
+  asserts++;
+  {
+    const src = new PoseSampler(char, runClip);
+    const still = new PoseSampler(char, pose.clip);
+    src.seek(pose.time);
+    still.seek(0);
+    const first = FOOT_BONES.map((n) => boneWorld(still, n));
+    still.seek(0.999);
+    const late = FOOT_BONES.map((n) => boneWorld(still, n));
+    let worstSame = 0;
+    let worstSrc = 0;
+    for (let i = 0; i < FOOT_BONES.length; i++) {
+      worstSame = Math.max(worstSame, first[i].distanceTo(late[i]));
+      worstSrc = Math.max(worstSrc, first[i].distanceTo(boneWorld(src, FOOT_BONES[i])));
+    }
+    if (worstSame > 1e-9) {
+      probs.push(`定格片段在 t=0 与 t=0.999 的脚位差 ${worstSame.toExponential(1)} —— 它还在动`);
+    }
+    if (worstSrc > 1e-6) {
+      probs.push(`定格片段的脚位与 run@${pose.time.toFixed(4)}s 差 ${worstSrc.toExponential(1)} —— 采样的不是那一帧`);
+    }
+  }
+
+  // 5. ★ 落差是**量**出来的：跑姿最低脚点 0.04，站姿 0.02，差 0.02。
+  asserts++;
+  if (Math.abs(pose.rise - 0.02) > 1e-6) {
+    probs.push(`落差是 ${pose.rise.toFixed(6)}，应为 0.02（跑姿 0.04 − 站姿 0.02）—— 站高算错人就浮在板上面`);
+  }
+
+  // 6. ★ 姿势轨：权重 1、冻结。权重不足 1 漏出来的是 bind pose（张开双臂）。
+  const v = new Vehicle();
+  v.attach({
+    bike: null,
+    motorcycle: null,
+    skate: new Object3D(),
+    char,
+    clips: collectClips([runClip, standClip]),
+  });
+  if (!v.set('skate')) {
+    asserts++;
+    probs.push('切不进滑板模式');
+    return expect(false, probs.join('；'), asserts);
+  }
+  asserts++;
+  if (v.stanceWeight < 0.999) {
+    probs.push(`滑板姿势轨权重 ${v.stanceWeight.toFixed(3)}，应为 1 —— 漏出来的那份是 bind pose（张开双臂）`);
+  }
+  asserts++;
+  if (!v.stancePaused) {
+    probs.push('滑板姿势轨没有冻结 —— 那还是一段动画，速度一变姿势就跟着变');
+  }
+
+  // 6b. ★ 剥离根位移**不改变张角**（两个脚一起被平移，差不变），
+  //      所以 Vehicle 里量到的必须和上面直接量的同一个数。
+  asserts++;
+  {
+    const s = v.stancePose;
+    if (!s || Math.abs(s.span - pose.span) > 1e-6) {
+      probs.push(`Vehicle 里量到的张角 ${s?.span.toFixed(5)} 与直接量的 ${pose.span.toFixed(5)} 不一致`);
+    }
+  }
+
+  // 6c. ★ 定格姿势**不许带根位移**。夹具的 `run` 骨盆 z 走满 1.0m，
+  //      而游戏里跑的是**剥离之后**的片段，所以这条查的是 `Vehicle` 的那一份
+  //      （`prepareClips` 先 `stripRootMotion` 再定格）。
+  //      带着的话人站在板上会自己往前平移——而板本来就在动，画面上看不出来。
+  asserts++;
+  {
+    const s = v.stancePose;
+    if (!s) {
+      probs.push('Vehicle 里没有滑板姿势');
+    } else {
+      const still = new PoseSampler(char, s.clip);
+      still.seek(0);
+      const p = boneWorld(still, 'mixamorigHips');
+      if (Math.abs(p.z) > 1e-6 || Math.abs(p.x) > 1e-6) {
+        probs.push(`游戏用的定格姿势还带着根位移 (${p.x.toFixed(4)}, ${p.z.toFixed(4)}) —— 人会自己往前平移`);
+      }
+    }
+  }
+
+  // 7. ★ 姿势**不许被按速度的混合动过**，而且脚不许漂。
+  //    原来的实现每帧按 17 m/s 调 `updateFootAnim`，`run` 权重拉满。
+  asserts++;
+  {
+    for (let i = 0; i < 60; i++) v.update(1 / 60, MODE_TUNE.skate.maxSpeed, 0.7);
+    const b = v.footBlend;
+    if (b.walk > 1e-6 || b.run > 1e-6) {
+      probs.push(`滑板模式下动画权重被按速度调动 walk=${b.walk.toFixed(4)} run=${b.run.toFixed(4)} —— 姿势会被冲掉`);
+    }
+  }
+  asserts++;
+  {
+    const before = FOOT_BONES.map((n) => worldOf(char, n));
+    for (let i = 0; i < 60; i++) v.update(1 / 60, MODE_TUNE.skate.maxSpeed, -0.3);
+    const after = FOOT_BONES.map((n) => worldOf(char, n));
+    let worst = 0;
+    for (let i = 0; i < before.length; i++) worst = Math.max(worst, before[i].distanceTo(after[i]));
+    if (worst > 1e-6) {
+      probs.push(`滑板上骑 2 秒，脚位漂了 ${worst.toExponential(1)} —— 姿势没有定住`);
+    }
+  }
+
+  // 8. ★ 站高 = 板面 − 实测落差。夹具角色没有网格，`autoScaleToHeight`
+  //    返回 1，所以落差直接就是米。
+  asserts++;
+  {
+    const want = SKATE_DECK_Y - pose.rise;
+    if (Math.abs(char.position.y - want) > 1e-6) {
+      probs.push(`角色站高 ${char.position.y.toFixed(5)}m，应为 ${want.toFixed(5)}m（板面 ${SKATE_DECK_Y} − 落差 ${pose.rise.toFixed(4)}）`);
+    }
+  }
+
+  // 9. ★ 真素材：判据量的是**自己的数**，不是夹具的解析解。
+  //    真 `run` 实测：水平面张角峰值 0.4310（= 0.757m），横向峰值只有
+  //    0.0735（跑步时两脚各在自己那侧，横向那一维是退化的）。
+  //    这条钉的是「换模型/换动画之后这个数仍然是个人能站的宽度」。
+  if (!realModels) {
+    asserts++;
+    notes.push('真素材未加载（public/models 里没有 survivor.glb）：第 9 条**没量到**，不是通过');
+  } else {
+    asserts++;
+    {
+      const real = realModels.char.clone(true);
+      const c = collectClips(realModels.charAnims);
+      const run = c.run;
+      const idle = c.idle;
+      if (!run) {
+        probs.push('真素材里没有 run 片段');
+      } else {
+        const p = stancePoseOf(real, stripRootMotion(run, rootBoneName(real)), idle ?? null);
+        if (!p) {
+          probs.push('真素材上 stancePoseOf 返回 null');
+        } else {
+          const cs = autoScaleToHeight(real, 1.75);
+          const spanM = p.span * cs;
+          notes.push(
+            `真 run：t=${p.time.toFixed(3)}/${run.duration}s · 张角 ${p.span.toFixed(4)}（${spanM.toFixed(3)}m）· 落差 ${p.rise.toFixed(4)}（${(p.rise * cs).toFixed(3)}m）`,
+          );
+          asserts++;
+          // 人的前后开度：实测 0.757m。低于 0.4m 就是没找到张开的帧
+          // （或者量错了轴），高于 1.3m 那是量到了髋宽之类的别的东西。
+          if (spanM < 0.4 || spanM > 1.3) {
+            probs.push(`真素材的站姿开度 ${spanM.toFixed(3)}m 不在 0.4–1.3m —— 不是人的站姿宽度`);
+          }
+          asserts++;
+          // 落差必须**非负且很小**：跑姿的脚比站姿低才是踩在板上的姿势。
+          // 负值 = 「脚比站着还低」，那会把人插进板里。
+          if (p.rise < -0.02 || p.rise * cs > 0.3) {
+            probs.push(`真素材的落差 ${(p.rise * cs).toFixed(3)}m 不合理（应在 −0.035–0.3m）`);
+          }
+        }
+      }
+    }
+  }
+
+  const summary =
+    `取 run 的 t=${pose.time.toFixed(5)}s（= 键 9，解析解 hypot(0.18,0.25)=${WANT_SPAN.toFixed(5)}）· ` +
+    `落差 ${pose.rise.toFixed(4)} 模型单位 · 站高 = 板面 − 落差 · 姿势轨权重 1 且冻结 · 2 秒满速转向脚位零漂移` +
+    (notes.length ? ` · ${notes.join(' · ')}` : '');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+/** PoseSampler 里某根骨的世界坐标。取私有字段是因为它只有这一处用途。 */
+function boneWorld(probe: PoseSampler, name: string): Vector3 {
+  const bones = (probe as unknown as { bones: Map<string, Bone> }).bones;
+  const b = bones.get(name);
+  if (!b) return new Vector3(NaN, NaN, NaN);
+  b.updateWorldMatrix(true, false);
+  return b.getWorldPosition(new Vector3());
+}
+/** 场景里某根骨的世界坐标。给回归量「脚漂没漂」用。 */
+function worldOf(root: Object3D, name: string): Vector3 {
+  const b = root.getObjectByName(name);
+  if (!b) return new Vector3(NaN, NaN, NaN);
+  b.updateWorldMatrix(true, false);
+  return b.getWorldPosition(new Vector3());
+}
+
 // ---------------------------------------------------------------- 小游戏能玩
 /**
  * **五件乐事真的能跑起来**。
@@ -1968,6 +2370,132 @@ check('verify_story', () => {
   let asserts = 0;
   const probs: string[] = [];
 
+  /**
+   * 内存版 localStorage。
+   *
+   * 无头环境里没有这个全局，而 `GameStateManager` 的 save/load 都自带
+   * try/catch 兜底——**所以缺了它不会报错，只会静默不落盘**。
+   * 后果是"读档后又被引一次路"这种 bug 在无头回归里测不出来：
+   * 内存字段是对的，断言全绿，只有真机上重开一趟才会重播。
+   *
+   * 所以这里补一个最小实现，只要求 `getItem` / `setItem` / `removeItem`。
+   * 装完再摘掉，免得它盖住别处"该不该落盘"的真实判断。
+   */
+  // 与下面的 `document` 同一个理由：不用 `typeof localStorage`，
+  // 改走 globalThis 的间接属性，免得被 esbuild 折叠成常量。
+  const gl = globalThis as { localStorage?: Storage };
+  const hadStorage = gl.localStorage !== undefined;
+  const mem = new Map<string, string>();
+  if (!hadStorage) {
+    gl.localStorage = {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, v),
+      removeItem: (k: string) => void mem.delete(k),
+      clear: () => mem.clear(),
+      key: (i: number) => [...mem.keys()][i] ?? null,
+      get length() {
+        return mem.size;
+      },
+    } as Storage;
+  }
+
+  /**
+   * 最小 DOM 桩。
+   *
+   * 无头环境里没有 `document`，而 `StoryCards` 的 `el()` 一上来就调
+   * `document.createElement`。**不补这个桩的话，上面两条关于卡片队列的
+   * 判据就只能是注释**——而"静音后队列残留"恰好是个测不出来就等于
+   * 没修的症状。
+   *
+   * 只实现被用到的四件事：建节点、挂子节点、classList、querySelector。
+   * 不实现布局与事件派发——`click()` 走的是我们自己的 listener 列表，
+   * 不经过真实事件系统，所以点击判据照样成立。
+   *
+   * ⚠️ 探测必须走 `globalThis` 的间接属性，**不能写 `typeof document`**：
+   * esbuild 打包时会看见 bundle 里没有 `document` 这个全局标识符，
+   * 于是把 `typeof document !== 'undefined'` **折叠成常量**——
+   * 而它折叠的方向取决于作用域分析，猜不得。
+   * 症状是桩被跳过、`stubParent()` 抛 `document is not defined`，
+   * 而源码上那段 `if` 明明写得没问题。间接取一次就没这个问题。
+   */
+  const g = globalThis as { document?: Document };
+  const hadDocument = g.document !== undefined;
+  if (!hadDocument) {
+    g.document = {
+      createElement(tag: string) {
+        const cls = new Set<string>();
+        const kids: unknown[] = [];
+        const listeners: Record<string, (() => void)[]> = {};
+        const attrs: Record<string, string> = {};
+        return {
+          tagName: tag.toUpperCase(),
+          className: '',
+          style: {} as Record<string, string>,
+          children: kids,
+          textContent: '',
+          get classList() {
+            return {
+              add: (c: string) => void cls.add(c),
+              remove: (c: string) => void cls.delete(c),
+              contains: (c: string) => cls.has(c),
+              toggle: (c: string, on?: boolean) => {
+                if (on === undefined) cls.has(c) ? cls.delete(c) : cls.add(c);
+                else if (on) cls.add(c);
+                else cls.delete(c);
+              },
+            };
+          },
+          appendChild: (n: unknown) => {
+            kids.push(n);
+            return n;
+          },
+          remove: () => {
+            const i = kids.indexOf(this);
+            if (i >= 0) kids.splice(i, 1);
+          },
+          addEventListener: (ev: string, fn: () => void) => {
+            (listeners[ev] ??= []).push(fn);
+          },
+          /** `dom.ts` 的 setFlag 走的是 setAttribute，缺了它 setShown 会抛。 */
+          setAttribute: (name: string, value: string) => {
+            attrs[name] = value;
+          },
+          getAttribute: (name: string) => attrs[name] ?? null,
+          /** 手工触发：绕开真实事件系统，只走我们自己挂的 listener。 */
+          click: () => (listeners.click ?? []).forEach((f) => f()),
+          querySelector: (sel: string) => {
+            const want = sel.startsWith('.') ? sel.slice(1) : sel;
+            const walk = (nodes: unknown[]): unknown => {
+              for (const n of nodes) {
+                const node = n as { classList: { contains(c: string): boolean }; children: unknown[] };
+                if (node.classList?.contains(want)) return n;
+                const hit = walk(node.children ?? []);
+                if (hit) return hit;
+              }
+              return null;
+            };
+            return walk(kids);
+          },
+        };
+      },
+    } as unknown as Document;
+  }
+
+  /** 给 `StoryCards` 一个能挂东西的父节点。 */
+  const stubParent = (): HTMLElement => {
+    // 同样走 `g` 而不是裸 `document`——理由见上面 hadDocument 那段。
+    const host = g.document!.createElement('div');
+    // 桩的 appendChild 只是把子节点塞进数组，
+    // 所以"父节点"本身也要能被 StoryCards 挂上去。
+    (host as unknown as { children: unknown[] }).children = [];
+    return host as unknown as HTMLElement;
+  };
+  try {
+    gl.localStorage!.clear();
+  } catch {
+    /* 没有就跳过清空：新档本来也是空的 */
+  }
+
   // 1. 序章只播一次：标记写进存档，第二次进世界必须看见它已经是 true
   asserts++;
   {
@@ -1989,6 +2517,250 @@ check('verify_story', () => {
     g.markPrologueDone();
     g.reset();
     if (g.prologueDone) probs.push('reset() 没有清掉 prologueDone，重开就看不到序章');
+  }
+
+  // 2b. 辞职动机（`prologue_0_1..3`）与驿里那个声音。
+  //
+  // 序章从三句变成六句之后，"这个游戏为什么存在"有两半：
+  // 为什么要回来（动机）和回来的代价是什么（原有三句）。
+  // 只测"播过一次"测不到前一半——它和后一半走的是同一个标记。
+  // 所以这里直接量**文案本身**：三条动机键必须存在且非空，
+  // 否则退回去的读法是"序章照播，只是没人再提辞职这回事"，
+  // 而现有断言一条都不会红。
+  asserts++;
+  {
+    for (const k of ['prologue_0_1', 'prologue_0_2a', 'prologue_0_2b', 'prologue_0_3']) {
+      const v = I18N.zh[k];
+      if (typeof v !== 'string' || v.trim() === '') probs.push(`动机文案 ${k} 是空的`);
+    }
+  }
+  asserts++;
+  {
+    // 中英两侧都必须有。`verify_i18n` 守的是两侧 key 集合相等，
+    // 而**相等地都缺**这一条它抓不到——那正是"引用了没写"那一族。
+    for (const k of ['prologue_0_1', 'prologue_0_2a', 'prologue_0_2b', 'prologue_0_3']) {
+      if (!I18N.en[k]) probs.push(`动机文案 ${k} 缺英文侧`);
+    }
+  }
+
+  // 2c. 声音的三句 + 说话人标题。它是**引路**，不是氛围：
+  // 少了它，玩家的动词链仍然是"看到驿站→按完成乐事"，
+  // 而"五件散在路上"这件事从头到尾没人对他说过。
+  asserts++;
+  {
+    for (const k of ['voice_1', 'voice_2', 'voice_3', 'voice_speaker']) {
+      const v = I18N.zh[k];
+      if (typeof v !== 'string' || v.trim() === '') probs.push(`声音文案 ${k} 是空的`);
+    }
+  }
+  asserts++;
+  {
+    // 声音念的五个名字必须与五件乐事对得上。
+    // 顺序也钉住：云/茶/琴/竹/禽 = `FRAGMENT_SLOT_STATION_IDX` 的槽位序。
+    // 写错一个音就是玩家照着找错方向，而这条断言会红。
+    for (const [slot, word] of [
+      [0, '云'],
+      [1, '茶'],
+      [2, '琴'],
+      [3, '竹'],
+      [4, '禽'],
+    ] as [number, string][]) {
+      if (!I18N.zh[`fragment_${slot}`]?.includes(word)) {
+        probs.push(`声音说到的「${word}」与 fragment_${slot} 对不上`);
+      }
+    }
+    asserts++;
+    if (!I18N.zh.voice_2?.includes('云')) probs.push('voice_2 没有把五件乐事说出来');
+  }
+
+  // 2d. 声音**一次性**，而且必须落盘。
+  //
+  // 不落盘的读法：一个在十八驿门口每趟都报一遍菜名的声音。
+  // 那个地方会从"有人在这儿"掉成"有个 UI 在循环"。
+  asserts++;
+  {
+    const g = new GameStateManager();
+    if (g.voiceDone) probs.push('新档的 voiceDone 竟然一开始就是 true');
+  }
+  asserts++;
+  {
+    const g = new GameStateManager();
+    if (!g.claimVoiceGuide()) probs.push('第一次 claimVoiceGuide() 失败了');
+    asserts++;
+    if (g.claimVoiceGuide()) probs.push('同一个声音被引了两次路');
+  }
+  asserts++;
+  {
+    const g = new GameStateManager();
+    g.claimVoiceGuide();
+    g.reset();
+    if (g.voiceDone) probs.push('reset() 没有清掉 voiceDone，重开就听不到那个声音');
+  }
+  asserts++;
+  {
+    // 落盘：写进去的字段名必须与 SaveBlob 里声明的一致。
+    // 拼错一个字母的症状是"每次读档都重播"，而上面三条断言全绿。
+    //
+    // **必须走 `load()` 回读，不能直接摸 localStorage**：
+    // 无头环境里没有 localStorage，`state.ts` 的 save/load 都自带
+    // try/catch 兜底（所以别处能跑），而这里直接访问会在本条
+    // 回归里抛 `localStorage is not defined` —— 症状是 NO-ASSERT，
+    // 也就是"这一条其实没跑"。`expect` 看到的是崩溃而不是判据失败。
+    const g = new GameStateManager();
+    g.claimVoiceGuide();
+    g.save();
+    const h = new GameStateManager();
+    asserts++;
+    if (!h.load()) {
+      probs.push('存档读不回来，落盘这条判据在无头环境里没法自证');
+    } else if (!h.voiceDone) {
+      probs.push('claimVoiceGuide() 没有真正落盘（读档后 voiceDone 仍为 false）');
+    }
+  }
+
+  // 2c-2. 读卡时长必须按语言分流量。
+  //
+  // 实测序章两侧长度差 3.57 倍（中文 328 字 / 英文 232 词）。
+  // 写死一个常数 = 必然腰斩其中一边，而腰斩**没有任何提示**：
+  // 玩家看到卡片消失，只会以为"这段就这样了"。
+  //
+  // 所以这里量的是两件事：
+  //   1. 同等**信息量**下英文必须给更多时间（否则英语玩家读不完）
+  //   2. 每一段单独算之后必须**都低于单卡上限**——这才是不腰斩的充要条件。
+  //      只做第 1 条会漏掉真正的问题：单张合并后撞上限。
+  asserts++;
+  {
+    const zhLong = I18N.zh.prologue_0_2a;
+    const enLong = I18N.en.prologue_0_2a;
+    if (readingMs(enLong, true) <= readingMs(zhLong, false)) {
+      probs.push('同等内容下英文没有比中文更长的停留时间');
+    }
+  }
+  asserts++;
+  {
+    // 英文按**词**、中文按**字符**。用字符数算英文会高估约 1.6 倍。
+    // 这条钉住"英文侧按词计量"：同样 100 个字符，
+    // 拆成 20 个词必须比 1 个超长词给更多时间。
+    const fiveWords = 'one two three four five';
+    const oneLongWord = 'a'.repeat(50);
+    asserts++;
+    if (readingMs(fiveWords, true) <= readingMs(oneLongWord, true)) {
+      probs.push('英文侧没有按词计量（5 个短词应比 1 个长词更久）');
+    }
+  }
+  asserts++;
+  {
+    // 每一段都得能在上限内读完。这是"不腰斩"的真判据。
+    // 退回"六句合并成一张"的写法时，这里会报出撞上限的段。
+    const CAP = 22000;
+    for (const k of [
+      'prologue_0_1',
+      'prologue_0_2a', 'prologue_0_2b',
+      'prologue_0_3',
+      'prologue_1',
+      'prologue_2',
+      'prologue_3',
+      'voice_1',
+      'voice_2',
+      'voice_3',
+    ]) {
+      for (const [lang, isEn] of [
+        ['zh', false],
+        ['en', true],
+      ] as [string, boolean][]) {
+        const raw = I18N[lang as 'zh' | 'en'][k];
+        if (readingMs(raw, isEn) >= CAP) {
+          probs.push(`${k}(${lang}) 单段就要 ${readingMs(raw, isEn)}ms，撞上 ${CAP}ms 上限`);
+        }
+      }
+    }
+  }
+  asserts++;
+  {
+    // 空文本与超长文本都要有界：空的不该是 NaN，
+    // 超长的必须被封顶（否则深色底会长时间压住路面，而它不吃点击）。
+    asserts++;
+    if (!Number.isFinite(readingMs('', false)) || readingMs('', false) < 0) {
+      probs.push('readingMs("") 返回了非法值');
+    }
+    asserts++;
+    const huge = readingMs('x'.repeat(20000), false);
+    if (huge > 22000) probs.push(`超长文本没有被封顶：${huge}ms`);
+  }
+
+  // 2d-2. 叙事静音（`?nocine` / `?clean`）必须真的什么都不留下。
+  //
+  // 这条守的是一个已经修过的坑，而且它的症状极其难查：
+  // 静音时如果只在 `show()` 里提前 return，`showSequence()` 仍会把
+  // 整组文字压进 `queue`，而 `pump()` 每取一条都被挡回去，
+  // 于是 `queue` 永远非空 —— 取消静音后**整趟攒下来的旧卡一起冒出来**。
+  // 只看"屏幕上有没有字"是测不出来的，必须量队列本身。
+  asserts++;
+  {
+    setNarrativeQuiet(true);
+    const sc = new StoryCards(stubParent());
+    sc.showSequence(['一', '二', '三'], { title: 'x' });
+    asserts++;
+    if (sc.pending !== 0) probs.push(`静音后队列残留 ${sc.pending} 条（取消静音会一起冒出来）`);
+    asserts++;
+    if (sc.count !== 0) probs.push('静音后屏幕上仍有卡片');
+    // 静音必须把**已经浮着的**也收掉
+    setNarrativeQuiet(false);
+    sc.show('先来一句', { ms: 20000 });
+    asserts++;
+    if (sc.count !== 1) probs.push('非静音时卡片没有正常浮出，这条判据自己失效了');
+    setNarrativeQuiet(true);
+    sc.clear();
+    asserts++;
+    if (sc.count !== 0) probs.push('静音没有收掉已经浮着的卡');
+    setNarrativeQuiet(false);
+  }
+
+  // 2d-3. 可点掉的那几张才吃点击，路边的字仍然不吃。
+  //
+  // `.g-cards` 的 `pointer-events: none` 是文件头写死的硬要求。
+  // 判据直接量**节点自己的 inline style**：CSS 类在无头环境里没有
+  // 样式表可查，而 `pointer-events` 要么写在节点上、要么写在类上。
+  // 这里改成量"有没有挂 is-dismissible 类"——它才是决定吃不吃点击的那一位。
+  asserts++;
+  {
+    const sc = new StoryCards(stubParent());
+    sc.show('路边的一块碑', { ms: 20000 });
+    const plain = sc.root.querySelector('.g-card-line');
+    asserts++;
+    if (plain?.classList.contains('is-dismissible')) {
+      probs.push('路边的字被标成了可点掉——过弯点一下会吞掉转向输入');
+    }
+    sc.show('驿里的声音', { ms: 20000, dismissible: true });
+    const dis = sc.root.querySelector('.is-dismissible');
+    asserts++;
+    if (!dis) probs.push('dismissible 的卡没有挂上 is-dismissible 类（点了没反应）');
+  }
+
+  // 2d-4. 点掉一张，**队列必须接上下一张**。
+  //
+  // 这是"可点掉"这个功能本身的意义：驿里的声音三句是一组，
+  // 点掉第一句却什么都不发生，玩家会以为点了没用，于是改回去干等 30 秒。
+  //
+  // 走的是和自动退场**同一条** `afterCardGone()`，所以这条同时钉住
+  // "点击与自动推进行为一致"——两处各写一遍的读法迟早会分叉。
+  asserts++;
+  {
+    const sc = new StoryCards(stubParent());
+    sc.showSequence(['第一句', '第二句', '第三句'], { dismissible: true });
+    asserts++;
+    if (sc.count !== 1) probs.push(`序列开始时应该是 1 张，实际 ${sc.count} 张`);
+    const first = sc.root.querySelector('.is-dismissible') as unknown as { click?: () => void };
+    asserts++;
+    if (typeof first?.click !== 'function') {
+      probs.push('可跳过的卡上没有 click，点了不会退场');
+    } else {
+      first.click();
+      asserts++;
+      if (sc.count !== 1) probs.push(`点掉一张后没有接上下一张（当前 ${sc.count} 张）`);
+      asserts++;
+      if (sc.pending !== 1) probs.push(`点掉一张后队列应剩 1 条，实际 ${sc.pending} 条`);
+    }
   }
 
   // 3. 反派场景**一次性**：claim 第二次必须失败，否则同一场戏会重复播
@@ -2040,8 +2812,18 @@ check('verify_story', () => {
     if (ok) probs.push('narrativeBusy 为真时竟然还能骑——路边字一旦锁上就解不开了');
   }
 
+  // 摘掉临时桩。**必须放在本函数最后一条断言之后**——
+  // 放早了的话，后面那些用桩的判据会读到 undefined，
+  // 而症状是"桩看起来装了却没生效"，极难查。
+  if (!hadStorage) {
+    delete gl.localStorage;
+  }
+  if (!hadDocument) {
+    delete g.document;
+  }
+
   const summary =
-    `序章一次性 · 反派 ${ECON.VILLAIN_SCENE_COUNT} 集各一次 · 小游戏不锁操作`;
+    `序章一次性 · 动机三条中英齐全 · 声音五件对得上槽位且一次性落盘 · 读卡时长按语言分流量且单段不撞上限 · 静音不留队列残留 · 只有可跳过卡吃点击 · 反派 ${ECON.VILLAIN_SCENE_COUNT} 集各一次 · 小游戏不锁操作`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -3669,6 +4451,8 @@ async function loadRealModels(): Promise<{
   bicycle: Object3D;
   motorcycle: Object3D;
   char: Object3D;
+  /** 人物模型自带的 9 段动画（`run` / `walk` / `骑自行车` / `idle` …） */
+  charAnims: AnimationClip[];
 } | null> {
   // Node 里没有 DOM，而 GLTFLoader 走材质时会去建 ImageBitmap。
   // 这里只关心**几何**，但那几个入口必须先糊上。
@@ -3683,21 +4467,26 @@ async function loadRealModels(): Promise<{
   await MeshoptDecoder.ready;
   const ld = new GLTFLoader();
   (ld as unknown as { setMeshoptDecoder(d: unknown): void }).setMeshoptDecoder(MeshoptDecoder);
+  /** 读一个 GLB，**连动画一起**返回。人物模型自带 9 段，载具没有。 */
   const read = async (name: string) => {
     const p = `public/models/${name}`;
     if (!existsSync(p)) return null;
     const bytes = readFileSync(p);
     const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    return (await ld.parseAsync(ab, '')).scene as Object3D;
+    const gltf = await ld.parseAsync(ab, '');
+    return { scene: gltf.scene as Object3D, anims: gltf.animations ?? [] };
   };
-  const [bicycle, motorcycle, char] = await Promise.all([
+  const [b, m, c] = await Promise.all([
     read('bicycle.glb'),
     read('motorcycle.glb'),
     read('survivor.glb'),
   ]);
-  if (!bicycle || !motorcycle || !char) return null;
+  if (!b || !m || !c) return null;
+  const bicycle = b.scene;
+  const motorcycle = m.scene;
+  const char = c.scene;
   char.name = 'char';
-  return { bicycle, motorcycle, char };
+  return { bicycle, motorcycle, char, charAnims: c.anims };
 }
 
 /** 数一棵子树有多少节点。给回归量「切载具不许漏枢轴」用。 */
@@ -3801,6 +4590,63 @@ if (!realModels) {
             `${mode}: 自转轴 (${ax.x.toFixed(3)}, ${ax.y.toFixed(3)}, ${ax.z.toFixed(3)}) ` +
               '没有垂直于行驶方向 —— 轮子横着滚',
           );
+        }
+      }
+    }
+
+    // 3b. ★★★ **看得见的轮子必须原地打转** —— 轮面法线在拧的过程中不变，轮心钉在枢轴上
+    //
+    //     第 3 条量的是 rig 的轴，而 rig 的轴摆正了**不代表轮子摆正了**：
+    //     `alignLocalX` 写的是对齐层自己的 `quaternion`，对齐层是轮子的**祖先**，
+    //     所以「先挂轮子、后对齐」会把整只轮子连姿态一起转过去（那次对齐本身
+    //     是个几十度的旋转）。于是自转层绕着**真轴**拧一只**已经被拧歪**的轮子：
+    //     轮面法线在拧的过程里整个翻过去，画面上就是轮子翻跟头而不是滚动。
+    //
+    //     病根就是这个顺序，所以判据必须落在**轮子网格自己**身上：
+    //     拧 0.8 rad 前后，轮面法线（最小特征向量）不许变。
+    asserts++;
+    {
+      const spinNodes: Object3D[] = [];
+      v.group.traverse((o) => {
+        // 只认轮子：`standSpin` / `crankSpin` 转的是脚撑和曲柄，本来就不该原地打转
+        if (/(front|rear)Spin$/i.test(o.name) && o.children.some((c) => (c as Mesh).geometry?.attributes?.position)) {
+          spinNodes.push(o);
+        }
+      });
+      asserts++;
+      if (spinNodes.length < 2) {
+        probs.push(`${mode}: 只找到 ${spinNodes.length} 个带轮子的自转层`);
+      }
+      for (const spin of spinNodes) {
+        const mesh = spin.children.find((c) => (c as Mesh).geometry?.attributes?.position)!;
+        const saved = spin.rotation.x; // `bikeWheelAngle` 读的就是这个节点，第 4 条还要用
+        spin.rotation.x = 0;
+        v.group.updateMatrixWorld(true);
+        const before = measureWheelNode(v.group, mesh);
+        const pivot = new Vector3().setFromMatrixPosition(spin.matrixWorld);
+        spin.rotation.x = 0.8;
+        v.group.updateMatrixWorld(true);
+        const after = measureWheelNode(v.group, mesh);
+        spin.rotation.x = saved;
+        v.group.updateMatrixWorld(true);
+        asserts++;
+        if (!before || !after) {
+          probs.push(`${mode}: ${spin.name} 底下的轮子量不到几何`);
+          continue;
+        }
+        const tilt = before.axle.distanceTo(after.axle);
+        if (tilt > 0.05) {
+          probs.push(
+            `${mode}: ${spin.name} 拧 0.8 rad 期间轮面法线偏了 ` +
+              `${((Math.asin(Math.min(1, tilt)) * 180) / Math.PI).toFixed(1)}° ` +
+              `(${(before.axle.y * 57.3).toFixed(1)}° → ${(after.axle.y * 57.3).toFixed(1)}° 抬头)` +
+              ' —— 自转层在拧一只被对齐层拧歪的轮子',
+          );
+        }
+        asserts++;
+        const off = pivot.distanceTo(before.centre);
+        if (off > 0.02) {
+          probs.push(`${mode}: ${spin.name} 的枢轴离轮心 ${(off * 1000).toFixed(0)}mm —— 轮子自转时绕着圈画而不是原地滚`);
         }
       }
     }
@@ -4058,12 +4904,486 @@ if (!realModels) {
       ok: probs.length === 0,
       detail:
         probs.length === 0
-          ? `真模型：车头落在 -Z · 零输入直行（24 m/s）车把归零 · 真转弯前端跟方向 · 自转轴水平且垂直于行驶方向 · 轮角不打滑 · 自行车${notes.join(' / ')} / 骑手高差 = 骨盆高度`
+          ? `真模型：车头落在 -Z · 零输入直行（24 m/s）车把归零 · 真转弯前端跟方向 · 自转轴水平且垂直于行驶方向 · 轮面法线拧 0.8rad 不变且枢轴钉在轮心 · 轮角不打滑 · 自行车${notes.join(' / ')} / 骑手高差 = 骨盆高度`
           : probs.join('；'),
       asserts,
     }),
   });
 }
+
+// ---------------------------------------------------------------- 循环接缝
+/**
+ * 骑行动画的**循环接缝**：脚踩满一圈之后，离首帧最近的那一帧。
+ *
+ * ## 这一族故障：首尾接不上，而画面上只是「脚偶尔抖一下」
+ *
+ * `setLoop(LoopRepeat, Infinity)` 把末帧硬接回首帧。素材只要不是整数圈，
+ * 每转一圈脚就「啪」地瞬移一次。真素材 `骑自行车` 踩了 **3.417 圈**，
+ * 于是末帧的脚停在半圈之后——**34.7cm** 的踝位差，一眼就看得见。
+ *
+ * 没有任何既有断言会红：车在走、速度对、轮子转的圈数对、姿势也「看着像在踩」。
+ * 所以这一族只能靠**量循环点上的脚位**来抓。
+ *
+ * ## 判据量的是**性质**，不是常数
+ *
+ * 夹具自带**解析解**（见下面的 A/B/C），真素材那条只钉「这是个能骑的循环」。
+ * 换模型 / 换动画之后，解析解失效而性质仍然成立——所以第 9 条给的是范围。
+ *
+ * ## ★ 三个最容易写错的点，各由一条断言钉住
+ *
+ * 1. **位置必须相对根骨**。真素材带 5.2m 根位移，不减掉它的话
+ *    「脚离首帧多远」99% 是那 5.2m。第 3 条用「加不加根位移答案必须一样」钉。
+ * 2. **圈数必须 ≥ 1**。只比「像不像首帧」会挑中 t≈0，等于什么都没裁。
+ *    第 2 条用夹具 A 的解析解（正好在 1 圈那一帧）钉。
+ * 3. **已经接得上的素材不许被裁**。夹具 B 本来就整整一圈，第 5 条钉
+ *    「接缝 = 片段末尾、一帧都不丢」。
+ *
+ * 另外第 8 条是**独立复测**：裁完的片段拿一把新尺子（`PoseSampler` 直接量踝位）
+ * 再量一遍首尾差。不调 `loopSeamOf` 自己的度量，免得自己验自己。
+ */
+check('verify_loop_seam', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const notes: string[] = [];
+
+  // ---- 夹具骨架：曲柄中心 = 两踝中点，所以两脚必须严格 180° 对称 ----
+  const N = 30;
+  const R = 0.1; // 曲柄半径
+  const CRANK_Y = -0.4; // 曲柄中心相对骨盆的高度
+  /** 造一条「左脚绕曲柄转 `revs` 圈」的骑行片段，骨盆另带 `rootDrift` 的水平位移。 */
+  const pedal = (revs: number, rootDrift = 0) => {
+    const char = new Object3D();
+    const hips = new Bone();
+    hips.name = 'mixamorigHips';
+    hips.position.set(0, 0.5, 0);
+    char.add(hips);
+    // 中间那根骨：让链不是「骨直接挂骨」，`scratchSkeleton` 要一起搬
+    const spine = new Bone();
+    spine.name = 'mixamorigSpine';
+    spine.position.set(0, 0.1, 0);
+    hips.add(spine);
+    const mk = (name: string, x: number, parent: Object3D) => {
+      const b = new Bone();
+      b.name = name;
+      b.position.set(x, CRANK_Y, 0);
+      parent.add(b);
+      return b;
+    };
+    const lf = mk('mixamorigLeftFoot', 0.09, spine);
+    const rf = mk('mixamorigRightFoot', -0.09, spine);
+    for (const [base, side] of [
+      [lf, 1],
+      [rf, -1],
+    ] as const) {
+      const toe = new Bone();
+      toe.name = `${base.name === lf.name ? 'mixamorigLeftToeBase' : 'mixamorigRightToeBase'}`;
+      toe.position.set(0, -0.02, 0.03 * side);
+      base.add(toe);
+    }
+    const times = new Float32Array(N + 1);
+    for (let i = 0; i <= N; i++) times[i] = i / N;
+    const hv: number[] = [];
+    const lv: number[] = [];
+    const rv: number[] = [];
+    for (let i = 0; i <= N; i++) {
+      // 曲柄角 = θ。`loopSeamOf` 量的正是 atan2(dy, dz)，与这个定义同一个角。
+      const th = 2 * Math.PI * revs * (i / N);
+      hv.push(0, 0.5, rootDrift * (i / N));
+      lv.push(0.09, CRANK_Y + R * Math.sin(th), R * Math.cos(th));
+      rv.push(-0.09, CRANK_Y - R * Math.sin(th), -R * Math.cos(th));
+    }
+    const clip = new AnimationClip('骑自行车', 1, [
+      new KeyframeTrack('mixamorigHips.position', times, Float32Array.from(hv)),
+      new KeyframeTrack('mixamorigLeftFoot.position', times, Float32Array.from(lv)),
+      new KeyframeTrack('mixamorigRightFoot.position', times, Float32Array.from(rv)),
+    ]);
+    return { char, clip, root: 'mixamorigHips' };
+  };
+
+  // ① 夹具 A 踩 1.5 圈：解析解 = 键 20（1 圈整），末帧是半圈之后 = 对径 2R
+  const A = pedal(1.5);
+  const seamA = loopSeamOf(A.char, A.clip, A.root);
+  asserts++;
+  if (!seamA) {
+    probs.push('夹具 A（1.5 圈）返回 null —— 它踩满了圈，不该返回 null');
+    return expect(false, probs.join('；'), asserts);
+  }
+
+  // ② ★ 断点必须正好是**踩满一圈**的那一帧（键 20 / 30 = 0.66667s）
+  asserts++;
+  if (Math.abs(seamA.time - 20 / N) > 1e-6) {
+    probs.push(`断点是 ${seamA.time.toFixed(5)}s，应为 ${(20 / N).toFixed(5)}s（正好 1 圈的键 20）`);
+  }
+  asserts++;
+  if (Math.abs(seamA.turns - 1) > 1e-6) {
+    probs.push(`断点处已踩 ${seamA.turns.toFixed(5)} 圈，应为 1`);
+  }
+  asserts++;
+  if (seamA.footGap > 1e-6) {
+    probs.push(`断点处双脚离首帧 ${seamA.footGap.toFixed(6)}，夹具 A 在 1 圈处应当完全重合（应为 0）`);
+  }
+  // ★ 负对照：**不裁**的话末帧是对径，脚差恰好 2R = 0.2。
+  //   这一条钉住「这段素材本来就有病」——换了模型若它变成 0，第 5 条会提醒。
+  asserts++;
+  if (Math.abs(seamA.footGapAtEnd - 2 * R) > 1e-6) {
+    probs.push(`夹具 A 末帧脚差 ${seamA.footGapAtEnd.toFixed(6)}，解析解是对径 2R = ${(2 * R).toFixed(6)}`);
+  }
+
+  // ③ ★ **根位移不许影响答案**：加 1.0m 根位移，断点必须一模一样。
+  //    少减根骨的话量到的是「谁走得远」，而根位移单调递增 → 答案会变成「最早那个 ≥1 圈的帧」。
+  asserts++;
+  {
+    const D = pedal(1.5, 1.0);
+    const seamD = loopSeamOf(D.char, D.clip, D.root);
+    if (!seamD) {
+      probs.push('加了 1.0m 根位移之后返回 null');
+    } else if (Math.abs(seamD.time - seamA.time) > 1e-9) {
+      probs.push(`加了 1.0m 根位移后断点变成 ${seamD.time.toFixed(5)}s（无根位移时 ${seamA.time.toFixed(5)}s）—— 位置没有减掉根骨`);
+    }
+  }
+
+  // ④ 夹具 C 只踩 0.4 圈：**不循环**，不许裁。裁一个量不出接缝的片段
+  //    等于把踩踏剪成半截——症状是「人踩到一半突然弹回起始姿势」。
+  asserts++;
+  {
+    const C = pedal(0.4);
+    if (loopSeamOf(C.char, C.clip, C.root) !== null) {
+      probs.push('夹具 C 只踩了 0.4 圈，却量出了接缝 —— 一圈没踩满就该返回 null');
+    }
+  }
+
+  // ⑤ ★ 夹具 B 本来就整整一圈：接缝必须落在**片段末尾**，一帧都不丢。
+  //    这一条钉住「接缝是**找**出来的，不是「无脑裁到一圈」——
+  //    后者在 B 上会砍掉整整 1.0s。
+  asserts++;
+  {
+    const B = pedal(1.0);
+    const seamB = loopSeamOf(B.char, B.clip, B.root);
+    if (!seamB) {
+      probs.push('夹具 B（正好 1 圈）返回 null');
+    } else {
+      asserts++;
+      if (Math.abs(seamB.time - B.clip.duration) > 1e-6) {
+        probs.push(`夹具 B 的断点是 ${seamB.time.toFixed(5)}s，应为片段末尾 ${B.clip.duration}s（它本来就接得上）`);
+      }
+      asserts++;
+      if (seamB.footGap > 1e-6) {
+        probs.push(`夹具 B 末帧脚差 ${seamB.footGap.toFixed(6)}，应为 0`);
+      }
+    }
+  }
+
+  // ⑥ 裁出来的片段：时长、关键帧、以及**没有只剩一帧的轨道**
+  asserts++;
+  const cutA = trimToSeam(A.clip, seamA);
+  if (Math.abs(cutA.duration - seamA.time) > 1e-9) {
+    probs.push(`裁后时长 ${cutA.duration.toFixed(6)}s，应为 ${seamA.time.toFixed(6)}s`);
+  }
+  asserts++;
+  {
+    // ★ 一帧的轨道**不能插值**。真素材有 5 根骨的轨道只有 2 帧（分趾骨 + `neutral_bone`），
+    //   裁到 1 圈后第二帧被丢掉，所以裁剪必须替它们在断点上补一帧。
+    const singles = cutA.tracks.filter((tr) => tr.times.length < 2);
+    if (singles.length) {
+      probs.push(`裁后有 ${singles.length} 条轨道只剩不到 2 个关键帧（${singles[0].name}）—— 一帧的轨道 mixer 插不出来`);
+    }
+    const ends = cutA.tracks.filter((tr) => Math.abs(tr.times[tr.times.length - 1] - seamA.time) > 1e-6);
+    if (ends.length) {
+      probs.push(`裁后有 ${ends.length} 条轨道没有落在断点上（${ends[0].name} 末帧 ${ends[0].times[ends[0].times.length - 1].toFixed(5)}s）`);
+    }
+  }
+
+  // ⑦ ★ 裁后的片段**首尾真的接得上**：拿一把新尺子直接量踝位。
+  //    独立于 `loopSeamOf` 的度量，免得自己验自己。
+  asserts++;
+  {
+    const p = new PoseSampler(A.char, cutA);
+    const at = (t: number, name: string) => {
+      const v = new Vector3();
+      p.seek(t);
+      p.relPos(A.root, name, v);
+      return v;
+    };
+    let worst = 0;
+    for (const name of FOOT_BONES) {
+      worst = Math.max(worst, at(0, name).distanceTo(at(cutA.duration, name)));
+    }
+    if (worst > 1e-6) {
+      probs.push(`裁后片段首尾仍有 ${worst.toExponential(1)} 的脚位差 —— 循环还是会跳`);
+    }
+    notes.push(`夹具 A 裁后首尾踝位差 ${worst.toExponential(1)}（裁前对径 ${(2 * R).toFixed(3)}）`);
+  }
+
+  // ⑧ 真素材：量的是**自己算出来的那个时刻**，不是一个写死的常数
+  if (!realModels) {
+    asserts++;
+    notes.push('真素材未加载（public/models 里没有 survivor.glb）：第 8 条**没量到**，不是通过');
+  } else {
+    const ride = realModels.charAnims.find((c) => c.name === '骑自行车');
+    asserts++;
+    if (!ride) {
+      probs.push('真素材里没有「骑自行车」片段');
+    } else {
+      const rName = rootBoneName(realModels.char);
+      const r = prepareRideClip(realModels.char, ride, rName);
+      asserts++;
+      if (!r.seam) {
+        probs.push('真素材上量不到循环接缝 —— 骑行会每圈跳一下');
+      } else {
+        const s = r.seam;
+        // 8a ★ 圈数 ≥ 1：只有踩满一圈之后才算「踩了一圈」。
+        asserts++;
+        if (s.turns < 1) {
+          probs.push(`断点处只踩了 ${s.turns.toFixed(3)} 圈 —— 那是「还没踩一圈」，裁了等于白裁`);
+        }
+        // 8b ★ 差距必须**真的小**。0.03 模型单位 = 5.3cm，这是「看不出来」的量级；
+        //     阈值取 0.06（10.5cm）——一个明显能看出来的瞬移一定越得过去。
+        asserts++;
+        if (s.footGap > 0.06) {
+          probs.push(`断点处双脚离首帧 ${s.footGap.toFixed(4)}（${(s.footGap * 1.7534 * 100).toFixed(1)}cm）—— 肉眼看得见`);
+        }
+        // 8c ★ 负对照：这条素材**本来就有病**，不裁的话末帧是半圈之后的姿势。
+        //     它不是「断言素材必须是坏的」——换一份无缝素材后这一条会红，
+        //     那时它是在告诉你「这份素材已经不需要裁了」。
+        asserts++;
+        if (s.footGapAtEnd <= s.footGap) {
+          probs.push(
+            `不裁的话末帧差距 ${s.footGapAtEnd.toFixed(4)} 并不比断点 ${s.footGap.toFixed(4)} 差 —— 这份素材本来就接得上，不用裁（这一条该改成「无需裁剪」）`,
+          );
+        }
+        // 8d ★ 裁短之后**步速不许变**。`cadenceScale` 靠它算播放倍率；
+        //     变了就是「骑行速度感」被接缝修复顺带改掉了。
+        asserts++;
+        {
+          const t = ride.tracks.find((x) => x.name === `${rName}.position`);
+          let z = 0;
+          if (t) for (let i = 0; i < t.times.length; i++) if (t.times[i] <= s.time) z = t.values[i * 3 + 2];
+          const cut = z / s.time;
+          if (r.cadence > 1e-3 && Math.abs(cut - r.cadence) / r.cadence > 0.05) {
+            probs.push(`裁到 ${s.time.toFixed(3)}s 之后隐含步速 ${cut.toFixed(3)} m/s，与原片段的 ${r.cadence.toFixed(3)} 差超过 5%`);
+          }
+          notes.push(`裁后步速 ${cut.toFixed(3)} / 原 ${r.cadence.toFixed(3)} m/s`);
+        }
+        // 8e ★ **游戏里真正播的那条**必须是无缝的。用 `Vehicle` 走一遍
+        //     `prepareClips`，量它 `models.clips.ride` 的首尾踝位差——
+        //     这一条问的是「实机播的那份」，不是「我算得对不对」。
+        asserts++;
+        {
+          const c = collectClips(realModels.charAnims);
+          const v = new Vehicle();
+          v.attach({ bike: null, motorcycle: null, skate: null, char: realModels.char, clips: c });
+          const played = c.ride;
+          if (!played) {
+            probs.push('Vehicle 装配之后 clips.ride 没了');
+          } else {
+            const p = new PoseSampler(realModels.char, played);
+            const at = (t: number, name: string) => {
+              const q = new Vector3();
+              p.seek(t);
+              p.relPos(rName, name, q);
+              return q;
+            };
+            let worst = 0;
+            for (const n of ['mixamorigLeftFoot', 'mixamorigRightFoot']) {
+              worst = Math.max(worst, at(0, n).distanceTo(at(played.duration, n)));
+            }
+            // 换算成米：角色缩放 1.7534（autoScaleToHeight 量的是 1.75m 身高）
+            const cs = autoScaleToHeight(realModels.char, 1.75);
+            if (worst * cs > 0.12) {
+              probs.push(`实机播的那份片段首尾踝位差 ${(worst * cs * 100).toFixed(1)}cm —— 每转一圈脚会跳一下`);
+            }
+            if (!v.rideSeam) {
+              probs.push('Vehicle 没有记下循环接缝');
+            }
+            notes.push(
+              `实机片段 ${played.duration.toFixed(3)}s（原 ${ride.duration.toFixed(3)}s）· 首尾踝位差 ${(worst * cs * 100).toFixed(1)}cm · 踩 ${s.turns.toFixed(3)} 圈`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  const summary =
+    `循环接缝：夹具 A(1.5圈) 断点 ${seamA.time.toFixed(4)}s=键 ${Math.round(seamA.time * N)}（1 圈整）· ` +
+    `夹具 B(1圈) 不裁 · 夹具 C(0.4圈) 不裁 · 裁后片段首尾无跳 · ` +
+    (notes.length ? notes.join(' · ') : '真素材未量到');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+// ---------------------------------------------------------------- 踩踏同步
+/**
+ * 动画里的脚与物理曲柄**必须是同一条时钟**。
+ *
+ * ## 这一族故障：两条独立的时钟，现有判据一条都量不到
+ *
+ * 脚踩在**踏板**上，而踏板是车的一部分，转速已经被里程钉死：
+ * `曲柄角速度 = 速度 / (0.35 × 2.6)`。而动画片段里的脚自带一个
+ * 与地面无关的转速（实测 3.723 rad/片段秒）。原来这两条各走各的，
+ * 播放倍率又是 `cadenceScale`（先撞 2.4 上限），于是：
+ *
+ * | 速度 | 物理曲柄 | 老：脚/曲柄 | 新：脚/曲柄 |
+ * |---|---|---|---|
+ * | 2 m/s | 0.350 圈/s | **3.19×**（脚在抡） | ~1 |
+ * | 15 m/s | 2.623 圈/s | **0.54×**（脚跟不上） | 0.68（撞上限，故意） |
+ *
+ * 而 `verify_ride` / `verify_bike_rig` 全绿：车在走、轮子不打滑、
+ * 曲柄 = 轮角 / 2.6 全对——**没有一条断言在量脚和踏板的关系**。
+ *
+ * ## ★ 判据分两层：一层算得死死的，一层只能给范围
+ *
+ * · **公式层**（`pedalCadence` 的闭式解）：精确，钉倍率、钉上限、钉静止为 0。
+ * · **实测层**（真模型真跑 6 秒，量脚在**世界空间**里绕自己那个圈转了几圈）：
+ *   只能给 **±8%** 的范围。原因不是测量糙，是素材本身：
+ *   接缝残留 2.9cm（≈11° 弧差）每循环一次会被解缠计成一次真实旋转，
+ *   而**两只脚的圈心相差 8.5cm**（本该重合），所以「两踝中点」这个曲柄中心
+ *   本身就在小幅游走。把容差收到 1% 是在拿素材的噪声当判据。
+ *   这一层的作用是**堵住这一族**（老值是 3.19，远在范围外），
+ *   不是去证明两条时钟在某个小数位上相等。
+ */
+check('verify_pedal_sync', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const notes: string[] = [];
+
+  // ---- ① 公式层：闭式解。`crank = 速度/(R×GR)`，倍率 = crank / pedalRate ----
+  const RATE = 3.7232; // 实测：`骑自行车` 1.012 圈 / 1.7083s
+  const crankOf = (v: number): number => v / (BIKE_WHEEL_R * BIKE_GEAR_RATIO);
+  for (const speed of [0, 1, 2, 5, 8, 12, 15]) {
+    asserts++;
+    const want = speed === 0 ? 0 : Math.min(PEDAL_CADENCE_MAX, crankOf(speed) / RATE);
+    const got = pedalCadence(speed, RATE);
+    if (Math.abs(got - want) > 1e-9) {
+      probs.push(`${speed} m/s 的倍率是 ${got.toFixed(4)}，应为 ${want.toFixed(4)}`);
+    }
+  }
+  // 量不到动画转速时必须返回 0（**不是** NaN、也不是原速）——
+  // 调用方靠这个 0 退回按步速推的旧行为。
+  asserts++;
+  if (pedalCadence(10, 0) !== 0) {
+    probs.push(`pedalCadence(10, 0) = ${pedalCadence(10, 0)}，应为 0（量不到动画转速）`);
+  }
+  // ★ 上限不许被绕过：给一个荒谬的速度，倍率也必须被钳住。
+  //   少了这一条，把上限写成一个没人查的常数也能一直绿。
+  asserts++;
+  if (pedalCadence(1e4, RATE) > PEDAL_CADENCE_MAX + 1e-9) {
+    probs.push(`10000 m/s 的倍率 ${pedalCadence(1e4, RATE).toFixed(2)} 越过了上限 ${PEDAL_CADENCE_MAX}`);
+  }
+  // ★ 上限必须在极速下**真的生效**，否则「脚跟不上踏板」那一段就没人管了。
+  //   反过来写成「上限不起作用」的话，这条断言会变成「上限不许生效」。
+  asserts++;
+  if (crankOf(15) <= PEDAL_CADENCE_MAX * RATE) {
+    probs.push(`极速 15 m/s 只要倍率 ${(crankOf(15) / RATE).toFixed(2)}，没撞上上限 ${PEDAL_CADENCE_MAX} —— 上限的取值前提变了`);
+  }
+
+  // ---- ② 实测层：真模型真跑，量世界空间里脚与曲柄各转了几圈 ----
+  if (!realModels) {
+    asserts++;
+    notes.push('真素材未加载：第 ② 层**没量到**，不是通过');
+  } else {
+    asserts++;
+    const v = new Vehicle();
+    const c = collectClips(realModels.charAnims);
+    // ★ 必须挂**真车模**：曲柄角读的是 `rig.crankSpin.rotation.x`，
+    //   而 `rig` 是 `assembleBike` 装出来的——挂一个空 Object3D 的话
+    //   rig 为 null，`bikeCrankAngle` 恒等于 0，于是比值恒为 0。
+    //   （症状是「脚/曲柄 = 0.00」，看起来像脚没动，其实是分母没了。）
+    v.attach({ bike: realModels.bicycle, motorcycle: null, skate: null, char: realModels.char, clips: c });
+    if (!v.set('bike')) {
+      probs.push('切不进 bike 模式');
+    } else {
+      asserts++;
+      if (v.bikeCrankAngle !== 0) {
+        probs.push(`刚切进去曲柄角就是 ${v.bikeCrankAngle}，应为 0`);
+      }
+      const hasFeet =
+        realModels.char.getObjectByName('mixamorigLeftFoot') !== undefined &&
+        realModels.char.getObjectByName('mixamorigRightFoot') !== undefined;
+      if (!hasFeet) {
+        probs.push('真素材里没有左右踝骨');
+      } else {
+        // pedalRate 必须真的被量出来了，且与接缝自洽。
+        asserts++;
+        const seam = v.rideSeam;
+        if (!seam) {
+          probs.push('没有循环接缝，pedalRate 无从谈起');
+        } else if (Math.abs(seam.turns - 1) > 0.05) {
+          probs.push(`接缝在 ${seam.turns.toFixed(3)} 圈处——「踩满一圈之后」那一条没成立`);
+        }
+        // 跑一段，返回 { 脚圈数, 曲柄圈数, 倍率 }
+        const drive = (speed: number, seconds: number) => {
+          const dt = 1 / 120;
+          realModels.char.updateMatrixWorld(true);
+          const crank0 = v.bikeCrankAngle;
+          const p = new Vector3();
+          const q = new Vector3();
+          const at = () => {
+            const a = worldOf(realModels.char, 'mixamorigLeftFoot');
+            const b = worldOf(realModels.char, 'mixamorigRightFoot');
+            p.copy(a);
+            q.copy(b);
+            // 曲柄角参考中心 = 两踝中点（与 `loopSeamOf` 同一套定义）
+            return Math.atan2(p.y - (p.y + q.y) / 2, p.z - (p.z + q.z) / 2);
+          };
+          let prev = at();
+          let acc = 0;
+          for (let i = 0; i < Math.round(seconds / dt); i++) {
+            v.update(dt, speed, 0);
+            realModels.char.updateMatrixWorld(true);
+            const a = at();
+            let d = a - prev;
+            while (d > Math.PI) d -= Math.PI * 2;
+            while (d < -Math.PI) d += Math.PI * 2;
+            acc += d;
+            prev = a;
+          }
+          return {
+            foot: Math.abs(acc / (2 * Math.PI)),
+            crank: Math.abs((v.bikeCrankAngle - crank0) / (2 * Math.PI)),
+            ts: v.rideTimeScale,
+          };
+        };
+
+        // ②a ★ **静止时脚必须停**：倍率 0，且一个圈都不转。
+        //     这一条在老实现下也是 0（`cadenceScale` 同样判速度），
+        //     留着是因为它是「车停着支着车站着」这条观感的地基。
+        asserts++;
+        {
+          const r = drive(0, 1.5);
+          if (r.ts !== 0 || r.foot > 1e-3) {
+            probs.push(`静止 1.5s：倍率 ${r.ts}、脚转 ${r.foot.toFixed(4)} 圈—— 车停着脚该定住`);
+          }
+        }
+
+        // ②b ★ 低于上限时，脚与曲柄必须**同速**。
+        //     老实现在 2 m/s 是 3.19 倍，所以 1.5 这个闸门足够把这族故障挡住，
+        //     又留得住 ±8% 里那点素材噪声（见文件头）。
+        const rows: string[] = [];
+        for (const speed of [2, 5, 8]) {
+          asserts++;
+          const r = drive(speed, 6);
+          const ratio = r.crank > 1e-6 ? r.foot / r.crank : 0;
+          const capped = crankOf(speed) / RATE >= PEDAL_CADENCE_MAX;
+          rows.push(`${speed}m/s 倍率 ${r.ts.toFixed(2)} 脚 ${r.foot.toFixed(2)} 圈 / 曲柄 ${r.crank.toFixed(2)} 圈 = ${ratio.toFixed(2)}`);
+          if (ratio > 1.5) {
+            probs.push(`${speed} m/s：脚比曲柄快 ${ratio.toFixed(2)} 倍（${r.foot.toFixed(2)} 圈 vs ${r.crank.toFixed(2)} 圈）—— 回到「脚在抡」那一族了`);
+          }
+          if (!capped && (ratio < 0.85 || ratio > 1.15)) {
+            probs.push(`${speed} m/s（未撞上限）：脚/曲柄 = ${ratio.toFixed(2)}，应在 1 附近`);
+          }
+          asserts++;
+          if (r.ts <= 0) probs.push(`${speed} m/s 的播放倍率是 ${r.ts}，动起来必须有倍率`);
+        }
+        notes.push(rows.join(' · '));
+      }
+    }
+  }
+
+  const summary =
+    `脚与踏板同一条时钟：倍率 = 曲柄角速度/${RATE}，上限 ${PEDAL_CADENCE_MAX}，静止为 0 · ` +
+    (notes.length ? notes.join(' · ') : '真素材未量到');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
 
 // ---------------------------------------------------------------- 跑
 export function runAll(): { name: string; ok: boolean; detail: string; asserts: number }[] {
@@ -4080,3 +5400,4 @@ export function runAll(): { name: string; ok: boolean; detail: string; asserts: 
 export function checkNames() {
   return results.map((r) => r.name);
 }
+

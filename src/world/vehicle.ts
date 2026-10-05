@@ -8,7 +8,7 @@
  * `foot` **默认** | 只有角色，三件载具停在路边 | 移动时 `walk` / `run`，**停住不播** |
  * `bike` | 角色跨在坐垫上（站位**从模型量**，不是写死的常数） | `骑自行车`，倍率随速度，车停即定格 |
  * `motorcycle` | **模型自带骑手**（人和车焊死），外加的角色要藏起来 | 无（模型是静态的） |
- * `skate` | 角色站在板上（左脚在前） | `run` |
+ * `skate` | 角色站在板上（双脚一前一后） | `run` 里**双脚张得最开的那一帧**·定格 |
  *
  * **默认是 `foot`**：这个游戏讲的是"一个人回到自己的家乡"，
  * 开头让玩家推着车走几步比一上来就骑更贴题，而且这样"没有车"这件事
@@ -29,6 +29,27 @@
  * 站位也从「写死的 1.05m」改成**两个实测值相减**：鞍面从模型量，
  * 骨盆高度从**动画**里量。详见 `assembleBike` 与 `update()` 的 bike 分支。
  * 结构图见 `BikeRig`。
+ *
+ * ## 滑板：姿势是从 `run` 里**量**出来的，不是手摆的
+ *
+ * 用户要求：站在板上时**保持跑步动画里双脚张得最开的那一帧**。
+ * 所以做法是去 `run` 里找那一帧、把它定格成一条片段（`pose.ts`），
+ * 而不是另配一段滑板动画——素材里没有。
+ *
+ * | 量（`survivor.glb` 的 `run`，1.25 s / 31 帧） | 峰值 | 峰值时刻 |
+ * |---|---|---|
+ * | 横向（X） | 0.0735 | 0.375 s —— **退化**，跑步时两脚各在自己那侧 |
+ * | 水平面（XZ） | **0.4319** | **1.1667 s**（键 28）—— 一前一后张开 0.43 |
+ * | 三维 | 0.4405 | 1.1675 s —— 与上一行同一帧，多出来的是腾空高度 |
+ *
+ * 判据取**水平面**（`stancePoseOf` 的注释里为什么横向退化写得更细）：
+ * 0.4319 × 角色缩放 1.7534 = **0.757 m** 的前后开度，
+ * 而板长约 1.31 m（`SKATE_SCALE` 1.35，模型的长 ≈ 高的 8 倍）——
+ * 两脚一前一后落在板的中段，这就是要的站姿。
+ *
+ * ⚠ 定格的那一帧是**腾空期**：两脚都比站姿高，实测 0.0409 个模型单位
+ *   （0.072m）。照原来写死的板面高度 0.12m 摆出去，人就浮在板上面踩空气，
+ *   所以站高要减去这个落差（`update()` 的 skate 分支）。
  *
  * ## 摩托车：为什么它没有独立的骑手动画
  *
@@ -97,6 +118,7 @@
 import { Group, Object3D, Vector3, Quaternion, Box3, Matrix4, Mesh, AnimationMixer, AnimationClip, KeyframeTrack, InterpolateDiscrete, LoopRepeat, type AnimationAction } from 'three';
 import { RIDE } from '../data/raw';
 import { clamp, clamp01, damp } from '../core/math';
+import { stancePoseOf, loopSeamOf, trimToSeam, type StancePose, type LoopSeam } from './pose';
 
 export type RideMode = 'foot' | 'bike' | 'motorcycle' | 'skate';
 export const RIDE_MODES: readonly RideMode[] = ['foot', 'bike', 'motorcycle', 'skate'];
@@ -680,7 +702,12 @@ export function measureWheelNode(root: Object3D, node: Object3D): WheelFrame | n
   for (let i = 0; i < 9; i++) cov[i] /= pos.count;
   const eig = eigenSym3(cov);
   const axle = eig[0].vec;
-  const centre = mn.clone().add(mx).multiplyScalar(0.5).addScaledVector(axle, -ctr.dot(axle));
+  // 沿轴向的分量取**顶点均值**（采样不均时它才等于轴心，见文件头），
+  // 面内两个分量取包围盒中心（圆盘对这两个方向都对称）。
+  // ⚠ 少写 `+ bboxCentre·axle` 就是把轮心整体推歪 `bboxCentre·axle`：
+  //   自行车前轮实测 13.6mm，摩托车 15mm —— 轮子自转时画出一个小圆而不是一个点。
+  const bboxCentre = mn.clone().add(mx).multiplyScalar(0.5);
+  const centre = bboxCentre.clone().addScaledVector(axle, ctr.dot(axle) - bboxCentre.dot(axle));
   return { centre, axle, radius: 2 * Math.sqrt(Math.max(0, (eig[1].val + eig[2].val) / 2)) };
 }
 
@@ -1139,6 +1166,70 @@ export function pelvisHeightOf(clip: AnimationClip, rootName: string): number {
   return n ? sum / n : 0;
 }
 
+export interface PreparedRideClip {
+  /** 真正拿去播的片段：已剥水平根位移、已按循环接缝裁短。 */
+  clip: AnimationClip;
+  /**
+   * 接缝的量数。`null` = 量不到双脚/根骨，或**一圈都没踩满**——
+   * 这时 `clip` 原样返回（只是剥了根位移），**不裁**：
+   * 裁一个量不出接缝的片段，等于把循环剪成一段残缺的踩踏。
+   */
+  seam: LoopSeam | null;
+  /** 片段自带的步速（m/s），在**原始**片段上量。 */
+  cadence: number;
+  /** 骑手骨盆高度（模型单位），在**原始**片段上量。 */
+  pelvisY: number;
+  /**
+   * **动画自己**的曲柄角速度（弧度 / 片段秒）：`2π × turns / time`。
+   *
+   * 它是「脚在这条片段里踩得多快」，**与地面速度无关**——
+   * 而物理曲柄的转速是 `速度 / (轮半径 × 传动比)`。两者本来毫无关系，
+   * 差着 3.15 倍，于是脚绕着踏板以三倍速空转（`pedalCadence` 处理这件事）。
+   *
+   * 量不到接缝时是 0，调用方据此退回按步速推的旧行为。
+   */
+  pedalRate: number;
+}
+
+/**
+ * 骑行片段的预处理。**导出来是为了让回归能问**：它跑的是运行时真正在播的那条路，
+ * 而「接缝到底裁在哪」这件事在代码里看不出来也量不到——只有把这一步单独提出来，
+ * 判据才能对着**真代码算出来的那个时刻**提问，而不是对着某个写死的常数。
+ *
+ * 四步，顺序不能换：
+ *
+ * 1. **量步速与骨盆高**（都在**原始**片段上）。
+ *    剥完根位移水平分量就归零了，再量步速恒为 0，
+ *    于是 `cadenceScale` 除以 0 → 播放倍率失效，动画变成「原地播」。
+ * 2. `stripRootMotion` —— 让人在原地播，走的距离由车负责。
+ * 3. `loopSeamOf` —— 在**剥过**的片段上量接缝。
+ *    与在原始片段上量等价（接缝度量本来就是根骨相对的，父节点平移不改变子骨的相对位置），
+ *    但「量的是真正在播的那份」这件事可查。滑板姿势也是这个理由放在 `fix('run')` 之后的。
+ * 4. `trimToSeam` —— 裁到接缝上，让循环首尾接得上。
+ *
+ * ⚠ 裁剪**不改变步速**：实测 4.958s 段量到 1.061 m/s，裁到 1.688s 仍是
+ *   1.055 m/s（差 0.6%），因为根位移在时间上本来就是均匀的。
+ *   所以第 1 步在原始片段上量的那个数可以放心用。
+ */
+export function prepareRideClip(
+  char: Object3D,
+  clip: AnimationClip,
+  rootName: string,
+): PreparedRideClip {
+  const cadence = rootMotionOf(clip, rootName).speed;
+  const pelvisY = pelvisHeightOf(clip, rootName);
+  const inplace = stripRootMotion(clip, rootName);
+  const seam = loopSeamOf(char, inplace, rootName);
+  return {
+    clip: seam ? trimToSeam(inplace, seam) : inplace,
+    seam,
+    cadence,
+    pelvisY,
+    // 接缝就在「踩满一圈」那一帧上，所以 turns/time 就是片段每秒钟的曲柄转速。
+    pedalRate: seam && seam.time > 1e-6 ? (2 * Math.PI * seam.turns) / seam.time : 0,
+  };
+}
+
 /**
  * 鞍面在**车模本地**空间的位置：坐垫零件**最高那 5% 顶点**的质心。
  *
@@ -1252,6 +1343,74 @@ export function cadenceScale(speed: number, natural: number): number {
   // 量不到步速（手工造的 clip、根骨轨道不在）⇒ 保持原速，而不是除以 0。
   if (!(natural > 1e-3)) return 1;
   return Math.min(Math.abs(speed) / natural, CADENCE_MAX);
+}
+
+/**
+ * 骑行动画的播放倍率上限。
+ *
+ * 3.0 不是随手取的：它让脚的转速落在 **105 RPM**（实测 `骑自行车`
+ * 一秒 0.585 圈 × 3.0），也就是**原来** `CADENCE_MAX = 2.4` 换算出来的
+ * 99 RPM 附近。原来那个上限管的是同一件事（别让腿糊成一片），
+ * 换个推导方式之后不该顺手把它放宽。
+ */
+export const PEDAL_CADENCE_MAX = 3;
+
+/**
+ * 骑行动画的播放倍率：**由物理曲柄的转速反推**，而不是由步速。
+ *
+ * ## 为什么骑行不能走 `cadenceScale`
+ *
+ * `cadenceScale` 是给**腿在地面上的动画**用的：倍率 = 速度 ÷ 片段自带步速，
+ * 目标是脚不打滑。骑行没有「地面」——**脚踩在踏板上**，而踏板是**车的一部分**，
+ * 它的转速已经被 `updateBikeRig` 钉死了：
+ *
+ * ```
+ * 曲柄角 = 里程 / 轮半径 / 传动比   ⇒   角速度 = 速度 / (0.35 × 2.6) = 2.925 × 速度
+ * ```
+ *
+ * 也就是说曲柄每转一圈车要走 **5.72m**。而动画里的脚自带一个
+ * 与地面无关的转速（实测 3.723 rad/片段秒）。原来两条各走各的，
+ * 播放倍率是 `cadenceScale`，**先撞上 2.4 的上限**——于是倍率与速度基本脱钩：
+ *
+ * | 速度 | 老倍率 | 物理曲柄 | 老：脚/曲柄 | 新：脚/曲柄 |
+ * |---|---|---|---|---|
+ * | 2 m/s | 1.885 | 0.350 圈/s | **3.19×**（脚在抡） | 0.97 |
+ * | 5 m/s | 2.400 | 0.875 圈/s | **1.63×** | 0.99 |
+ * | 8 m/s | 2.400 | 1.399 圈/s | 1.02× | 0.98 |
+ * | 12 m/s | 2.400 | 2.099 圈/s | 0.68×（脚跟不上） | 0.83 ★ |
+ * | 15 m/s | 2.400 | 2.623 圈/s | **0.54×**（脚跟不上） | 0.68 ★ |
+ *
+ * 「老」那一列是实测世界空间里脚绕自己那个圈转了几圈、再除以曲柄转了几圈。
+ * ★ 标记的是**故意**落后的：见下面的上限。
+ *
+ * 症状是**脚和踏板各踩各的**：低速时脚以三倍速绕着踏板空转，高速时脚又跟不上踏板，
+ * 而中间只有 8 m/s 附近一个速度是碰巧对的。而 `verify_ride` / `verify_bike_rig`
+ * 全部绿：车在走、轮子不打滑、曲柄 = 轮角 / 2.6 全对——
+ * 这一族故障的根在**两条独立的时钟**上，现有判据一条都量不到它。
+ *
+ * ## 做法：让动画的转速**追**曲柄
+ *
+ * ```
+ * 倍率 = 曲柄角速度 ÷ 动画自带的曲柄角速度
+ * ```
+ *
+ * 改完两边同速，**相位差恒定**——脚不再乱抡，而是稳定地跟着踏板一起转。
+ * 踩踏节奏交给了传动比，而这本来就是**物理上唯一正确**的那个：
+ * 8 m/s 时 2.36 倍（82 RPM），15 m/s 时被上限压到 3.0（105 RPM）。
+ *
+ * ⚠ 上限以上（≈8.5 m/s 以上）腿会比曲柄慢，这是**故意的**：
+ *   30fps 的低配机上 105 RPM 已经是每帧 14°，再快腿就是一片糊。
+ *   本作的目标机型就是低配（见 `core/capability`）。
+ *
+ * @param pedalRate `prepareRideClip` 量出来的动画自带曲柄角速度。
+ *   给 0（量不到接缝）时返回 0 —— 调用方据此退回 `cadenceScale`。
+ */
+export function pedalCadence(speed: number, pedalRate: number): number {
+  // 停住 ⇒ 0。与 cadenceScale 同一个理由：车停着时脚该定住，而不是原地空踩。
+  if (Math.abs(speed) < 1e-3) return 0;
+  if (!(pedalRate > 1e-6)) return 0;
+  const crank = Math.abs(speed) / (BIKE_WHEEL_R * BIKE_GEAR_RATIO);
+  return Math.min(PEDAL_CADENCE_MAX, crank / pedalRate);
 }
 
 /**
@@ -1643,6 +1802,12 @@ export class Vehicle {
    * 配上放下来的脚撑，读作「支着车站着」，而不是「停在原地空踩」。
    */
   private rideAction: AnimationAction | null = null;
+  /**
+   * 滑板姿势轨。定格的、权重 1、`paused`——与另外三条都互斥。
+   * 它存在的意义是「滑板模式下人不该再动」这件事有一个**可量的对象**：
+   * 姿势一旦被别的轨稀释，画面上是「人有点抖」，而没有任何别的断言会红。
+   */
+  private stanceAction: AnimationAction | null = null;
   private blend: { walk: number; run: number } = { walk: 0, run: 0 };
   /** 骨架根骨名。根位移挂在它身上，剥不干净就是「人自己在往前漂」。 */
   private rootBone = '';
@@ -1653,6 +1818,24 @@ export class Vehicle {
   private clipCadence: { run: number; walk: number; ride: number } = { run: 0, walk: 0, ride: 0 };
   /** 骑手骨盆在角色本地空间的高度（模型单位），骑行站位用。 */
   private pelvisH = 0;
+  /**
+   * 滑板姿势：`run` 里双脚张得最开的那一帧，已定格（见 `stancePoseOf`）。
+   * `null` = 量不到（骨架里没有那两根踝骨），滑板模式退回播 `idle`。
+   */
+  private stance: StancePose | null = null;
+  /**
+   * 骑行片段的**循环接缝**：脚踩满一圈之后离首帧最近的那一帧。
+   * `null` = 量不到，循环照旧在片段末尾接回（脚会每圈跳一下）。
+   *
+   * 存下来是为了让回归能问「循环到底裁在哪」：裁剪这件事在画面上
+   * 只有「脚抖不抖」，而抖不抖是**接缝的差距**，不是一个能看出来的数。
+   */
+  rideSeam: LoopSeam | null = null;
+  /**
+   * 动画**自己**的曲柄角速度（弧度 / 片段秒），由 `prepareRideClip` 量出。
+   * 0 = 量不到，播放倍率退回按步速推（`applyCadence`）。
+   */
+  private ridePedalRate = 0;
   /** 自行车的装配节点。`null` = 没装（不是 bike 模式，或模型没到）。 */
   private rig: BikeRig | null = null;
   /** 车把当前偏转（弧度），由航向变化率推出来（见 `bikeSteerTarget`）。 */
@@ -1692,6 +1875,11 @@ export class Vehicle {
    *   2. `stripRootMotion` —— 去掉水平根位移，让动画在原地播。
    *   3. `bindMissingBones` —— 给 `idle` 补上它缺的骨（含脚 / 分趾骨）。
    *
+   * 骑行片段多一步：`prepareRideClip` 会把**循环接缝**也一并裁掉
+   * （见它的注释）。它走的是自己的分支而不是塞进 `fix`，
+   * 原因是它要多问一句「脚踩满一圈没有」——`walk` / `run` 没有踏板，
+   * 同一个判据套上去量的是骨盆的左右晃，不是步频。
+   *
    * ⚠ 别把它放进 `rebuild()`：那是每次切载具都会调的，
    *   而它每次都 new 一批轨道，反复处理会一直涨。
    */
@@ -1708,18 +1896,52 @@ export class Vehicle {
       // ★ 顺序：先量（原始片段），再改。
       const rm = rootMotionOf(clip, this.rootBone);
       if (k !== 'idle' && rm.speed > 1e-3) this.clipCadence[k] = rm.speed;
-      let out = stripRootMotion(clip, this.rootBone);
-      // 骨盆高度也必须在**原始**片段上量（Y 一路本来就没被动过，
-      // 但读处理后的那份会让「量的是谁」这件事变得不可查）。
+      // ★ 骨盆高度也必须在**原始**片段上量（Y 一路本来就没被动过，
+      //   但读处理后的那份会让「量的是谁」这件事变得不可查）。
       if (k === 'ride') this.pelvisH = pelvisHeightOf(clip, this.rootBone);
+      let out = stripRootMotion(clip, this.rootBone);
       // 只有待机需要补骨：移动的三段本来就覆盖全部 86 根
       if (k === 'idle') out = bindMissingBones(out, rest);
       c[k] = out;
     };
     fix('run');
     fix('walk');
-    fix('ride');
     fix('idle');
+    // ---- 骑行：走自己的分支，因为要按「脚踩满一圈」裁循环接缝 ----
+    if (c.ride) {
+      const r = prepareRideClip(char, c.ride, this.rootBone);
+      this.pelvisH = r.pelvisY;
+      this.rideSeam = r.seam;
+      this.ridePedalRate = r.pedalRate;
+      if (r.cadence > 1e-3) this.clipCadence.ride = r.cadence;
+      if (!r.seam) {
+        // 量不到 = 素材不循环（或骨架认不出脚）。**照旧播整条**，
+        // 只是 warn 一句——裁一个量不出接缝的片段会把踩踏剪成半截。
+        console.warn(
+          '[vehicle] 量不到「骑自行车」的循环接缝（骨架里没有左右踝/根骨，或一圈没踩满），' +
+            '循环照旧在片段末尾接回——脚会在每圈末尾跳一下',
+        );
+      }
+      c.ride = r.clip;
+    }
+    // ★ 滑板姿势：从**处理之后**的 `run` 里挑「双脚张得最开的那一帧」，定格。
+    //
+    //   顺序必须在 `fix('run')` 之后 —— 要的是**游戏真正在播的那份**片段，
+    //   而剥离过的 `run` 根骨水平位移已经归零，定格出来的姿势才不会带残余漂移。
+    //   （张角是两个脚之差，根位移对两者一视同仁，所以「量」这件事不受影响。）
+    if (c.run) {
+      const pose = stancePoseOf(char, c.run, c.idle ?? null);
+      if (pose) {
+        // 每一根骨都得有归属（与 `idle` 同款规矩）：姿势片段漏掉的那几根骨
+        // 会一直停在场景图的静置值上，而只要有任何一条别的轨短暂接管同一根骨，
+        // 它们就会闪。`run` 实测覆盖全部 86 根，这里是给换模型兜底。
+        this.stance = { ...pose, clip: bindMissingBones(pose.clip, rest) };
+      } else {
+        // 量不到双脚 = 这个模型的骨架不认得。滑板模式退回原来的样子
+        // （站上板后播 `idle`），并在切过去时由 `startClips` 报一句。
+        console.warn('[vehicle] 量不到滑板姿势（骨架里没有左右踝骨），滑板模式退回待机姿势');
+      }
+    }
     this.clipsReady = true;
   }
 
@@ -1776,6 +1998,7 @@ export class Vehicle {
     this.runAction = null;
     this.idleAction = null;
     this.rideAction = null;
+    this.stanceAction = null;
     this.blend = { walk: 0, run: 0 };
 
     const bike = this.models.bike;
@@ -1838,7 +2061,8 @@ export class Vehicle {
       }
     }
     if (skate) {
-      // 滑板归一化到 1 单位、实测高 0.121 → 0.11m 的板，取 0.9 得 0.11m×8
+      // 缩放与板面高度都只有一个来源（文件尾的 `SKATE_SCALE` / `SKATE_DECK_Y`），
+      // 改大板只要改那一个数，站高会自己跟着算。
       skate.scale.setScalar(SKATE_SCALE);
       // 板身的偏航已经烘进 GLB，这里只补"本地 −X 对上前进方向"那 90°。
       skate.rotation.y = Math.PI / 2;
@@ -1991,22 +2215,27 @@ export class Vehicle {
     bike.add(rearHub);
 
     // 前后轮共用同一个「轴对齐 → 自转」两层骨架
-    const spins: { axis: Group; spin: Group }[] = [];
-    const attachSpin = (host: Object3D, mesh: Object3D, tag: string) => {
+    //
+    // ★ **零件必须等对齐做完再挂上去**。`alignLocalX` 写的是对齐层自己的
+    //   `quaternion`，而对齐层是零件的**祖先** —— 先挂后对齐等于连轮子带姿态
+    //   一起转过去（对齐量本身就是个几十度的旋转），轮面法线当场就不在轴向上了：
+    //   自转层绕真轴拧，拧的却是一只已经被拧歪的轮子，于是轮子整个翻跟头。
+    //   先对齐、后 `attach`（它保持世界变换）轮子原地不动，而自转层的本地 +X
+    //   已经落在真正的轴上。
+    const spins: { axis: Group; spin: Group; mesh: Object3D }[] = [];
+    const addSpin = (host: Object3D, mesh: Object3D, tag: string) => {
       const axis = new Group();
       axis.name = `${RIG}${tag}Axis`;
       host.add(axis);
       const spin = new Group();
       spin.name = `${RIG}${tag}Spin`;
       axis.add(spin);
-      spins.push({ axis, spin });
-      // `attach` 保持世界变换，轮子不会被「重新解释位置」而瞬移
-      spin.attach(mesh);
+      spins.push({ axis, spin, mesh });
     };
     frontSteer.updateMatrixWorld(true);
-    attachSpin(frontHub, frontWheel, 'front');
     bike.updateMatrixWorld(true);
-    attachSpin(rearHub, rearWheel, 'rear');
+    addSpin(frontHub, frontWheel, 'front');
+    addSpin(rearHub, rearWheel, 'rear');
     bike.updateMatrixWorld(true);
 
     // ---- 脚撑：铰在**后轴**，所以它折起来时是绕车轴摆出去的 ----
@@ -2018,10 +2247,6 @@ export class Vehicle {
     const standSpin = new Group();
     standSpin.name = `${RIG}standSpin`;
     standFold.add(standSpin);
-    if (stand) {
-      bike.updateMatrixWorld(true);
-      standSpin.attach(stand);
-    }
 
     // ---- 曲柄：轴心取 `crankAxle` 节点自己的位置，不写死 ----
     const crank = new Group();
@@ -2046,6 +2271,17 @@ export class Vehicle {
     bike.updateMatrixWorld(true);
     const arms: Object3D[] = [];
     const pedals: { node: Object3D; orbit: Vector3 }[] = [];
+
+    // ---- 先统一做轴对齐（父节点必须全部就位，`alignLocalX` 要读父的世界朝向）----
+    bike.updateMatrixWorld(true);
+    for (const s of spins) alignLocalX(s.axis, lateral, bike);
+    alignLocalX(standFold, lateral, bike);
+    alignLocalX(crankAxis, lateral, bike);
+
+    // ---- 再把零件挂上去：对齐层已经摆正，`attach` 保持世界变换，零件原地不动 ----
+    bike.updateMatrixWorld(true);
+    for (const s of spins) s.spin.attach(s.mesh);
+    if (stand) standSpin.attach(stand);
     for (const n of BIKE_CRANK_PARTS) {
       const o = part(n);
       if (!o) continue;
@@ -2059,12 +2295,6 @@ export class Vehicle {
         if (n === 'crankArmL' || n === 'crankArmR') arms.push(o);
       }
     }
-
-    // ---- 最后统一做轴对齐（父节点必须全部就位，`alignLocalX` 要读父的世界朝向）----
-    bike.updateMatrixWorld(true);
-    for (const s of spins) alignLocalX(s.axis, lateral, bike);
-    alignLocalX(standFold, lateral, bike);
-    alignLocalX(crankAxis, lateral, bike);
 
     const scale = bike.scale.x || 1;
     const rig: BikeRig = {
@@ -2178,25 +2408,25 @@ export class Vehicle {
       const o = moto.getObjectByName(n);
       if (o) steer.attach(o);
     }
-    const spins: { axis: Group; spin: Group }[] = [];
-    const attachSpin = (host: Object3D, mesh: Object3D, tag: string) => {
+    const spins: { axis: Group; spin: Group; mesh: Object3D }[] = [];
+    const addSpin = (host: Object3D, mesh: Object3D, tag: string) => {
       const axis = new Group();
       axis.name = `${RIG}moto${tag}Axis`;
       host.add(axis);
       const spin = new Group();
       spin.name = `${RIG}moto${tag}Spin`;
       axis.add(spin);
-      spins.push({ axis, spin });
-      spin.attach(mesh);
+      spins.push({ axis, spin, mesh });
     };
     // **前轮也要跟着转向**：真车上前轮和车把是一个刚体。
-    attachSpin(steer, frontWheel, 'Front');
-    moto.updateMatrixWorld(true);
-    attachSpin(rearHub, rearWheel, 'Rear');
-    moto.updateMatrixWorld(true);
+    addSpin(steer, frontWheel, 'Front');
+    addSpin(rearHub, rearWheel, 'Rear');
 
-    // ---- 轴对齐：父节点全部就位之后才做 ----
+    // ---- 轴对齐：父节点全部就位之后才做；**做完再挂轮子**，理由见 `assembleBike` ----
+    moto.updateMatrixWorld(true);
     for (const s of spins) alignLocalX(s.axis, lateral, moto);
+    moto.updateMatrixWorld(true);
+    for (const s of spins) s.spin.attach(s.mesh);
 
     if (steer.children.length) {
       // ★ 记进 `WeakMap`（而不是只存在实例字段上），否则 `rebuild()` 一清空
@@ -2244,6 +2474,27 @@ export class Vehicle {
       preroll(a, clip);
       this.rideAction = a;
       // ★ 骑上车的第一帧也不能是 bind pose（见 preroll 的说明）。
+      this.mixer.update(1 / 60);
+      return;
+    }
+    // ★ 滑板：**一条定格的姿势轨**，不参与按速度的混合。
+    //
+    //   原来这个模式走的是徒步那条分支（`updateFootAnim`），于是人站在板上
+    //   一路播跑步循环——两件事一起错：脚在板上打滑，人看着像原地跑。
+    //   现在它有自己的一条轨：权重恒为 1、动作 `paused`，
+    //   所以速度、转向都不再影响姿势，板滑出去时人就保持那个站姿。
+    //
+    //   `paused` 只把有效播放倍率压到 0，mixer 照样每帧把插值结果写进骨头，
+    //   所以这个姿势是**钉在**骨上的（别的轨短暂接管同一根骨也会被它按回来）。
+    if (this.mode === 'skate' && this.stance) {
+      this.mixer = new AnimationMixer(char);
+      const a = this.mixer.clipAction(this.stance.clip);
+      a.setLoop(LoopRepeat, Infinity);
+      a.play();
+      a.paused = true;
+      a.weight = 1;
+      this.stanceAction = a;
+      // 同样推一帧：不上这一步，第一帧露出来的是 bind pose（张开双臂）。
       this.mixer.update(1 / 60);
       return;
     }
@@ -2388,7 +2639,10 @@ export class Vehicle {
 
     // 动画权重要在 mixer 之前算：mixer 本帧写骨骼用的是**上一帧**的权重。
     // 反过来的话权重淡入会比预期晚一帧，低速起步时看着像"先滑一步再走"。
-    if (this.mode !== 'bike') this.updateFootAnim(dt, speed);
+    //
+    // ★ 只在**徒步**模式下算。滑板有自己的定格姿势轨（`stanceAction`），
+    //   摩托车模式下角色整个不可见；这两种模式都不该被按速度的混合动过。
+    if (this.mode === 'foot') this.updateFootAnim(dt, speed);
     // 播放倍率**在 mixer 之前**写：mixer 本帧用的就是这个值。
     this.applyCadence(speed);
     this.mixer?.update(dt);
@@ -2501,12 +2755,25 @@ export class Vehicle {
       }
     } else if (this.mode === 'skate') {
       // 同上：车与人是兄弟节点，用局部矩阵，别用 localToWorld。
-      const p = new Vector3(0, 0.12 / SKATE_SCALE, 0);
+      //
+      // ★ 站高**按实测落差压下去**（`stance.rise` × 角色缩放）。
+      //
+      //   原来这里写死 0.12m，那是「板面多高」；而人踩不踩到板面，
+      //   取决于这一帧的脚在**哪个高度**——跑步动画里双脚张得最开的那一刻
+      //   正好是腾空期，两只脚都离地（实测比站姿高 0.0409 个模型单位
+      //   = 0.072m），照写死的 0.12 摆出去，人就是**浮在板上面踩空气**。
+      //
+      //   这个数不能写死成另一个常数：骨原点在踝关节而不是脚底，
+      //   模型原点也不在板面上。`stance.rise` 是拿同一把尺子量一段站姿
+      //   作参照的自校准之差（见 `StancePose.rise`）。
+      const dropM = (this.stance?.rise ?? 0) * (char.scale.x || 1);
+      const deck = SKATE_DECK_Y - dropM;
+      const p = new Vector3(0, deck / SKATE_SCALE, 0);
       if (skate) {
         skate.updateMatrix();
         char.position.copy(p).applyMatrix4(skate.matrix);
       } else {
-        char.position.set(0, 0.12, 0);
+        char.position.set(0, deck, 0);
       }
     } else {
       // 徒步：**站在 ride 位上，不 sideways 挪。**
@@ -2562,8 +2829,16 @@ export class Vehicle {
   private applyCadence(speed: number): void {
     if (this.walkAction) this.walkAction.timeScale = cadenceScale(speed, this.clipCadence.walk);
     if (this.runAction) this.runAction.timeScale = cadenceScale(speed, this.clipCadence.run);
-    // 骑行：车停住时倍率 0 ⇒ 人定在踩到一半的姿势上，而不是原地空踩。
-    if (this.rideAction) this.rideAction.timeScale = cadenceScale(speed, this.clipCadence.ride);
+    // 骑行：★ 走**曲柄**而不是步速（见 pedalCadence）——
+    //   脚踩在踏板上，而踏板的转速已经被里程钉死了，两条时钟必须合成一条。
+    //   量不到动画自带转速时（`ridePedalRate` = 0）退回按步速推，
+    //   也就是改动之前的行为——宁可慢，也不能让脚在半空里疯转。
+    if (this.rideAction) {
+      this.rideAction.timeScale =
+        this.ridePedalRate > 1e-6
+          ? pedalCadence(speed, this.ridePedalRate)
+          : cadenceScale(speed, this.clipCadence.ride);
+    }
   }
 
   /**
@@ -2675,6 +2950,28 @@ export class Vehicle {
     return this.pelvisH;
   }
   /**
+   * 滑板姿势的**实测数据**（`null` = 没量到）。**给回归量**：
+   * 「双脚张得最开的那一帧」这件事在画面上只读作「站得挺开」，
+   * 判据必须能问：取自哪一帧、张角多大、要往下压多少。
+   */
+  get stancePose(): StancePose | null {
+    return this.stance;
+  }
+  /**
+   * 滑板姿势轨的当前权重。**给回归量：它必须是 1**。
+   *
+   * 权重不足 1 时 mixer 漏出来的那一份是 bind pose（张开双臂的 T 字），
+   * 也就是「滑板上站着一个张开手的人」——而姿态看起来仍然「像那么回事」，
+   * 速度、站位、轮子转角全部正常。
+   */
+  get stanceWeight(): number {
+    return this.stanceAction?.weight ?? 0;
+  }
+  /** 滑板姿势轨是否被冻结（`paused`）。给回归量：不冻结就还是动画。 */
+  get stancePaused(): boolean {
+    return this.stanceAction?.paused ?? false;
+  }
+  /**
    * 自行车的装配是否成功（`null` = 没装）。**给回归量**：
    * 脚撑、转向、曲柄都在 `rig` 上，没有它就等于「那些功能静默失效」。
    */
@@ -2772,8 +3069,37 @@ export class Vehicle {
   }
 }
 
-/** 滑板缩放。归一化模型高 0.121，乘 0.9 → 0.109m ≈ 一块真实滑板的高度。 */
-const SKATE_SCALE = 0.9;
+/**
+ * 滑板缩放。归一化模型高 0.121，乘 1.35 → 板身高 **0.163m**、
+ * 板长约 **1.31m**（模型的长 ≈ 高的 8 倍）。
+ *
+ * 原来是 **0.9**（板高 0.109m、板长 0.87m，一块真实滑板的尺寸），
+ * 用户要求**视觉上放大到 1.5 倍**。写实尺寸在这个世界里偏小：
+ * 1.75m 的角色站在 0.87m 的板上，而双脚前后本来就张开 0.757m（见文件头），
+ * 于是两脚几乎踩在板的两端（0.379 vs 半长 0.435），板看着像块小脚垫。
+ * 放大之后脚落在板的中段，反倒更像「人站在一块板上」。
+ *
+ * ★ 改这个数**不要**顺手去改板面高度：那个是从它算出来的（见 `SKATE_DECK_Y`）。
+ */
+const SKATE_SCALE = 1.35;
+/** `skateboard.glb` 归一化后的板身高（模型单位，实测）。 */
+const SKATE_MODEL_H = 0.121;
+/**
+ * 板面高度相对板身高度的**倍数**。1.10 而不是 1.00：板面贴图自己有厚度，
+ * 角色原点正好摆在板身最高点上会陷进去一点。
+ *
+ * 写成**倍数**而不是「板身高 + 若干米」，是为了改 `SKATE_SCALE` 时它自动跟着走。
+ * 「缩放」与「站高」两个各自写死的数迟早会对不上，
+ * 而症状是「人陷进板里」或「人浮在板上面」——画面上很明显，判据却一条都不红。
+ */
+const SKATE_DECK_FACTOR = 1.1;
+/**
+ * 板面高度（米）——**角色原点该摆到的那个高度**，不含站姿落差。
+ *
+ * 0.9 缩放时它是 0.1198m，和原来写死的 0.12 差 0.2mm（同一个数），
+ * 所以这一处改动对 0.9 时代的画面是零影响，只是把那个数变成了**算出来的**。
+ */
+export const SKATE_DECK_Y = SKATE_MODEL_H * SKATE_SCALE * SKATE_DECK_FACTOR;
 
 /** 低于这个速度（米/秒）就算站定，不播动画。见 updateFootAnim 的注释。 */
 const FOOT_IDLE_SPEED = 0.35;
