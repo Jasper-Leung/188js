@@ -20,7 +20,7 @@ aren't any here), so the system will stop and ask first:
 
 - **macOS**: right-click the app → Open → click "Open" again in the dialog.
   Or do it once, for good, from a terminal:
-  `xattr -dr com.apple.quarantine "/Applications/188号礼物.app"`
+  `xattr -dr com.apple.quarantine "/Applications/Gift188.app"`
 - **Windows**: "Windows protected your PC" → "More info" → "Run anyway".
 
 After that it launches normally, with sound.

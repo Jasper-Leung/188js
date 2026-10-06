@@ -144,7 +144,7 @@ jobs:
               const { data } = await github.rest.repos.updateRelease({
                 ...context.repo,
                 release_id: found.id,
-                name: `188号礼物 v${version}`,
+                name: `Gift No.188 v${version}`,
                 body,
                 draft: true,
                 prerelease: false,
@@ -154,7 +154,7 @@ jobs:
               const { data } = await github.rest.repos.createRelease({
                 ...context.repo,
                 tag_name: tag,
-                name: `188号礼物 v${version}`,
+                name: `Gift No.188 v${version}`,
                 body,
                 draft: true,
                 prerelease: false,
