@@ -579,6 +579,33 @@
   justify-content: center;
 }
 
+/* 画质这一块要**自己的**实心纸底。
+ *
+ * 卡本身只有一层 0.55 的白纱（`.g-card-title`），而标题页的 `::after`
+ * 专门把**画面上下两端**压到 0.72~0.78 的暗。画质组正好坐在下半张卡里，
+ * 于是它背后的实际颜色是「暗山 × 0.55 纸」≈ 一片中灰（~rgb(160,150,130)）。
+ *
+ * 压在那片中灰上的偏偏是这一页**最浅的三种字**：
+ * · `.g-row-k`   `--ink-soft`   —— Render scale / Shadows / Ground detail
+ * · `.g-note-dim` `--ink-faint`  —— Low turns off shadows and ground detail…
+ * · `.g-note-why` `--accent`（红）—— Discrete GPU: AMD Radeon RX 5500 XT
+ * faint 压中灰的对比度不到 1.1:1，红字也不到 3:1。实机截图里那一块
+ * 读作"糊在山体上的几行字"——而它是标题页唯一的解释性文字。
+ *
+ * 这和碎片栏（`.g-frags`）是**同一个 bug 换了个位置**，所以口径一样：
+ * **压在画面上的次级文字必须有一块自己的实色底。**
+ * 靠外层那层纱去兜是不作数的——纱的浓度取决于它底下那张画，
+ * 画一亮一暗，同一段字就从"读得出"变成"读不出"，而没人会为此报错。
+ * `verify_paper_backing` 把这条钉住：`.g-frags` 与 `.g-title .g-group`
+ * 的 `background` 必须是不透明值（`var(--paper-72)` 这类半透明令牌也算输）。
+ */
+.g-root .g-title .g-group {
+  background: var(--paper);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 0.7em 0.9em 0.8em;
+}
+
 /* =============================================================================
    引导页
    ========================================================================== */

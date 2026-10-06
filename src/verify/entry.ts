@@ -6395,6 +6395,58 @@ check('verify_pedal_sync', () => {
               }
               notes.push(`接缝 ${s2!.footGap.toFixed(5)}`);
             }
+            // ②c-3 ★★ **膝盖必须左右对称、且向前顶**。
+            //   极向量取自原动画时，左腿那份**偏向外侧**（用户报的现象）：
+            //   实测左膝横向 +36mm（外撇）而右膝 −21mm（内收）——不对称，
+            //   而且左腿是往外甩的。现在极向量由几何给定，实测两边都是
+            //   向前 69–76mm、仅外撇 16mm。
+            //
+            //   钉的是**对称性**（性质），不是某个具体角度：换模型、换动画
+            //   都不该让两条腿的膝盖弯向分家。
+            asserts++;
+            {
+              const kneeLateral = (side: 'Left' | 'Right'): { fwd: number; lat: number } => {
+                const pr = new PoseSampler(realModels.char, c.ride!);
+                const hp = new Vector3();
+                const kn = new Vector3();
+                const ak = new Vector3();
+                const N = keyTimesOf(c.ride!).length;
+                let fwd = 0;
+                let lat = 0;
+                for (let i = 0; i < N; i++) {
+                  pr.seek((i / Math.max(1, N - 1)) * c.ride!.duration);
+                  pr.originPos(`mixamorig${side}UpLeg`, hp);
+                  pr.originPos(`mixamorig${side}Leg`, kn);
+                  pr.originPos(`mixamorig${side}Foot`, ak);
+                  const line = ak.clone().sub(hp).normalize();
+                  const toK = kn.clone().sub(hp);
+                  const perp = toK.clone().addScaledVector(line, -toK.dot(line));
+                  fwd = Math.max(fwd, perp.z);
+                  lat = Math.max(lat, Math.abs(perp.x));
+                }
+                return { fwd, lat };
+              };
+              const kl = kneeLateral('Left');
+              const kr = kneeLateral('Right');
+              // 角色本地 +X 是**左** ⇒ 两条腿的「外」方向相反，
+              // 所以对称性看的是**横向偏移的绝对值**。
+              const skew = Math.abs(kl.lat - kr.lat) / Math.max(1e-6, Math.max(kl.lat, kr.lat));
+              if (skew > 0.25) {
+                probs.push(
+                  `膝盖横向偏移左右不对称：左 ${(kl.lat * 1000).toFixed(0)}mm vs 右 ${(kr.lat * 1000).toFixed(0)}mm（偏差 ${(skew * 100).toFixed(0)}%）` +
+                    ` —— 极向量多半又取回原动画了`,
+                );
+              }
+              if (Math.max(kl.fwd, kr.fwd) < 3 * Math.max(kl.lat, kr.lat)) {
+                probs.push(
+                  `膝盖几乎不向前顶（前后 ${(Math.max(kl.fwd, kr.fwd) * 1000).toFixed(0)}mm vs 横向 ${(Math.max(kl.lat, kr.lat) * 1000).toFixed(0)}mm）` +
+                    ` —— 读作「膝盖往外甩」`,
+                );
+              }
+              notes.push(
+                `膝 前后 ${(Math.max(kl.fwd, kr.fwd) * 1000).toFixed(0)}mm / 横向 ${(Math.max(kl.lat, kr.lat) * 1000).toFixed(0)}mm（左右偏差 ${(skew * 100).toFixed(0)}%）`,
+              );
+            }
             // ②d ★ **骑手坐回鞍面**：烘焙的圆心由鞍面反推，所以骨盆同时落回。
             //     烘焙之前这里是 13.6cm 的悬空（B 方案那个取舍）。
             asserts++;
@@ -6522,6 +6574,128 @@ check('verify_ui_visibility', () => {
   if (!v.set(true) || v.value !== true) probs.push('进世界没有显示 HUD');
 
   return expect(probs.length === 0, probs.length ? probs.join('；') : '首次必生效 · 同值才早退', asserts);
+});
+
+/**
+ * 压在画面上的次级文字，必须有一块**自己的**实色底。
+ *
+ * ## 这个 bug 已经犯过两次，两处长得完全不一样
+ *
+ * · **碎片栏**（`.g-frags`）：72% 的半透明纸 —— 底下的山透过字缝冒出来，
+ *   那一格读作"浮在草地上"而不是"一张纸"。评审第一眼看见的就是它。
+ * · **标题页的画质组**（`.g-title .g-group`）：**根本没有底**。
+ *   外层卡只有一层 0.55 的白纱（`.g-card-title`），而标题页的 `::after`
+ *   专门把画面上下两端压到 0.72~0.78 的暗；画质组正好坐在下半张卡里，
+ *   于是它背后是"暗山 × 0.55 纸"≈ 一片中灰。压在这片中灰上的偏偏是
+ *   这一页最浅的三种字（`--ink-soft` / `--ink-faint` / 红字 `--accent`），
+ *   faint 压中灰对比度不到 1.1:1 —— 实机截图里那一块读作"糊在山体上的几行字"。
+ *
+ * 两次都**不报错、别的判据全绿**，靠的是人眼第一眼。
+ * 而"标题页画质面板"恰好是评审停留最久的地方（比任何游戏内画面都久）。
+ *
+ * ## 为什么读源码，而不是算对比度
+ *
+ * 无头环境里没有样式表，`getComputedStyle` 量不到；而"这块底有多不透明"
+ * 恰恰就是这条判据本身。量的是 `styles.css` 里那几行字面量：
+ * 指定选择器的规则体必须声明 `background`，且那个值必须**不透明**。
+ *
+ * "不透明"的判定刻意把三种写法都算作输，因为它们是同一个错误的三种说法：
+ * · `rgba(..., 0.55)` —— 直接带 alpha
+ * · `var(--paper-72)` —— 令牌名里的数字就是它的 alpha
+ * · `rgb(... / 0.7)` —— 斜杠 alpha 语法
+ *
+ * ## 口径
+ *
+ * **外层那层纱不算数，每块次级文字自己得有底。** 纱的浓度取决于它底下
+ * 那张画：画一亮一暗，同一段字就从"读得出"变成"读不出"，而没人会为此报错。
+ */
+check('verify_paper_backing', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const src = readFileSync(join(process.cwd(), 'src', 'ui', 'styles.css'), 'utf8');
+
+  /**
+   * 取某个选择器的规则体。**必须按行首匹配**：
+   *  loose 搜索会撞上注释里提到的那几个类名（本文件的那段注释就写着
+   *  「`.g-frags` 与 `.g-title .g-group`」），命中注释就会报一个假故障。
+   *  `m` 标志让 `^` 落在每一行上，而真实选择器总是顶格写在行首。
+   *
+   * 调用方传**纯选择器字符串**（不要自己写正则）：转义在这里做一次，
+   * 之前两边都转义了一次，`\.g-root` 变成 `\\\.g-root`，一条都匹配不到。
+   */
+  const ruleBodies = (selector: string): string[] => {
+    const esc = selector
+      .trim()
+      .split(/\s+/)
+      .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('\\s+');
+    const re = new RegExp(`^\\s*${esc}\\s*\\{([^}]*)\\}`, 'gm');
+    const out: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) out.push(m[1]);
+    return out;
+  };
+  const bgOf = (body: string | null): string | null => {
+    if (!body) return null;
+    const m = /(^|[\s;])(background|background-color)\s*:\s*([^;]+)/.exec(body);
+    return m ? m[3].trim() : null;
+  };
+  /**
+   * 这个选择器**最后声明过**的那次 background。
+   *
+   * 不能只看最后一条规则：`.g-frags` 在文件尾的媒体查询里还有一条
+   * （只改 `top` 与 `transform`），按"最后一条说了算"去读，
+   * 一个有实色底的碎片栏会被读成"根本没有底"——假故障比没判据更费时间。
+   * 但**后写的覆盖仍然算数**：谁最后写了 background，谁就是当前生效值。
+   */
+  const lastBg = (selector: string): string | null => {
+    let v: string | null = null;
+    for (const b of ruleBodies(selector)) {
+      const x = bgOf(b);
+      if (x) v = x;
+    }
+    return v;
+  };
+  const isOpaque = (v: string | null): boolean => {
+    if (!v) return false;
+    if (/rgba\(|hsla\(|color-mix\(/.test(v)) return false;
+    if (/var\(\s*--paper-\d/.test(v)) return false; // --paper-72 就是 72% 透明
+    if (/\/\s*0?\.\d|\/\s*\d+(\.\d+)?%/.test(v)) return false;
+    return true;
+  };
+
+  for (const [sel, what] of [
+    ['.g-root .g-frags', '碎片栏（压在山与天上）'],
+    ['.g-root .g-title .g-group', '标题页画质组（压在被压暗的画面下端）'],
+  ] as const) {
+    asserts++;
+    const bg = lastBg(sel);
+    if (!bg) {
+      probs.push(`${what} ${sel} 根本没有 background —— 文字直接压在画面上`);
+    } else if (!isOpaque(bg)) {
+      probs.push(`${what} ${sel} 的底是半透明的（${bg}）——外层那层纱兜不住`);
+    }
+  }
+
+  // 反过来：标题页的卡**仍然**保持那层薄纱。不许有人为了省事把整张卡
+  // 改成实心——主视觉是这一页存在的理由，被一张纸盖住等于把第一眼退回原样。
+  asserts++;
+  {
+    const cardBg = lastBg('.g-root .g-card-title');
+    if (!cardBg) {
+      probs.push('.g-card-title 没有 background —— 水墨主视觉会从整张卡底下漏出来');
+    } else if (isOpaque(cardBg)) {
+      probs.push(`.g-card-title 被改成实色了（${cardBg}）—— 主视觉会被一张纸盖住`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '碎片栏与标题页画质组各自有不透明底 · 标题卡仍是薄纱（主视觉透得出来）',
+    asserts,
+  );
 });
 
 // ---------------------------------------------------------------- 结算三态
