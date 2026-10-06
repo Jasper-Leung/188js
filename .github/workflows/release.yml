@@ -56,6 +56,21 @@ jobs:
       # 桌面端把整个 dist/ 打进二进制，一个跑不过的断言会变成
       # **所有平台**的安装包里都有的 bug——比网页版更贵，因为要重发三个包。
       - run: npm run typecheck
+
+      # ★ 必须在 verify 之前。
+      #
+      # `verify_payload` 量的是**实际发出的字节**（`dist/` 里的东西），
+      # 所以 dist/ 不存在时它直接判红："dist/ 不存在或没有产物，
+      # 先 npm run build"。
+      #
+      # 本地永远踩不到这个坑——node_modules 和 dist/ 都躺在工作区里，
+      # 跑 verify 时顺手就有了。而 CI 是全新检出，两样都没有，
+      # 于是 prepare 在这里 exit 1，**release 连草稿都建不出来**。
+      #
+      # 这条判据本身是对的（量真实产物比量源码强），
+      # 错的是调用顺序：先 build 再 verify。
+      - run: npm run build
+
       - run: npm run verify
 
       - id: tag

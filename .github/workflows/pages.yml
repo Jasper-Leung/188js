@@ -39,13 +39,17 @@ jobs:
       # （`tools/verify-all.mjs` 会把 src/verify/*.ts 打成单文件在 Node 里跑），
       # 而它判的是 `asserts > 0` / 无 `[FAIL]` / 不抛异常——**不信退出码**。
       - run: npm run typecheck
-      - run: npm run verify
 
+      # build 必须在 verify 之前：`verify_payload` 量的是 dist/ 里的实际字节，
+      # dist/ 不存在时它直接判红。CI 是全新检出，本地有 dist/ 只是因为
+      # 上一轮 build 顺手留下了——**本地永远踩不到，CI 必然踩到**。
       - run: npm run build
         with:
           # vite.config.ts 里 base 已经是 './'，这里保持一致。
           # 两处不一致时的症状很安静：本地一切正常，线上白屏 404。
           NODE_ENV: production
+
+      - run: npm run verify
 
       # Pages 需要 .nojekyll 才不会把下划线开头的目录当 Jekyll 处理。
       # public/.nojekyll 会被 vite 原样拷进 dist/。
