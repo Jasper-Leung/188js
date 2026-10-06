@@ -10,8 +10,9 @@
  *
  * ## 为什么水位是一个全场统一的常数，而不是"碗底 + 一点"
  *
- * 这条路的自然地形高程被 clamp 在 [-3, 6]，也就是说**自然地形永远不低于
- * -3.0**（实测约三成的采样点正好压在这个下限上，是一望无际的平地）。
+ * 这条路的自然地形高程被 clamp 在 `[NATURAL_FLOOR, TERRAIN.MAX_HEIGHT]`
+ * （即 `[-3, 25]`，`NATURAL_FLOOR` 见下），也就是说**自然地形永远不低于 -3.0**
+ * （实测只有约 1% 的采样点压在这个下限上，是谷底而不是一望无际的平地）。
  * 所以只要把水位放到 -3.0 以下，全场低于水位的就只有我们挖出来的那三只碗
  * ——碗沿处碗深归零、高度回到自然地形，必然高于水位。
  * 于是"水会不会漫出去"这个问题不再取决于地形坡度，而是**恒等于否**。
@@ -20,8 +21,14 @@
  * `depth = 碗心自然高程 - 水位 + 目标水深`，保证碗心正好有目标深度的水。
  * 手填深度的话，碗底有可能高于水位——那只碗就成了一个永远露不出水的坑，
  * 而所有回归还是绿的。
+ *
+ * ## 起伏：`MAX_HEIGHT` 第一次真正生效
+ *
+ * 原来 `naturalHeightAt` 只给得出 10.66m 高差，而 `terrain.json` 里的
+ * `TERRAIN_MAX_HEIGHT: 25` 被导出之后**一次都没被读过**。
+ * 现在系数重扫、上限改用那个数据常量，详见 `naturalHeightAt` 的注释。
  */
-import { WATER, ROAD } from '../data/raw';
+import { WATER, ROAD, TERRAIN } from '../data/raw';
 import { STATIONS } from '../data/route';
 import { fbm, noise2d } from '../core/noise';
 import { clamp } from '../core/math';
@@ -46,14 +53,133 @@ export interface Basin {
 
 const basins: Basin[] = [];
 
-/** 未挖碗的自然高程。`planBasins` 按它反推碗深，所以必须是**不含碗**的那一半。 */
+/**
+ * 自然地形的高程下限。
+ *
+ * ## 为什么从 -3 改成 -12
+ *
+ * 原来钉在 -3，唯一的理由是水位（-3.4）必须恒低于它，于是"水会不会漫出去"
+ * 这个问题不取决于地形坡度而是恒等于否（见文件头）。
+ *
+ * 那是拿**地形**去迁就**水位**：一旦想把山做高，低处就成片压在这个下限上，
+ * 而成片的 -3.0 平台和"没有山谷的高原"是同一种病，只是方向相反。
+ * `relief-sweep` 把这条取舍量化了：地板 -3 时，想要纵坡 p95 ≤ 12%
+ * 就得把频率压到 0.14 以下，而那会把 20% 以上的世界压成地板；
+ * 地板放到 -12 之后，**纵坡 p95 11.5%、压地板 0.5%**，两条一起成立。
+ *
+ * 所以真正的修法是反过来：**让水位由地形下限反推，而不是让地形迁就水位。**
+ */
+export const NATURAL_FLOOR = -12;
+
+/**
+ * 水位低于自然地形下限的余量（米）。
+ *
+ * **从源数据自己推出来，不手填**：源项目的自然地形下限是 -3、
+ * `water.json` 里的 `WATER_LEVEL` 是 -3.4，所以它自己的余量是 `(-3) - (-3.4) = 0.4`。
+ * 旧实现是"地板钉在 -3、水位是数据里的 -3.4"——两件事碰巧对上；
+ * 现在地板动了，对不上的就换成同一件事的两种写法。
+ */
+const SOURCE_FLOOR = -3;
+const WATER_MARGIN = SOURCE_FLOOR - WATER.WATER_LEVEL;
+
+/** 实际使用的水位。恒低于 `NATURAL_FLOOR` 是**结构上**成立的，不靠手填的数字对齐。 */
+export const WATER_LEVEL = NATURAL_FLOOR - WATER_MARGIN;
+
+/**
+ * 未挖碗的自然高程。`planBasins` 按它反推碗深，所以必须是**不含碗**的那一半。
+ *
+ * ## 系数是怎么定的（`.cache/relief-sweep.mjs` 实测 144 组，不是拍脑袋）
+ *
+ * 原来这里是 `8 / 2 / 0.5`、无偏置、clamp 到 6。**实测原始高差只有 10.66m**，
+ * 分布形状倒是对的（横跨全部直方图格），只是**整体被缩小了将近三倍**——
+ * 800m 见方里 10m 高差就是一块台球桌绿板。地平线在每一帧里都是一条直线，
+ * 而副标题写的是"把家乡的**山水**装进行囊"。
+ *
+ * 顺带查到一件更该先修的事：`terrain.json` 里写着 `TERRAIN_MAX_HEIGHT: 25`，
+ * `raw.ts` 也把它导出来了，而**全世界没有任何一处读过它**——
+ * 又一个"意图写对了、代码没接上"。所以这里不再手写上限，
+ * 直接用那个数据常量，让它第一次真正生效。
+ *
+ * ## 为什么频率也改了（这是本条最贵的一处决定）
+ *
+ * 只放大幅度是不行的。第一版试过 `(22, 7, 1.5, bias 9, [-3, 25])`：
+ * 高差 26.8m 达标，可 `verify_relief` 立刻报**最大纵坡 49.3%、95% 路段 > 32.4%**——
+ * 路面变成过山车，而那条判据正是为了抓这个才写的。
+ *
+ * 原因是 fbm 的性质：幅度按 1/2 衰减、频率按 2 翻倍，
+ * 所以**三个倍频贡献的坡度是同一个量级**，总坡度 ≈ `6A / L`（L = 基频波长）。
+ * 要 12% 的坡度就得 `A ≤ 0.02 L`——在 125m 波长下 `A` 只有 2.5m，
+ * 那是把 10m 的高差再缩小一点，起伏永远出不来。
+ *
+ * **所以山要靠波长换，不靠幅度换。** 频率整体乘 0.14（基频波长 125m → 893m），
+ * 同样的幅度就换来三分之一的坡度。代价是坡更长更缓——
+ * 在一张 800m 的图上，"连绵的丘"和"能骑的山路"本来就不可能同时到顶，
+ * 这里选的是后者：一个**为骑行而做的**游戏，路必须能骑。
+ *
+ * ## 判据（扫的时候四条一起过）
+ *   · 高差 ≥ 20m          —— 看得出是山
+ *   · 纵坡 p95 ≤ 12% / max ≤ 20% —— 车爬得动
+ *   · 压地板 < 4% / 压顶 < 6%   —— 不许有成片平台
+ *   · 路拱离地 ≤ 1.5m     —— 路肩不能变成悬崖
+ *
+ * 实测 `-12 / FS 0.14 / 28-8-1.5`：**高差 30.8m**、主体 p10~p90 **23.2m**、
+ * 压地板 **0.5%**、压顶 **0.0%**、纵坡 p95 **11.5%** / max **14.4%**、离地 **0.37m**。
+ * 144 组里只有 8 组同时过关，这是其中起伏最大的一组。
+ *
+ * **路面不需要加纵向平滑**（离地 0.37m 就是不平滑的读数），
+ * 于是 `road.ts` 一行都不用改——这条路本来就是从地形推出来的，
+ * 该动的是地形，不是路。
+ *
+ * 噪声**函数**一个字节没动（`core/noise.ts` 里那段"不要换成更漂亮的噪声"
+ * 说的是别改 `hash2d`/`fbm` 本身）。改的只是采样频率——
+ * 换频率同样会挪动整张地图，而驿站、水碗、植被、道路全都按这份高程对位，
+ * 所以这一次是**刻意**重排世界，全部对位关系重新验一遍（`verify_relief` /
+ * `verify_stations` / `verify_water` / `verify_buildings` / `verify_ride`）。
+ */
 export function naturalHeightAt(x: number, z: number): number {
-  let h = 0;
-  h += fbm(x * 0.008, z * 0.008, 3) * 8;
-  h += fbm(x * 0.02, z * 0.02, 2) * 2;
-  h += fbm(x * 0.06, z * 0.06, 1) * 0.5;
-  return clamp(h, -3, 6);
+  return clamp(naturalHeightRaw(x, z), NATURAL_FLOOR, TERRAIN.MAX_HEIGHT);
 }
+
+/**
+ * 未经 clamp 的自然高程。
+ *
+ * **只给回归用**（`verify_water` 要证明 clamp 真的在生效，
+ * 而"生效"只能由"不 clamp 的话会越界"来证明）。
+ *
+ * 为什么需要它：那条判据原来拿"≥5% 的采样点正好落在 -3.0 上"当作
+ * clamp 生效的证据——**那是一个代理，而且是一个方向反了的代理**。
+ * 地板上点越多，世界越像一块平台；`verify_relief` 要求地板占比 < 4%
+ * 正是为了治它。于是两条判据在互相对抗，改好一条另一条必红。
+ *
+ * 直接量就沒有这个矛盾：原始值确实越过上下界（说明 clamp 有活可干），
+ * 而返回值确实一次都没越界（说明它干对了）。两句话各自都是真的，
+ * 不需要拿"地板上有多少点"去间接推。
+ */
+export function naturalHeightRaw(x: number, z: number): number {
+  let h = TERRAIN_RELIEF_BIAS;
+  h += fbm(x * 0.008 * TERRAIN_FREQ, z * 0.008 * TERRAIN_FREQ, 3) * 28;
+  h += fbm(x * 0.02 * TERRAIN_FREQ, z * 0.02 * TERRAIN_FREQ, 2) * 8;
+  h += fbm(x * 0.06 * TERRAIN_FREQ, z * 0.06 * TERRAIN_FREQ, 1) * 1.5;
+  return h;
+}
+
+/**
+ * 三个倍频共用的频率系数。基频波长 = `1 / (0.008 × TERRAIN_FREQ)` 米。
+ *
+ * 0.14 → 893m，在 800m 的图上约一两个主起伏加两三个次级起伏。
+ * 为什么山要靠波长换而不是靠幅度换，见 `naturalHeightAt` 的注释。
+ */
+const TERRAIN_FREQ = 0.14;
+
+/**
+ * 偏置量。存在的唯一理由是把分布中心抬到 `[地板, 天花板]` 的中间附近：
+ * 不抬的话低处会成片压在下限上，而成片的下限不是地形，是一块地板。
+ *
+ * 取 `-地板 × 0.62`（= 7.44）是实测值——见 `naturalHeightAt` 上面的判据表。
+ * 写成地板的函数而不是一个孤零零的常数，是为了让**改地板时偏置自动跟着走**；
+ * 原来这两件事各写各的，改一个忘另一个，分布就会整片贴到某一头。
+ */
+const TERRAIN_RELIEF_BIAS = -NATURAL_FLOOR * 0.62;
 
 /** 到整条中心线的最近距离（米）。用均匀网格加速，只在规划碗心时调用。 */
 function distToCenterline(x: number, z: number): number {
@@ -190,9 +316,9 @@ export function planBasins(): Basin[] {
       cz: center.z,
       radius: shape.radius,
       squash: shape.squash,
-      depth: hC - WATER.WATER_LEVEL + shape.depth,
+      depth: hC - WATER_LEVEL + shape.depth,
       waterDepth: shape.depth,
-      level: WATER.WATER_LEVEL,
+      level: WATER_LEVEL,
       ax: alongX,
       az: alongZ,
     });
@@ -254,8 +380,12 @@ export function checkConsistency(): { ok: boolean; problems: string[] } {
     if (b.depth <= 0) {
       problems.push(`碗 ${b.station} 深度为 ${b.depth}，挖不出水`);
     }
-    if (WATER.WATER_LEVEL >= -3.0) {
-      problems.push(`水位 ${WATER.WATER_LEVEL} 不低于自然地形下限 -3.0，水会漫出去`);
+    // 水位恒低于自然地形下限是**结构上**成立的（`WATER_LEVEL` 由下限反推），
+    // 所以这里量的是余量本身还在不在，而不是"这次数据对不对"。
+    // 如果哪天有人把 `WATER_MARGIN` 改成 0 或负数，水会漫过一望无际的草地——
+    // 而所有几何断言都还是绿的。
+    if (WATER_MARGIN <= 0 || WATER_MARGIN > 2) {
+      problems.push(`水位余量 ${WATER_MARGIN}m 不在 (0, 2] 区间，水会漫出去或者碗挖不出来`);
     }
   }
   return { ok: problems.length === 0, problems };

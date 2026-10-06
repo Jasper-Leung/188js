@@ -43,10 +43,64 @@ export interface SaveBlob {
     /** 1-based 章节号。老存档没有这个字段，读回时按 1 处理 */
     chapter?: number;
     chapter1_done?: boolean;
+    /** 骑完的圈数。老存档没有，按 0 处理（那一趟还没开始耗日子） */
+    laps?: number;
+    /** 累计打卡。老存档没有，按已收碎片数推出来——那是下界，不会少算 */
+    check_ins?: number;
   };
 }
 
 type Listener<T> = (payload: T) => void;
+
+/**
+ * 存档后端。默认 `localStorage`；**无头回归传一个内存实现**。
+ *
+ * ## 为什么不是一个全局变量
+ *
+ * 原来 `save()` / `load()` 直接摸 `localStorage`，而两处都包在 `try/catch` 里
+ * （无痕模式 / 配额满不该让游戏崩）。在 Node 里 `localStorage` 根本不存在，
+ * 于是 `save()` 安静地什么都不做、`load()` 安静地返回 false——
+ * **"存档坏了"和"这里没有存档"看起来一模一样。**
+ *
+ * 后果是日期（`laps` / `check_ins`）这类**只能靠存读往返证明的字段**
+ * 在回归里根本测不到：`verify_days` 第一次跑就红了
+ * 「存读往返：第 8 天 → 读回第 1 天」，而它报的其实是"后端不存在"，
+ * 不是"字段没写进存档"。
+ *
+ * 抽成可注入的接口之后，那条判据才真的在测它该测的东西。
+ * 和 `phase.ts` 把 `canRide` 抽成纯函数是同一个理由。
+ */
+export interface SaveStore {
+  read(key: string): string | null;
+  write(key: string, value: string): void;
+  remove(key: string): void;
+}
+
+function memoryStore(): SaveStore {
+  const m = new Map<string, string>();
+  return {
+    read: (k) => m.get(k) ?? null,
+    write: (k, v) => void m.set(k, v),
+    remove: (k) => void m.delete(k),
+  };
+}
+
+function defaultStore(): SaveStore {
+  try {
+    // 真的浏览器里有 localStorage；碰不到就退到内存，游戏照跑。
+    if (typeof localStorage !== 'undefined') {
+      localStorage.getItem(SAVE_KEY);
+      return {
+        read: (k) => localStorage.getItem(k),
+        write: (k, v) => localStorage.setItem(k, v),
+        remove: (k) => localStorage.removeItem(k),
+      };
+    }
+  } catch {
+    /* 无痕模式：getItem 本身就抛 */
+  }
+  return memoryStore();
+}
 
 const SAVE_KEY = 'gift188.save.v3';
 
@@ -127,9 +181,80 @@ export class GameStateManager {
   /** 第一章是否已经完成 */
   chapter1Done = false;
 
-  /** 当前目标。'return' 只在集齐且第一章未完成时出现 */
+  // ================= 三十日 =================
+  //
+  // ## 为什么日期要**由行为算出来**，而不是一个手动推进的计数器
+  //
+  // 律师函说"三十日内不开业，依法征收"，反派第三场说"五天内不签字"。
+  // 这两句话写好了、也念出来了，而**三十天从来不会走**——
+  // 于是这个期限不是压力，只是一句背景。
+  //
+  // 做法是让日期是**已发生的事**的函数，而不是一个可以被推进的数：
+  // 打卡要花时间、骑完一圈要花时间，两者一加就是日期。
+  // 这样玩家没法"顺便"推进它（没有地方能点），
+  // 而**迷路真的会花掉日期**——这一趟里唯一不推进任何事的行为。
+  //
+  // 一天的口径（`DAYS_PER_LAP` / `DAYS_PER_CHECKIN`）定成
+  // "一遍完整的活儿大概要 15 天"：15 次打卡 + 5 圈 × 3 天 = 30 天。
+  // 于是**认真玩刚好用完 thirty 天，磨蹭就会过期**。
+
+  /** 骑完一圈花几天。 */
+  static readonly DAYS_PER_LAP = 3;
+  /** 一次打卡花几天。 */
+  static readonly DAYS_PER_CHECKIN = 1;
+  /** 总共多少天。 */
+  static readonly DAYS_LIMIT = 30;
+
+  /** 骑完的圈数（≥0）。落盘。 */
+  laps = 0;
+  /** 累计打卡次数（落盘，由 `checkIn` 自己加）。 */
+  checkIns = 0;
+
+  /** 骑完一圈记一天账。**只由世界层在圈数真的 +1 时调。** */
+  noteLap() {
+    this.laps++;
+    this.save();
+  }
+
+  /** 今天是第几天。1 起。 */
+  get day(): number {
+    return (
+      1 +
+      this.laps * GameStateManager.DAYS_PER_LAP +
+      this.checkIns * GameStateManager.DAYS_PER_CHECKIN
+    );
+  }
+
+  /** 还剩几天。**可以是 0，也可以是负数**——过期是一个状态，不是一个失败。 */
+  get daysLeft(): number {
+    return Math.max(0, GameStateManager.DAYS_LIMIT - this.day);
+  }
+
+  /** 过期了吗。 */
+  get overdue(): boolean {
+    return this.day > GameStateManager.DAYS_LIMIT;
+  }
+
+  /**
+   * 这一趟现在该做什么。
+   *
+   * 过期之后目标**从"收齐五件乐事"变成"回去把话说完"**——
+   * 走的还是同一条路、同一辆车，但目标换了一个，而 `back_break` 那个结局
+   * 就是为它准备的。
+   *
+   * 过期**不是失败画面**：README 写着"没有会结束这一趟的失败画面"，
+   * 而这句话和"有时间限制"是可以同时成立的——
+   * 过期了不会死，只是事情变成了另一种样子。
+   */
   get objective(): 'collect' | 'return' {
-    return this.allCollected() && !this.chapter1Done ? 'return' : 'collect';
+    if (this.allCollected() && !this.chapter1Done) return 'return';
+    return 'collect';
+  }
+
+  /** 过期之后的目标文案键。 */
+  get objectiveKey(): 'objective_collect' | 'objective_return' | 'objective_overdue' {
+    if (this.overdue) return 'objective_overdue';
+    return this.objective === 'return' ? 'objective_return' : 'objective_collect';
   }
 
   /**
@@ -153,7 +278,11 @@ export class GameStateManager {
     return this.objective === 'return' && stationIdx === GameStateManager.HOME_STATION && dist <= reach;
   }
 
-  constructor() {
+  /** 存档后端。默认 `localStorage`，无头回归注入内存实现。 */
+  store: SaveStore = defaultStore();
+
+  constructor(store?: SaveStore) {
+    if (store) this.store = store;
     this.resetState();
   }
 
@@ -177,6 +306,8 @@ export class GameStateManager {
     this.currentState = 'GIFT_BOX';
     this.chapter = 1;
     this.chapter1Done = false;
+    this.laps = 0;
+    this.checkIns = 0;
   }
 
   reset() {
@@ -194,6 +325,7 @@ export class GameStateManager {
     if (next <= prev) return false;
 
     this.collected.set(stationIndex, next);
+    this.checkIns++;
     if (prev === 0) {
       this.earn(ECON.LVBI_FIRST_CHECKIN, `checkin_${stationIndex}_1`);
       this.earn(ECON.LVBI_PER_FRAGMENT, `frag_${stationIndex}`);
@@ -497,9 +629,11 @@ export class GameStateManager {
           ending_id: this.endingId,
           chapter: this.chapter,
           chapter1_done: this.chapter1Done,
+          laps: this.laps,
+          check_ins: this.checkIns,
         },
       };
-      localStorage.setItem(SAVE_KEY, JSON.stringify(blob));
+      this.store.write(SAVE_KEY, JSON.stringify(blob));
       this._l.dirty();
     } catch {
       /* 无痕模式 / 配额满：不落盘，游戏照跑 */
@@ -508,7 +642,7 @@ export class GameStateManager {
 
   load(): boolean {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = this.store.read(SAVE_KEY);
       if (!raw) return false;
       const blob = JSON.parse(raw) as SaveBlob;
       if (blob.version !== ECON.SAVE_VERSION) {
@@ -541,6 +675,15 @@ export class GameStateManager {
         // 那些存档本来就没走完新的章节流程，补一次比"直接当成已完成"诚实。
         this.chapter = Math.max(1, Number(ec.chapter) || 1);
         this.chapter1Done = ec.chapter1_done === true;
+        this.laps = Math.max(0, Number(ec.laps) || 0);
+        // 老存档没有 `check_ins`。按**已经收掉的碎片数**推出来——
+        // 那是下界（只算了首访），不会把日子算少，
+        // 于是老存档读回来会**看起来更紧迫一点**，而不会更宽松。
+        // 反过来默认 0 等于凭空还他十几天。
+        this.checkIns = Math.max(
+          0,
+          Number(ec.check_ins) || ROAD.FRAGMENT_SLOT_STATION_IDX.filter((i) => this.isCollected(i)).length,
+        );
       }
       // 必须在 collected 载入**之后**再对齐：这两个事件在存档写下的那一刻
       // 就已经发过了，读档回来不该再发一遍。
@@ -555,7 +698,7 @@ export class GameStateManager {
 
   clearSave() {
     try {
-      localStorage.removeItem(SAVE_KEY);
+      this.store.remove(SAVE_KEY);
     } catch {
       /* 忽略 */
     }
@@ -563,7 +706,7 @@ export class GameStateManager {
 
   hasSave(): boolean {
     try {
-      return localStorage.getItem(SAVE_KEY) !== null;
+      return this.store.read(SAVE_KEY) !== null;
     } catch {
       return false;
     }

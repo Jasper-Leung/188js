@@ -398,9 +398,141 @@
    标题页
    ========================================================================== */
 
+/* ---------------------------------------------------------------- 骑行节拍
+ *
+ * 一个收缩的圈 + 五个点。**没有文字**——窗口 1.15s，一行字读不完。
+ * 圈用 conic-gradient 的 `--beat` 表示剩余比例，逐帧只改一个自定义属性。
+ * conic 而不是 SVG：SVG 每帧改 stroke-dashoffset 会触发重排，
+ * 而这是骑行中每帧都在动的东西。
+ */
+.g-root .g-beat {
+  position: absolute;
+  left: 50%;
+  bottom: 15%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  pointer-events: none;
+  --beat: 0;
+}
+
+.g-root .g-beat-ring {
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 50%;
+  /* 底圈：暗，用来在亮草地上也看得见 */
+  background: conic-gradient(
+    var(--ink-faint) calc(var(--beat) * 360deg),
+    rgba(43, 36, 27, 0.18) 0
+  );
+  opacity: 0.55;
+  transition: opacity 0.12s ease-out;
+}
+
+/* 窗口开着时才实起来——一圈会缩的淡线在余光里读不出来 */
+.g-root .g-beat.is-open .g-beat-ring {
+  opacity: 1;
+  box-shadow: 0 0 0 2px rgba(250, 246, 236, 0.65);
+}
+
+.g-root .g-beat-key {
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  color: var(--ink);
+  background: rgba(250, 246, 236, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.05rem 0.36rem;
+  opacity: 0.5;
+}
+.g-root .g-beat.is-open .g-beat-key {
+  opacity: 1;
+}
+
+.g-root .g-beat-dots {
+  display: flex;
+  gap: 0.22rem;
+}
+.g-root .g-beat-dot {
+  width: 0.36rem;
+  height: 0.36rem;
+  border-radius: 50%;
+  background: rgba(43, 36, 27, 0.22);
+}
+.g-root .g-beat-dot.is-on {
+  background: var(--ink);
+}
+
 .g-root .g-card-title {
   text-align: center;
   padding: 2rem 1.8rem 1.4rem;
+  /* **去掉实心纸底**，换成一层很薄的暖白纱。
+   *
+   * 原来它继承 `.g-card` 的 `background: var(--paper)`——一张实心纸，
+   * 于是水墨主视觉被整块盖住，只剩一圈白边。实机截图里那个"白色半透明方块"
+   * 就是它，而它是玩家看到的第一样东西。
+   *
+   * 留 0.55 的白纱而不是完全透明：主视觉是浅色（米白纸底），
+   * 而界面里还有分组小标题、下方那行探测理由等次级文字，
+   * 全透明的话它们会糊在山的纹路里。0.55 让画透出来，字仍然读得出。
+   * `backdrop-filter` 让纱跟着底下的画一起柔化，而不是盖一层灰。
+   */
+  background: rgba(var(--pw) calc(var(--pg) + 2) var(--pb), 0.55);
+  backdrop-filter: blur(2px);
+  box-shadow: 0 0.6rem 2.2rem rgba(20, 17, 12, 0.34);
+}
+
+/* ---------------------------------------------------------------- 标题页
+ *
+ * 原来这里是一个**白色半透明方块**浮在 3D 世界上。它是全作最弱的视觉，
+ * 也是第一印象——而 `public/ui/titleart.jpg` 是同一件作品的水墨主视觉
+ * （群山、云海、架在云上的 8 字环线），本来就是为这一页画的。
+ *
+ * 做法是把这张画铺成整屏底，文字压在上面。为了保证**任何屏幕比例下
+ * 主体（环线与山）都不被裁掉**，用 `object-position: 50% 42%`
+ * 把焦点往上挪一点——环线在画面的中偏上，正中裁会把山顶切掉。
+ *
+ * 加一层压暗：画本身是浅色的（米白纸底），而界面文字是墨色，
+ * 不压暗的话字会读不出来。压暗只压**上下两端**（中间留给文字），
+ * 所以既保证可读，又不把画盖住。
+ */
+.g-root .g-title {
+  background: #1b1a17;
+}
+
+.g-root .g-title::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: url('/ui/titleart.jpg');
+  background-size: cover;
+  background-position: 50% 42%;
+  background-repeat: no-repeat;
+  /* 画加载不出来时退成一层暖灰，而不是纯黑 */
+  background-color: #2a2823;
+  opacity: 0.92;
+}
+
+/* 上下压暗、中间留亮：文字落在亮区，两侧留画 */
+.g-root .g-title::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(20, 19, 16, 0.72) 0%,
+    rgba(20, 19, 16, 0.18) 26%,
+    rgba(20, 19, 16, 0.18) 74%,
+    rgba(20, 19, 16, 0.78) 100%
+  );
+}
+
+.g-root .g-title .g-card {
+  position: relative;
+  z-index: 1;
 }
 
 .g-root .g-title-head {
@@ -548,7 +680,18 @@
    HUD
    ========================================================================== */
 
-.g-root .g-hud {
+.g-root /* 期限。排在顶栏最前——它是唯一一个会因为什么都不做而变少的数。 */
+.g-stat-days {
+  font-variant-numeric: tabular-nums;
+}
+/* 过期：不闪、不变红，只换一个字并压暗。这个世界里没有警报音。 */
+.g-stat-days.is-over {
+  opacity: 0.72;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.g-hud {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -612,7 +755,11 @@
   padding: 0.35em 0.5em 0.4em;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
-  background: var(--paper-72);
+  /* **实色**（`--paper`），不是半透明的 `--paper-72`。
+     这块压在山和天上面：72% 的纸让底下的景物透上来，字像浮在草地上，
+     而它是玩家唯一确认"我收了几件"的地方，必须读作一张纸。
+     黄昏照样跟 `--dusk` 走——`--paper` 也是从 `--pw/--pg/--pb` 算出来的。 */
+  background: var(--paper);
 }
 
 .g-root .g-frags-h {
@@ -672,10 +819,14 @@
   letter-spacing: 0.08em;
 }
 
+/* 「0/3」那一行。
+   原来是 `--ink-faint`（#9a8d76）——比 0.7em 的字号还淡，
+   读作"这里大概有个数"，而它其实是玩家判断"要不要再跑一趟"的唯一依据。
+   提一档到 `--ink-soft`，仍然比格子的名字淡，层次还在。 */
 .g-root .g-frag-c {
   display: block;
   font-size: 0.7em;
-  color: var(--ink-faint);
+  color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }
 

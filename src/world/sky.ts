@@ -217,12 +217,29 @@ export class Sky {
   }
 
   /**
-   * 推进昼夜。`lap` 是第几圈（1 起），`progress` 是这一圈走了多少（0~1）。
-   * 第一圈恒定白天；第二圈起从 0.45 推到 1.0。
+   * 推进昼夜。
+   *
+   * ## 现在有两个来源，取较大的那个
+   *
+   * · **圈内进度**（原来的）：第 1 圈恒定白天，第 2 圈起从 0.45 推到 1.0。
+   *   它管的是"这一圈里天黑得怎么样"。
+   * · **日期**（新的）：从第 1 天的 0 线性推到期限那天的 0.85。
+   *   它管的是"这一趟走到哪儿了"。
+   *
+   * 为什么必须有第二个：日期会因**打卡**推进，而打卡发生在圈内——
+   * 只看圈内进度的话，一个把所有碎片都在第一圈里收完的玩家
+   * 会在一个已经收齐的下午看到天一点不暗，
+   * 三十日期限于是又一次只存在于律师函里。
+   * 加上日期之后，**磨蹭的人和赶路的人看到的是不同的天色**，
+   * 而这正是"期限在走"唯一不需要一行字就能表达的方式。
+   *
+   * 0.85 而不是 1.0：期限那天不应该是全黑的——
+   * 玩家还得看得见路，而"天色变了"不需要变成"看不见了"才成立。
    */
-  setByProgress(lap: number, progress: number) {
-    const target = lap <= 1 ? 0 : Math.min(Math.max((progress - 0.35) / 0.65, 0) * 1.0, 1);
-    this.setDusk(target);
+  setByProgress(lap: number, progress: number, day = 1, dayLimit = 30) {
+    const byLap = lap <= 1 ? 0 : Math.min(Math.max((progress - 0.35) / 0.65, 0), 1);
+    const byDay = dayLimit > 1 ? Math.min(Math.max((day - 1) / (dayLimit - 1), 0), 1) * 0.85 : 0;
+    this.setDusk(Math.max(byLap, byDay));
   }
 
   setDusk(v: number) {

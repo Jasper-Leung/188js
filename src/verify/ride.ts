@@ -27,8 +27,8 @@ import { Stations } from '../world/stations';
 import { Ride } from '../world/ride';
 import { PRESETS } from '../core/settings';
 import { RIDE, WORLD, ROADMESH } from '../data/raw';
-import { canRide } from '../game/phase';
-import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import { canRide, demoAim, demoInput, unwrapArc } from '../game/phase';
+import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength, nearestArcParam } from '../data/route';
 import { Object3D } from 'three';
 
 /** 一个不碰 WebGL 的相机替身。骑行只写它的 position / lookAt。 */
@@ -216,12 +216,20 @@ function assertJunction(probs: string[]): { asserts: number; detail: string } {
     return { asserts, detail: '压平未生效' };
   }
 
-  // 1. 共面：核心半径 + 一点余量之内，所有中心线点的路面高度都应贴近 planeY。
-  //    阈值 5cm：权重在过渡带上不为 1，两支在 3m 处仍差 (1-w)×0.16 ≈ 2cm。
+  // 1. 共面：**`JUNCTION.coreRadius` 之内**所有中心线点的路面高度都应贴近 planeY。
+  //
+  //    这里量的是 `coreRadius` 本身，不再外扩 1.5m。理由是一个定义问题：
+  //    `JUNCTION_CORE_RADIUS` 的含义就是"这个半径内 `w ≡ 1`、路面被完全拉平"，
+  //    所以它内**必须**严格共面；外一圈属于过渡带，`w < 1`，本来就不该要求共面。
+  //    早先外扩 1.5m 是配着"核心只有 1.5m、过渡带从 1.5m 才开始"那套参数的
+  //    ——核心做实到 5.0m 之后，外扩的部分落在过渡带上，那条判据量的就不再是
+  //    代码声称的性质了。
+  //
+  //    阈值 5cm：深度缓冲在 30m 处的精度约 0.2mm，5cm 是它的两百倍。
   asserts++;
   let worstFlat = 0;
   let nFlat = 0;
-  const core = JUNCTION.coreRadius + 1.5;
+  const core = JUNCTION.coreRadius;
   for (const p of road.centerline) {
     if (Math.hypot(p.x - c.x, p.z - c.z) > core) continue;
     nFlat++;
@@ -239,13 +247,30 @@ function assertJunction(probs: string[]): { asserts: number; detail: string } {
   //    这条守的是"基准高度取错了半径"这一类错。
   //    曾经按 `PLAZA_RADIUS = 12m` 取半径内的最高点，而 11m 外的采样点
   //    已经在爬坡，低的那一支于是被抬 0.58m——路口中央凭空鼓一个包。
-  //    0.4m 的余量留给 `max(左中右)` 本身带来的填方（实测 0.32m），
-  //    而鼓包那次是 0.89m，两者差得开。
+  //
+  //    **阈值随地形成立变化，不写死 0.4m。**
+  //    坡地上的平交口必须填方或挖方才能共面——这是几何，不是 bug。
+  //    核心区直径内的地形落差就是这笔土方的下限，
+  //    所以"允许的填方 = 地形落差 + 0.4m 余量"。
+  //    写死 0.4m 时它和"严格共面"这两条判据在坡地上直接互相打架：
+  //    起伏做实之后实测平面高出当地地面 0.59m，共面达标而这条必红。
   asserts++;
   const groundAtCore = road.groundHeightAt(c.x, c.z) + 0.15;
   const hump = plane - groundAtCore;
-  if (hump > 0.4) {
-    probs.push(`交叉口平面高出当地地面 ${hump.toFixed(2)}m，路口中央会鼓包`);
+  // 核心区内的地形落差：量一圈边界上地面高度的最大最小差
+  let gLo = Infinity;
+  let gHi = -Infinity;
+  for (let a = 0; a < 16; a++) {
+    const th = (a / 16) * Math.PI * 2;
+    const g = road.groundHeightAt(c.x + Math.cos(th) * core, c.z + Math.sin(th) * core);
+    gLo = Math.min(gLo, g);
+    gHi = Math.max(gHi, g);
+  }
+  const coreRise = gHi - gLo;
+  if (hump > coreRise + 0.4) {
+    probs.push(
+      `交叉口平面高出当地地面 ${hump.toFixed(2)}m（核心区地形落差 ${coreRise.toFixed(2)}m），路口中央会鼓包`,
+    );
   }
   if (hump < -0.05) {
     probs.push(`交叉口平面低于当地地面 ${(-hump).toFixed(2)}m，路口中央会塌坑`);
@@ -305,10 +330,21 @@ function assertJunction(probs: string[]): { asserts: number; detail: string } {
   //    两种判据都留着会互相掩护，所以只留直接的那条。
   asserts++;
   const paved = JUNCTION.paved;
-  /** 路口处沥青的实际半宽。`JUNCTION.paved` 必须 ≥ 它，否则标线会画上去 */
+  /** 路口处沥青的实际半宽。`JUNCTION.paved` 必须 ≥ 它，否则辙痕会画上去 */
   const effPaved = ROADMESH.TOTAL_HALF_WIDTH * ROAD.JUNCTION_WIDE;
   const n = road.centerline.length;
-  const sideLats = [ROADMESH.ROAD_HALF_WIDTH - 0.18, 0];
+  // **辙痕的两条**，不再是白边线与中线的位置。
+  //
+  // 判据守的性质没变——"路口内不许有沿着路走的纵向条纹压在别人家的沥青上"——
+  // 只是被量的对象换了：标线删掉之后，辙痕接替了它的角色
+  // （它同样是按横向位置定位、沿路延伸的东西）。
+  //
+  // 位置抄的是 `ROAD_PATCH` 里那两个数，**不是手写米数**：
+  // 着色器写的是 `road_half_width * wide * 0.34 / 0.66`，
+  // 路口处 `wide = JUNCTION_WIDE`。两处各写各的时，辙痕一改位置这条判据
+  // 就开始量一个不存在的东西——而它还是绿的。
+  const rutLat = ROADMESH.ROAD_HALF_WIDTH * ROAD.JUNCTION_WIDE;
+  const sideLats = [rutLat * 0.34, rutLat * 0.66];
   let paintedOver = 0;
   let worstOver = 0;
   let gapLo = Infinity;
@@ -367,13 +403,147 @@ function assertJunction(probs: string[]): { asserts: number; detail: string } {
 
   return {
     asserts,
-    detail: `共面偏差 ${(worstFlat * 100).toFixed(1)}cm · 离地 ${hump.toFixed(2)}m · 走 48m 最大跳变 ${jump.toFixed(3)}m/步 · 离路 ${offRoad}/${steps + 1} · 铺面无标线(断口 ${(-gapLo * 0.5).toFixed(1)}..${(gapHi * 0.5).toFixed(1)}m)`,
+    detail: `共面偏差 ${(worstFlat * 100).toFixed(1)}cm · 离地 ${hump.toFixed(2)}m(落差 ${coreRise.toFixed(2)}m) · 走 48m 最大跳变 ${jump.toFixed(3)}m/步 · 离路 ${offRoad}/${steps + 1} · 铺面无标线(断口 ${(-gapLo * 0.5).toFixed(1)}..${(gapHi * 0.5).toFixed(1)}m)`,
   };
 }
 
 function smoothstep01(a: number, b: number, x: number): number {
   const t = Math.min(Math.max((x - a) / (b - a), 0), 1);
   return t * t * (3 - 2 * t);
+}
+
+/**
+ * 演示模式那辆车自己往前骑 —— **在 Node 里真的骑 45 秒**。
+ *
+ * ## 为什么必须闭环跑，不能只测那三个函数
+ *
+ * `demoAim()` 单独是对的、`demoInput()` 单独是对的，**合起来把车开出路面**这件事
+ * 仍然可能发生：增益太大车会画龙，太小车会切弯出界，速度给高了过弯根本收不住。
+ * 这三样只有"让真的 `Ride` 跑四十五秒"才量得到。
+ *
+ * 会红的做法：
+ * · 把 `demoInput` 的 `steer` 符号写反 —— 车一出门就朝反方向开，10 秒后离路。
+ * · 把增益从 2.5 调到 8 —— 车在连续弯里左右摆，横向偏移翻倍。
+ * · 去掉 `unwrapArc` —— 8 字中央那一下被甩，最坏一次就是横向几米。
+ *
+ * ## 为什么量的是 `onRoad()` 和横向偏移，而不是"看起来顺不顺"
+ *
+ * 演示是给别人看的，而看的人不会量米。他只会说"这车好像有点晃"。
+ * 于是判据直接落在**它有没有一直骑在路面上**上——那正是"晃"的成因。
+ */
+export function assertDemoDrive(): { ok: boolean; detail: string; asserts: number } {
+  const probs: string[] = [];
+  let asserts = 0;
+  const { ride } = build();
+  ride.setCanMove(canRide({ phase: 'roaming', checkInPressed: false, narrativeBusy: false, checkInStage: 'none' }));
+
+  // 从中心线起点出发，**车头顺着这条路**（`build()` 给的是 heading=0，不是路的方向）。
+  const p0 = pointAtArcLength(0).pos;
+  const t0 = tangentAt(0);
+  ride.spawn(p0.x, p0.z, Math.atan2(-t0.x, -t0.z));
+
+  // ---- 1. 符号：车偏到路的左边，瞄偏必须是正的（该往右打回来）----
+  //
+  // 这一条单独拎出来，因为它是最便宜也最要命的一个：符号反了车出门就下路，
+  // 而"出门就下路"在 90 秒的演示里只占头两秒——评审很可能根本没看见。
+  asserts++;
+  {
+    const right = { x: -t0.z, z: t0.x };
+    const off = 4;
+    const arc = nearestArcParam(p0.x, p0.z);
+    const leftAim = demoAim(p0.x - right.x * off, p0.z - right.z * off, Math.atan2(-t0.x, -t0.z), arc);
+    const rightAim = demoAim(p0.x + right.x * off, p0.z + right.z * off, Math.atan2(-t0.x, -t0.z), arc);
+    if (!(leftAim > 0)) probs.push(`车在路左侧 4m 时瞄偏 ${leftAim.toFixed(3)}，应为正（往右打回来）`);
+    if (!(rightAim < 0)) probs.push(`车在路右侧 4m 时瞄偏 ${rightAim.toFixed(3)}，应为负（往左打回来）`);
+    if (demoInput(leftAim, 0).steer <= 0) probs.push('瞄偏为正时转向不是正的——车会朝反方向开');
+  }
+
+  // ---- 2. 闭环：真的骑 45 秒 ----
+  const seconds = 45;
+  const steps = seconds * 60;
+  let arc = nearestArcParam(ride.pos.x, ride.pos.z);
+  let advanced = 0;
+  let offRoad = 0;
+  let worstLateral = 0;
+  let sumSpeed = 0;
+  let worstSteer = 0;
+  for (let i = 0; i < steps; i++) {
+    const p = ride.pos;
+    const d = demoInput(demoAim(p.x, p.z, ride.headingValue, arc), ride.speedValue);
+    worstSteer = Math.max(worstSteer, Math.abs(d.steer));
+    ride.fixedUpdate(1 / 60, d);
+    const raw = nearestArcParam(ride.pos.x, ride.pos.z);
+    // 走过的弧长要单记：arc 是归一化的，跨过 0 的时候差值会翻负。
+    let delta = raw - arc;
+    if (delta > 0.5) delta -= 1;
+    if (delta < -0.5) delta += 1;
+    advanced += delta;
+    arc = unwrapArc(arc, raw);
+    if (!ride.onRoad()) offRoad++;
+    worstLateral = Math.max(worstLateral, lateralOf(ride.pos.x, ride.pos.z));
+    sumSpeed += Math.abs(ride.speedValue);
+  }
+  const gained = advanced * TOTAL_ARCLENGTH;
+
+  // 2a. 全程在路面上。**零容忍**：演示里车压一次草，减速 + 掉出画面，
+  //     而观众不会觉得"它修正了"，只会觉得"这车不太行"。
+  asserts++;
+  if (offRoad > 0) probs.push(`演示车 ${seconds} 秒里有 ${offRoad}/${steps} 帧不在路面上`);
+
+  // 2b. 横向偏移必须有余量。路半宽 4m（路口更宽），
+  //     阈值取它的 65% = 2.6m：实测前视 12m 时最远 1.90m，
+  //     而前视一旦改成 16m 就是 3.07m、20m 直接骑出路肩——这条会红。
+  asserts++;
+  if (worstLateral > ROADMESH.TOTAL_HALF_WIDTH * 0.65) {
+    probs.push(`演示车最大横向偏移 ${worstLateral.toFixed(2)}m，路半宽只有 ${ROADMESH.TOTAL_HALF_WIDTH}m——前视距离多半调长了`);
+  }
+
+  // 2c. 真的在往前骑。四十五秒跑不到 200m 的，那不是"骑得稳"，是"没在骑"。
+  asserts++;
+  if (gained < 200) probs.push(`演示车 ${seconds} 秒只走了 ${gained.toFixed(0)}m（巡航 11 m/s 应当 ≈ ${seconds * 11}m）`);
+  asserts++;
+  if (gained > seconds * 15 * 1.05) probs.push(`演示车 ${seconds} 秒走了 ${gained.toFixed(0)}m，比极速还快——里程口径错了`);
+
+  // 2d. 速度：平均要接近巡航，而不是一路蹭。低于 6 m/s 的话画面读作"推着车走"。
+  asserts++;
+  const avg = sumSpeed / steps;
+  if (avg < 6) probs.push(`演示车平均只有 ${avg.toFixed(1)} m/s（巡航 11）`);
+
+  // 2e. 转向不许常驻在高位。实测峰值 0.46（弯里），持续 0.9 以上说明增益炸了，
+  //     画面上就是"一直在修方向"——比骑歪更难解释，因为车根本没歪。
+  asserts++;
+  if (worstSteer > 0.9) probs.push(`演示车峰值转向 ${worstSteer.toFixed(2)}，一直满舵在修方向`);
+
+  const detail = probs.length
+    ? probs.join('；')
+    : `${seconds}s 走了 ${gained.toFixed(0)}m · 全程在路面上 · 最远横向 ${worstLateral.toFixed(2)}m / 半宽 ${ROADMESH.TOTAL_HALF_WIDTH}m · 均速 ${avg.toFixed(1)} m/s · 峰值转向 ${worstSteer.toFixed(2)}`;
+  return { ok: probs.length === 0, detail, asserts };}
+
+/** 中心线在参数 `arc` 处的单位切向（指向参数增大的一侧）。 */
+function tangentAt(arc: number): { x: number; z: number } {
+  const a = pointAtArcLength(arc * TOTAL_ARCLENGTH).pos;
+  const b = pointAtArcLength(arc * TOTAL_ARCLENGTH + 1.5).pos;
+  const len = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+  return { x: (b.x - a.x) / len, z: (b.z - a.z) / len };
+}
+
+/** 到整条中心线的最近距离。**必须用最近的那一支**——8 字有两支，
+ *  只比本段的话，车骑到另一支正下方时会读成"离路 80m"。 */
+function lateralOf(x: number, z: number): number {
+  let best = Infinity;
+  for (let i = 0; i < CENTERLINE.length - 1; i++) {
+    const a = CENTERLINE[i];
+    const b = CENTERLINE[i + 1];
+    const abx = b.x - a.x;
+    const abz = b.z - a.z;
+    const l2 = abx * abx + abz * abz;
+    if (l2 < 1e-9) continue;
+    let t = ((x - a.x) * abx + (z - a.z) * abz) / l2;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const d = Math.hypot(x - (a.x + abx * t), z - (a.z + abz * t));
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 /** 供探针打印用 */

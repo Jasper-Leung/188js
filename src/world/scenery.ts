@@ -49,9 +49,10 @@ import {
   type Material,
 } from 'three';
 import { CENTERLINE, STATIONS, TOTAL_ARCLENGTH, nearestArcParam } from '../data/route';
-import { WATER, ROAD } from '../data/raw';
+import { ROAD } from '../data/raw';
 import { hashGrid } from '../core/noise';
 import { bottomOf } from './vegetation';
+import { WATER_LEVEL } from './basins';
 import type { Terrain } from './terrain';
 
 export type SceneryKind = 'bamboo' | 'mod_tower' | 'mod_house';
@@ -218,7 +219,7 @@ export class Scenery {
           if (rd < sp.road[0] || rd > sp.road[1]) continue;
           // 水位
           const h = t.getHeightAt(px, pz);
-          if (h < WATER.WATER_LEVEL + MIN_DRY) continue;
+          if (h < WATER_LEVEL + MIN_DRY) continue;
           // 坡度
           if (slopeAt(t, px, pz, 6) > MAX_SLOPE) continue;
           // 驿站

@@ -15,6 +15,8 @@ import { Water } from './water';
 import { Vegetation } from './vegetation';
 import { Scenery, type SceneryKind } from './scenery';
 import { Stations } from './stations';
+import { Relics, RELIC_CUE_RADIUS } from './relics';
+import { BambooBeats, type BeatEvent } from '../game/beat';
 import { Sky } from './sky';
 import { Ride, type RideInput } from './ride';
 import { loadModel, modelUrl } from './assets';
@@ -82,6 +84,7 @@ export class World {
   readonly veg: Vegetation;
   readonly scenery: Scenery;
   readonly stations: Stations;
+  readonly relics: Relics;
   readonly sky: Sky;
   readonly ride: Ride;
   readonly camera: PerspectiveCamera;
@@ -95,6 +98,53 @@ export class World {
   private lastArc = 0;
   private lastPos = new Vector3();
   private time = 0;
+  /** 上一帧的定步长 dt。`postFixedUpdate()` 的签名里没有它，而旧物的呼吸要用。 */
+  private lastFixedDt = 0;
+
+  /**
+   * 面前够得着的旧物（-1 = 够不着）。
+   *
+   * 顶栏提示、脚下提示圈、`verify_relics` 三处都看这一个——
+   * 和 `fragmentStationNeedsVisit()` 同一个道理：同一件事只许有一个出处。
+   */
+  relicNearby = -1;
+  relicDistance = Infinity;
+
+  /**
+   * 还在提示圈里、但**还够不着**的那一件（-1 = 没有）。
+   *
+   * 和 `relicNearby` 分开是两个不同的距离：
+   * 提示圈 18m 说"那边有东西"（该减速），伸手 2.8m 说"这件叫什么"（已停下）。
+   * 只留后者的话，提示永远在玩家已经停稳之后才弹——那时候它已经没有用了。
+   */
+  relicSpotted = -1;
+
+  /**
+   * 骑行中的节拍（竹）。**第一件和"骑"有关的乐事。**
+   *
+   * 宿主每帧调 `updateBeats()`，按键调 `pressBeat()`。
+   * 两者都只碰 `BambooBeats`，而它不碰 DOM、不碰 three——
+   * 和 `phase.ts` 把判定抽成纯函数是同一个理由。
+   */
+  readonly beats: BambooBeats;
+  /** 节拍事件出口。宿主弹提示。 */
+  onBeat: ((e: BeatEvent, hits: number) => void) | null = null;
+  private beatClock = 0;
+
+  private updateBeats() {
+    this.beatClock += this.lastFixedDt;
+    const p = this.ride.pos;
+    const e = this.beats.update(this.lastFixedDt, p.x, p.z, this.beatClock);
+    if (e) this.onBeat?.(e, this.beats.state.hits);
+  }
+
+  /** 按节拍键。返回这一下发生了什么。 */
+  pressBeat(): BeatEvent {
+    if (!this.beats.allowPress(this.beatClock)) return 'miss';
+    const e = this.beats.press();
+    this.onBeat?.(e, this.beats.state.hits);
+    return e;
+  }
 
   private interactCooldown = 0;
   private lastCheckInPos = new Vector3(1e9, 1e9, 1e9);
@@ -166,10 +216,24 @@ export class World {
     step('区域散布');
     this.stations = new Stations(preset, this.terrain);
     step('驿站');
+    // 旧物必须在驿站之后建：它按 `FRAGMENT_STATIONS` 的落位往路的方向退，
+    // 而那份落位是 `Stations` 算出来的（横向偏移依赖 `STATION_FOOT_HALF`）。
+    this.relics = new Relics(this.terrain);
+    step('旧物');
     this.sky = new Sky(this.scene, preset.shadowMapSize, preset.shadowDistance || 120);
     step('天穹');
+    // 节拍点由竹丛落位推出来，所以必须在 `Scenery` 之后。
+    this.beats = new BambooBeats(this.scenery);
+    step('骑行节拍');
 
-    this.scene.add(this.terrain.mesh, this.water.group, this.veg.group, this.scenery.group, this.stations.group);
+    this.scene.add(
+      this.terrain.mesh,
+      this.water.group,
+      this.veg.group,
+      this.scenery.group,
+      this.stations.group,
+      this.relics.group,
+    );
 
     this.ride = new Ride(this.terrain, this.road, this.stations, camera);
     this.scene.add(this.ride.root);
@@ -204,6 +268,7 @@ export class World {
   // ---------------------------------------------------------------- 定步长
   fixedUpdate(dt: number, input: RideInput, canRide: boolean) {
     this.time += dt;
+    this.lastFixedDt = dt;
     this.interactCooldown = Math.max(0, this.interactCooldown - dt);
 
     // **只认 canRide 一个来源。** 曾经这里自己也判一遍
@@ -256,13 +321,18 @@ export class World {
 
     // 圈数：看中心线参数有没有绕回去
     const arc = nearestArcParam(this.ride.pos.x, this.ride.pos.z);
-    if (this.lastArc > 0.85 && arc < 0.15) this.lap++;
-    else if (this.lastArc < 0.15 && arc > 0.85) this.lap = Math.max(1, this.lap - 1);
+    if (this.lastArc > 0.85 && arc < 0.15) {
+      this.lap++;
+      // 每骑完一圈算 3 天。三十日期限要**真的会被用掉**，
+      // 而"骑圈"是这一趟里唯一一个"不推进任何事"的动作——
+      // 玩家迷路、找路、想再看看风景，代价就是日期。
+      game.noteLap();
+    } else if (this.lastArc < 0.15 && arc > 0.85) this.lap = Math.max(1, this.lap - 1);
     this.lastArc = arc;
 
-    // 昼夜：第二圈起才推进
+    // 昼夜：圈内进度 **与** 日期，取较晚的那个。见 sky.ts:setByProgress。
     const lapProgress = (this.odometer % TOTAL_ARCLENGTH) / TOTAL_ARCLENGTH;
-    this.sky.setByProgress(this.lap, lapProgress);
+    this.sky.setByProgress(this.lap, lapProgress, game.day, GameStateManager.DAYS_LIMIT);
     if (this.lap >= 2 && this.sky.state.dusk > 0.35 && !this.duskAnnounced) {
       this.duskAnnounced = true;
       this.emit({ type: 'duskBegan' });
@@ -279,6 +349,16 @@ export class World {
   // ---------------------------------------------------------------- 驿站
   private updateProximity() {
     const p = this.ride.pos;
+    // 旧物每帧跟着玩家转：提示圈只在前 18m 亮，越近越实。
+    this.relics.update(this.lastFixedDt, p.x, p.z);
+    // 面前够得着的那一件。-1 = 够不着。
+    const rel = this.relics.nearest(p.x, p.z);
+    this.relicNearby = rel.index;
+    this.relicDistance = rel.distance;
+    // 还在提示圈里的（够不着的也算）。给"那边有东西"那句提示用。
+    this.relicSpotted = this.relics.nearestWithin(p.x, p.z, RELIC_CUE_RADIUS).index;
+    // 节拍必须在驿站之后建：它要读竹丛的落位，而那是 `Scenery` 算的。
+    this.updateBeats();
     let best = -1;
     let bestD = Infinity;
     for (let i = 0; i < this.stations.list.length; i++) {
@@ -397,6 +477,30 @@ export class World {
     if (text && !text.startsWith('⟨')) {
       this.emit({ type: 'storyLine', stationIndex: -1, title: t('crossing_title'), text });
     }
+  }
+
+  /**
+   * 摸一件旧物。**够得着、且还没摸过**才返回它。
+   *
+   * ## 为什么是"一次性"而不是"每次按都重播"
+   *
+   * 和 `claimVoiceGuide()` 同一个理由：那五段话是**它讲自己是谁**，
+   * 一件东西不会每次被摸都重新自我介绍一次。反复播的结果不是"玩家喜欢听"，
+   * 是那个地方从"有人在这儿留下过什么"掉成"有个 UI 在循环"——
+   * 而这五件是这个游戏里最接近"人"的东西，不能被一个循环键毁掉。
+   *
+   * 一次性状态只活在本次会话（`Relics.heard`），**不落盘**：
+   * 它不是剧情进度，是"这一趟我有没有停下来听"。重开一趟重新摸一遍，
+   * 那是玩家自己的选择，不该被存档替他做。
+   */
+  touchRelic(): { titleKey: string; textKey: string; index: number } | null {
+    const i = this.relicNearby;
+    if (i < 0) return null;
+    if (this.relics.isHeard(i)) return null;
+    const def = this.relics.placements[i]?.def;
+    if (!def) return null;
+    this.relics.markHeard(i);
+    return { titleKey: def.titleKey, textKey: def.textKey, index: i };
   }
 
   /** 玩家在打卡范围内吗？（够得着 + 不是冷却中 + 骑开了足够远） */

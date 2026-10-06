@@ -50,3 +50,5 @@ desktop.ini
 # Windows
 Thumbs.db:ehl
 $RECYCLE.BIN/
+# 本机 AI 工具的权限清单：里面是绝对路径与本地端口，换台机器就没用了。
+.claude/

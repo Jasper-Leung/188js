@@ -36,8 +36,10 @@ import {
   InterpolateLinear,
   KeyframeTrack,
   LoopRepeat,
+  Matrix4,
   Object3D,
   Quaternion,
+  QuaternionKeyframeTrack,
   Vector3,
   type AnimationAction,
   type InterpolationModes,
@@ -804,6 +806,30 @@ const _pole = new Vector3();
 const _up = new Vector3(0, 1, 0);
 /** 烘焙时用来闭合 bob 的根骨名。Mixamo 系的根骨名就是它。 */
 const ROOT_BONE = 'mixamorigHips';
+/**
+ * 膝盖相对「向前」的**外撇系数**：极向量 = `(±KNEE_OUT, 0, 1)`。
+ *
+ * 0.15 是「向前为主、略微过脚尖」——骑行时膝盖本来就是这样顶出去的。
+ * 关键是**左右由同一个式子算出来**，所以必然对称；
+ * 而极向量若取自原动画，左腿那份偏偏偏外侧（用户报的现象）。
+ */
+const KNEE_OUT = 0.05;
+/**
+ * 「脚踩在水平踏板上」的世界朝向（**角色本地**）。
+ *
+ * Mixamo 脚骨：本地 +Y = 踝→趾、+Z = 脚背（鞋底法线是 −Z）、+X = 外侧。
+ * 踏板平台被 `updateBikeRig` **始终保持水平**，所以脚掌该是：
+ *
+ * ```
+ * 本地 +X → (−1, 0, 0)    本地 +Y → (0, 0, 1) 车头方向    本地 +Z → (0, 1, 0) 向上
+ * ```
+ *
+ * 行列式 = 1，是个真旋转（等价于绕 (0,1,1)/√2 转 180°）。
+ * **两条腿共用它**——踏板是同一个朝向，两只脚没有理由不一样。
+ */
+const FOOT_ON_PEDAL = new Quaternion().setFromRotationMatrix(
+  new Matrix4().makeBasis(new Vector3(-1, 0, 0), new Vector3(0, 0, 1), new Vector3(0, 1, 0)),
+);
 
 /**
  * 两骨 IK：给定髋、目标、极向量，求**大腿**与**小腿**的骨向。
@@ -969,12 +995,23 @@ export function bakeRideToPedals(
     foot: new Float32Array(times.length * 4),
   }));
   let ok = true;
-  // 脚掌的**世界朝向**：整条循环保持同一个值。
+  // 脚掌的**世界朝向**：整条循环保持同一个值，而且**两条腿用同一个**。
   //
-  // ★ 为什么脚掌也要烘：不烘的话循环首尾的脚掌旋转差 0.0644（≈37°），
-  //   而踏板平台在真车上**始终水平**（`updateBikeRig` 就是这么摆的），
-  //   所以「脚掌朝向恒定」既是循环闭合的要求，也正是物理上对的那一个。
-  const footWorld = new Quaternion();
+  // ★★ 为什么不能取「原动画 t=0 的朝向」：
+  //   ① 原动画那一帧**两只脚在行程的相反相位**上，朝向本就不同 ⇒ 左右不对称；
+  //   ② 更糟的是那个朝向本身就不对：实测原动画 t=0 的左脚踝→趾轴是
+  //      (−0.031, **−0.981**, −0.190)，**几乎垂直朝下**——脚在用脚尖戳踏板。
+  //      烘焙前我把它冻成常量，于是**整个循环都在用那个歪姿势**。
+  //
+  // ★ 所以朝向改由**踏板**定，而不是由动画某一帧定：
+  //   `updateBikeRig` 把踏板平台**始终保持水平**（真车就是这样），
+  //   所以脚掌就该「脚尖朝车头、鞋底朝下」。Mixamo 脚骨的本地 +Y 是踝→趾、
+  //   +Z 是脚背（鞋底法线是 −Z），于是一个**固定**的基就够了：
+  //
+  //       本地 +X → 世界 −X    本地 +Y → 世界 +Z（前）    本地 +Z → 世界 +Y（上）
+  //
+  //   两条腿共用它 ⇒ 左右必然对称，而且和踏板平台平行。
+  const footWorld = FOOT_ON_PEDAL.clone();
   // 脚趾骨（`ToeBase` 及其子骨）也冻成常量。
   //
   // ★ 为什么：原动画的趾骨有**自己的** position / quaternion 轨道，
@@ -993,15 +1030,6 @@ export function bakeRideToPedals(
     return out;
   });
   const toesReady = legs.map(() => false);
-  // 极向量**每条腿只取 t = 0 那一次**，整条循环保持不变。
-  //
-  // ★ 为什么不能逐帧取：极向量决定膝盖往哪边弯，取自原动画的话，
-  //   原动画首尾的膝盖方向本身就不一样（它踩 1.012 圈，不是整圈）——
-  //   于是烘出来的腿在循环接缝处膝位不同，实测残留 **0.0626**。
-  //   固定极向量让整条腿的姿势成为 θ 的**纯函数**，首尾必然重合。
-  //   代价是膝盖的弯向不随踩踏摆动；对一个固定的踏板平面来说这正合适。
-  const poles = legs.map(() => new Vector3());
-  const polesReady = legs.map(() => false);
   // 末帧要用的髋位置修正量（把 bob 闭合，见下面）
   const rootTrack0 = clip.tracks.find((tr) => tr.name === `${ROOT_BONE}.position`);
   const yFix = rootTrack0 ? rootTrack0.values[1] - rootTrack0.values[(rootTrack0.values.length / 3 - 1) * 3 + 1] : 0;
@@ -1017,13 +1045,19 @@ export function bakeRideToPedals(
       }
       // 末帧：髋被抬/压到与首帧一致（bob 闭合），腿必须按**改过之后**的髋解
       if (i === times.length - 1) _hipW.y += yFix;
-      // 极向量 = 原动画的**膝盖方向**（只取 t = 0 这一次，见上面），弯法与原片一致
-      if (!polesReady[li]) {
-        _poleW.subVectors(_kneeW, _hipW);
-        if (_poleW.lengthSq() < 1e-12) _poleW.set(0, 0, 1);
-        poles[li].copy(_poleW);
-        polesReady[li] = true;
-      }
+      // 极向量（膝盖往哪边弯）——**由几何给定，不取自原动画**。
+      //
+      // ★ 为什么不能取原动画的：原素材那两条腿的膝盖朝向**本来就不一样**，
+      //   左腿的极向量偏向外侧。实测烘焙后左膝横向 0…+36mm（往外撇），
+      //   而右膝 −21…0mm（略往内）——用户报的现象正是「左膝盖往外运动」。
+      //   而且原动画 t=0 只是某一帧，**换一套动画就会换一个歪法**。
+      //
+      // ★ 所以改成「向前为主 + 两侧对称微外撇」：
+      //   骑行时膝盖本来就是向前上方顶、略过脚尖，所以 +0.15 的外撇是自然的；
+      //   关键是**左右由同一个式子算出来**，于是必然对称。
+      //   角色的本地 +X 是**左**（实测左踝 x=+0.050、右踝 x=−0.051），
+      //   本地 +Z 是车头方向。
+      _poleW.set(li === 0 ? KNEE_OUT : -KNEE_OUT, 0, 1).normalize();
       // 两只脚差半个圈（脚踏板本来就是 180° 对置）。
       // ★ x 用**各自踏板平面的**横向位置：左右踏板横向差 0.35m，
       //   共用一个 x 等于把两只脚挤到中线上，腿会整个张开。
@@ -1033,7 +1067,7 @@ export function bakeRideToPedals(
         opts.centre.y + opts.radius * Math.sin(th),
         opts.centre.z + opts.radius * Math.cos(th),
       );
-      if (!solveTwoBone(_hipW, _tgtW, poles[li], a, b, _dirs)) {
+      if (!solveTwoBone(_hipW, _tgtW, _poleW, a, b, _dirs)) {
         ok = false;
         break;
       }
@@ -1065,7 +1099,6 @@ export function bakeRideToPedals(
       // ★ 父朝向用**小腿**（`_shinWorld`），不是大腿——脚掌挂在小腿下面。
       //   拿大腿当父朝向时局部旋转整体拧了 46°，而右腿那条因为大腿小腿
       //   恰好同向所以看不出来（实测右腿只差 1.8°、左腿差 46°）。
-      if (i === 0) probe.worldQuat(l.ankle, footWorld);
       _qInv.copy(_shinWorld).invert().multiply(footWorld);
       _qOut.copy(_qInv).normalize();
       solved[li].foot.set([_qOut.x, _qOut.y, _qOut.z, _qOut.w], i * 4);
@@ -1134,9 +1167,9 @@ export function bakeRideToPedals(
     tracks.push(tr);
   }
   legs.forEach((l, li) => {
-    tracks.push(new KeyframeTrack(`${l.hip}.quaternion`, times32, solved[li].hip, tr_getInterp(clip, `${l.hip}.quaternion`)));
-    tracks.push(new KeyframeTrack(`${l.knee}.quaternion`, times32, solved[li].knee, tr_getInterp(clip, `${l.knee}.quaternion`)));
-    tracks.push(new KeyframeTrack(`${l.ankle}.quaternion`, times32, solved[li].foot, tr_getInterp(clip, `${l.ankle}.quaternion`)));
+    tracks.push(qTrack(`${l.hip}.quaternion`, times32, solved[li].hip, clip));
+    tracks.push(qTrack(`${l.knee}.quaternion`, times32, solved[li].knee, clip));
+    tracks.push(qTrack(`${l.ankle}.quaternion`, times32, solved[li].foot, clip));
     // 趾骨：常量轨道（同一个值写满所有帧）
     for (const t of toeBones[li]) {
       const n = times.length;
@@ -1157,4 +1190,27 @@ export function bakeRideToPedals(
 function tr_getInterp(clip: AnimationClip, name: string): InterpolationModes {
   for (const tr of clip.tracks) if (tr.name === name) return tr.getInterpolation();
   return InterpolateLinear;
+}
+
+/**
+ * 建一条**四元数**轨道。
+ *
+ * ★ 必须是 `QuaternionKeyframeTrack`，不能用基类 `KeyframeTrack`。
+ *
+ *   `QuaternionKeyframeTrack` 覆写了 `createInterpolant()`，用
+ *   `QuaternionKeyframeInterpolant`（**slerp**）；它的 `getInterpolation()`
+ *   同样返回 `InterpolateLinear`，但那个 2300 在它身上指的是 slerp。
+ *   换成基类就只剩**逐分量线性插值** —— 而四元数分量线性插值**不归一化**，
+ *   帧间读出来的朝向会歪。
+ *
+ *   实测后果：左腿的 `大腿→小腿` 合成差 **179.188°**（右腿只有 0.881°），
+ *   脚掌因此转到 −0.987 的「几乎朝下」去。左右差别来自**转角大小**：
+ *   逐分量线性插值在两帧四元数接近时几乎无害，差得远（跨过半个球）就彻底歪掉。
+ *
+ *   而这个 bug **在关键帧时刻量不出来**——线性插值在关键帧处恰好等于关键帧值。
+ *   所以量「循环接缝」时用的是 42 个关键帧时刻，量到的全是绿的；
+ *   运行时读的是帧间位置，才露馅。**验这类东西必须读帧间**。
+ */
+function qTrack(name: string, times: Float32Array, values: Float32Array, clip: AnimationClip): QuaternionKeyframeTrack {
+  return new QuaternionKeyframeTrack(name, times, values, tr_getInterp(clip, name));
 }

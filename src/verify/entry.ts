@@ -9,8 +9,10 @@
  * 守不住任何东西，而一条"在它要守的那个漏洞上踩着跑"的断言
  * 更糟：它绿着，而漏洞也在。
  */
-import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
-import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD, WATER } from '../data/raw';
+import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, FRAGMENT_STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
 import {
   createMiniGame,
   MINI_GAME_IDS,
@@ -21,29 +23,36 @@ import {
 } from '../game/minigames';
 import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
 import { auditSummary } from '../debug/probe';
-import { planBasins, naturalHeightAt, basinDepthAt, getBasins, checkConsistency } from '../world/basins';
+import { planBasins, naturalHeightAt, naturalHeightRaw, basinDepthAt, getBasins, checkConsistency, NATURAL_FLOOR, WATER_LEVEL } from '../world/basins';
+import { RELICS, Relics, relicSite, distToCenterline, RELIC_REACH, RELIC_FROM_ROAD, type RelicKind } from '../world/relics';
+import { BambooBeats, BEAT_ARM_RADIUS, BEAT_CUE_RADIUS, BEAT_WINDOW, BEAT_GOAL } from '../game/beat';
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
 import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
-import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
+import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone, Scene } from 'three';
+import { Sky } from '../world/sky';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
 import { Terrain } from '../world/terrain';
 // `ROAD` 这个名字在 `data/raw` 已经被路面网格数据占用了，
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
-import { Road, ROAD as ROAD_GEOM } from '../world/road';
+import { Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs } from '../game/phase';
+import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs, unwrapArc } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
 import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSeam } from '../world/pose';
-import { assertRide } from './ride';
+import { assertRide, assertDemoDrive } from './ride';
 import { GameStateManager } from '../game/state';
 import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
 import { readingMs, StoryCards, setNarrativeQuiet } from '../ui/storyCard';
 import { PRESETS, clampTier } from '../core/settings';
 import { DEFAULT_LANG, setLang, t } from '../i18n';
+import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
+import { EndCard } from '../ui/endCard';
+import type { UIHooks } from '../ui';
+import type { Toast } from '../ui/toast';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
 
 export interface Check {
@@ -583,33 +592,47 @@ check('verify_water', () => {
     }
   }
 
-  // 自然高程的 clamp 必须真的生效。
-  // 采样要走**二维网格**：早先用 `(i*37.1) % 800` 的一维伪随机取点，
-  // 落点高度集中在一条斜线上，恰好一次都没压到 -3.0 的地板——
-  // 于是"没有任何采样点在下限上"这条判据红了，而地形其实完全正常。
-  // 一条只在特定采样方式下才成立的断言，等于没有断言。
+  // clamp 必须真的生效，而"生效"只能由**不 clamp 就会越界**来证明。
+  //
+  // 原来这里写死 `h < -3.0 || h > 6.0`，又在下一条断言"≥5% 的采样点压在
+  // -3.0 上"当作 clamp 生效的证据。两条都坏：
+  //   · 区间写死：起伏放大之后上限不再是 6，判据开始报"自然高程越界"，
+  //     而地形完全正常。**一个量错东西的判据比没有判据更坏。**
+  //   · 那个代理方向是反的：地板上点越多，世界越像一块平台。
+  //     `verify_relief` 要求地板占比 < 4% 正是为了治它——
+  //     于是两条判据在互相对抗，治好一条另一条必红。
+  //
+  // 现在两句话各自独立成立：原始值确实越界（clamp 有活可干），
+  // 返回值确实不越界（它干对了）。采样走二维网格，沿用原来的理由。
   asserts++;
   const GRID = 33;
-  let below = 0;
-  let total = 0;
+  let rawOut = 0;
+  let clampedOut = 0;
   for (let iz = 0; iz < GRID; iz++) {
     for (let ix = 0; ix < GRID; ix++) {
       const x = (ix / (GRID - 1)) * 800 - 400;
       const z = (iz / (GRID - 1)) * 800 - 400;
+      const raw = naturalHeightRaw(x, z);
+      if (raw < NATURAL_FLOOR - 1e-9 || raw > TERRAIN.MAX_HEIGHT + 1e-9) rawOut++;
       const h = naturalHeightAt(x, z);
-      if (!Number.isFinite(h) || h < -3.0 - 1e-9 || h > 6.0 + 1e-9) {
+      if (!Number.isFinite(h) || h < NATURAL_FLOOR - 1e-9 || h > TERRAIN.MAX_HEIGHT + 1e-9) {
+        clampedOut++;
         probs.push(`自然高程越界：${h} @ (${x.toFixed(0)}, ${z.toFixed(0)})`);
         iz = GRID;
         break;
       }
-      if (Math.abs(h + 3.0) < 1e-9) below++;
-      total++;
     }
   }
   asserts++;
-  const ratio = below / total;
-  if (ratio < 0.05) {
-    probs.push(`只有 ${(ratio * 100).toFixed(1)}% 的采样点压在 -3.0 下限上，clamp 可能没生效`);
+  if (rawOut === 0) {
+    probs.push('原始高程一次都没越界，clamp 无事可做——系数与 [地板, 天花板] 已经脱节');
+  }
+
+  // 水位必须恒低于自然地形下限。这是 `WATER_LEVEL` 由下限反推的理由，
+  // 单独再钉一遍：那条推导在 basins.ts 里，这里量的是**结果**。
+  asserts++;
+  if (WATER_LEVEL >= NATURAL_FLOOR) {
+    probs.push(`水位 ${WATER_LEVEL} 不低于自然地形下限 ${NATURAL_FLOOR}，水会漫出去`);
   }
 
   asserts++;
@@ -841,6 +864,806 @@ check('verify_terrain', () => {
   if (verts > 70000) probs.push(`地形顶点 ${verts} 太多，一整块 mesh 扛不住`);
 
   return expect(probs.length === 0, probs.length ? probs.join('；') : `${TERRAIN.SIZE}m / ${TERRAIN.RES} 格 / ${cell.toFixed(2)}m`, asserts);
+});
+
+// ---------------------------------------------------------------- 地形起伏
+/**
+ * ## 这条为什么必须存在，而 `verify_terrain` 为什么守不住它
+ *
+ * `verify_terrain` 钉的是**网格形状**（800m / 128 格 / 6.25m 一格），
+ * 外加一个"高程在 clamp 范围内"。这两件事在"世界是一块台球桌"时全绿。
+ *
+ * 实测就是这么绿的：起伏公式给出原始高差 **10.66m**，
+ * `terrain.json` 里的 `TERRAIN_MAX_HEIGHT: 25` 被 `raw.ts` 导出来之后
+ * **全世界没有一处读过它**，于是 800m 见方里 10m 高差在每一帧里都读成
+ * 一望无际的平地——地平线是一条直线。而副标题写的是"把家乡的**山水**
+ * 装进行囊"。
+ *
+ * **"高程在范围内"和"看得出高低"是两件事。** 这条判据量的是后者。
+ *
+ * ## 它凭什么会红（逐条）
+ *
+ * | 断言 | 退回什么写法会红 |
+ * |---|---|
+ * | 高差 ≥ 20m | 把三个倍频改回 `8 / 2 / 0.5` → 红 `高差 10.66m` |
+ * | 高差 ≤ 75m | 把 28 改成 280 → 红 `高差 300m` |
+ * | 压地板 < 4% | 去掉偏置 / 把 `TERRAIN_FREQ` 调回 1 → 红 `压地板 x%` |
+ * | 压顶 < 6% | 漏掉 hash2d 里那层 `fmod`（Godot 侧的原 bug）→ 均值 +0.99 → 红 `压顶 x%` |
+ * | p10~p90 ≥ 8m | 同上，防"少数山峰 + 一片平台" |
+ * | 占格 ≥ 10/16 | 收成单峰尖（把 fbm 换成单倍频）→ 红 `只占 n/16 格` |
+ * | 最大纵坡 ≤ 20% | 只放大幅度不降频率（第一版就是这么写的）→ 红 `49.3%` |
+ * | p95 纵坡 ≤ 12% | 同上 → 红 `32.4%` |
+ * | 路拱离地 ≤ 1.5m | 给路面加纵向平滑而不降频率 → 红 `离地 6.70m`，路肩变悬崖 |
+ * | 纵坡有正有负 | 去掉偏置 → 整圈只下坡 → 红 `没有上坡` |
+ */
+check('verify_relief', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 41×41 覆盖整张 800m 地图。采样点与 probe.mjs 相同，两处读数可以直接对照。
+  const N = 41;
+  const hs: number[] = [];
+  let min = Infinity;
+  let max = -Infinity;
+  let atFloor = 0;
+  let atCeil = 0;
+  for (let iz = 0; iz < N; iz++) {
+    for (let ix = 0; ix < N; ix++) {
+      const x = (ix / (N - 1)) * 800 - 400;
+      const z = (iz / (N - 1)) * 800 - 400;
+      const h = naturalHeightAt(x, z);
+      hs.push(h);
+      if (h < min) min = h;
+      if (h > max) max = h;
+      if (Math.abs(h - NATURAL_FLOOR) < 1e-9) atFloor++;
+      if (Math.abs(h - TERRAIN.MAX_HEIGHT) < 1e-9) atCeil++;
+    }
+  }
+  const total = hs.length;
+  const relief = max - min;
+
+  // 1. 高差必须真的达到数据里 MAX_HEIGHT 的量级
+  //    留 20% 余量而不是死钉 25：判据要守"有没有山"，不是守"山有多高"，
+  //    否则下一次调噪声微调一下就会红，而它并没有坏。
+  asserts++;
+  if (relief < TERRAIN.MAX_HEIGHT * 0.8) {
+    probs.push(`高差 ${relief.toFixed(2)}m，低于 ${(TERRAIN.MAX_HEIGHT * 0.8).toFixed(0)}m（看不出来是山）`);
+  }
+
+  // 2. 反向：不能矫枉过正。起伏太大路面会变成过山车，驿站也会被甩到坡上。
+  asserts++;
+  if (relief > TERRAIN.MAX_HEIGHT * 3) {
+    probs.push(`高差 ${relief.toFixed(2)}m，超过 ${(TERRAIN.MAX_HEIGHT * 3).toFixed(0)}m（路面会变成过山车）`);
+  }
+
+  // 3. 压下限：一望无际的 -3.0 平台。
+  //    这是"下限版的高原"，和 hash2d 漏 fmod 那个 bug 是同一族病，只是方向相反。
+  asserts++;
+  const floorPct = (atFloor / total) * 100;
+  if (floorPct >= 4) probs.push(`压在 ${NATURAL_FLOOR} 下限 ${floorPct.toFixed(1)}%，成片地板`);
+
+  // 4. 压上限：山头被削平。Godot 侧漏 fmod 时是 79%，这里给 6% 的余量。
+  asserts++;
+  const ceilPct = (atCeil / total) * 100;
+  if (ceilPct >= 6) probs.push(`压在 ${TERRAIN.MAX_HEIGHT} 上限 ${ceilPct.toFixed(1)}%，成片台地`);
+
+  // 5. 主体分布必须铺开，而不是"平台 + 几座孤峰"。
+  //    取 p10/p90 而不是 min/max：min/max 会被极少数点带着跑，
+  //    而这条要问的是"玩家脚下这一片是不是有高有低"。
+  const sorted = [...hs].sort((a, b) => a - b);
+  const p10 = sorted[Math.floor(total * 0.1)];
+  const p90 = sorted[Math.floor(total * 0.9)];
+  asserts++;
+  if (p90 - p10 < 8) probs.push(`p10~p90 只差 ${(p90 - p10).toFixed(2)}m，主体地形是平的`);
+
+  // 6. 直方图占格数：防"收成一根尖"。
+  //    分 16 格铺满 [NATURAL_FLOOR, MAX_HEIGHT]，要求至少 10 格有样本。
+  asserts++;
+  const bins = 16;
+  const bw = (TERRAIN.MAX_HEIGHT - NATURAL_FLOOR) / bins;
+  const occupied = new Set<number>();
+  for (const h of hs) {
+    occupied.add(Math.min(bins - 1, Math.max(0, Math.floor((h - NATURAL_FLOOR) / bw))));
+  }
+  if (occupied.size < bins * 0.625) {
+    probs.push(`高程直方图只占 ${occupied.size}/${bins} 格，分布收成了一根尖`);
+  }
+
+  // 7~8. 路面纵坡。起伏是给玩家看的，纵坡是给车走的——这条量的是后者。
+  //
+  // 用 `naturalHeightAt` 沿中心线复算路面高度，抄的是 `road.ts:buildRoadYs`
+  // 的"左中右三点取最高"，所以读数与真实路面同源（不是近似另一套算法）。
+  const grades: number[] = [];
+  const hw = ROADMESH.ROAD_HALF_WIDTH;
+  const cl = CENTERLINE;
+  const roadY = new Array<number>(cl.length);
+  for (let i = 0; i < cl.length; i++) {
+    const p = cl[i];
+    const s = sideAt(cl, i);
+    roadY[i] = Math.max(
+      naturalHeightAt(p.x, p.z),
+      naturalHeightAt(p.x + s.x * hw, p.z + s.z * hw),
+      naturalHeightAt(p.x - s.x * hw, p.z - s.z * hw),
+    );
+  }
+  for (let i = 0; i < cl.length; i++) {
+    const a = cl[i];
+    const b = cl[(i + 1) % cl.length];
+    const ds = Math.hypot(b.x - a.x, b.z - a.z);
+    if (ds < 1e-6) continue;
+    grades.push(Math.abs(roadY[(i + 1) % cl.length] - roadY[i]) / ds);
+  }
+  grades.sort((x, y) => x - y);
+  const maxGrade = grades[grades.length - 1] ?? 0;
+  const p95Grade = grades[Math.floor(grades.length * 0.95)] ?? 0;
+
+  asserts++;
+  if (maxGrade > 0.2) probs.push(`最大纵坡 ${(maxGrade * 100).toFixed(1)}%，车会爬不动`);
+
+  // p95 才是玩家真正天天遇到的那一段。只钉 max 的话，
+  // 一处 20cm 的尖刺就能让整条判据失去意义。
+  // 12% 是"山路"的量级而不是"过山车"：常见盘山公路 8~10%，12% 偏陡但能骑。
+  asserts++;
+  if (p95Grade > 0.12) probs.push(`95% 的路段纵坡 > ${(p95Grade * 100).toFixed(1)}%，这条路一直在爬`);
+
+  // 路拱必须贴着地面。路面高度是"左中右三点取最高"再抬一点，
+  // 它比地形高出太多时，路肩那两个外缘顶点（跟着地形走）会和沥青之间
+  // 拉出一段几十度的斜面——画面上就是路肩变成了路堤的悬崖。
+  asserts++;
+  let gapMax = 0;
+  for (let i = 0; i < cl.length; i++) {
+    gapMax = Math.max(gapMax, Math.abs(roadY[i] - naturalHeightAt(cl[i].x, cl[i].z)));
+  }
+  if (gapMax > 1.5) probs.push(`路拱最高离地 ${gapMax.toFixed(2)}m，路肩会变成悬崖`);
+
+  // 环线必须真的翻过山：整圈的累计爬升与累计下降都要够大。
+  //
+  // **用累计量，不用固定长度的窗口。**
+  // 早先那版按"单个 1.28m 采样段升降 > 0.5m"判断，而纵坡 11.5% 下一段才
+  // 0.15m——量的是采样密度不是地形，改采样密度就会让判据变色。
+  // 换成 50m 窗口也不行：基频波长 893m 的丘，50m 只覆盖 5.6%，
+  // 高度变化天然只有 5~6m（实测 6.0m），阈值怎么定都是在跟波长较劲。
+  //
+  // 累计爬升与地形形态无关：翻过一道 30m 的丘，累计爬升必然在 30m 以上。
+  // 这是"环线翻过一座山"这件事唯一稳定的表述方式。
+  asserts++;
+  let ascent = 0;
+  let descent = 0;
+  for (let i = 0; i < cl.length; i++) {
+    const d = roadY[(i + 1) % cl.length] - roadY[i];
+    if (d > 0) ascent += d;
+    else descent -= d;
+  }
+  // 阈值取"高差的一半"：要真的翻过一座山，累计爬升至少得有一个山那么高的一半
+  const minClimb = relief * 0.5;
+  if (ascent < minClimb) probs.push(`全环累计爬升 ${ascent.toFixed(1)}m，低于高差的一半 ${minClimb.toFixed(1)}m`);
+  if (descent < minClimb) probs.push(`全环累计下降 ${descent.toFixed(1)}m，低于高差的一半 ${minClimb.toFixed(1)}m`);
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `高差 ${relief.toFixed(1)}m / p10~p90 ${(p90 - p10).toFixed(1)}m / 压下限 ${floorPct.toFixed(1)}% 压上限 ${ceilPct.toFixed(1)}% / 占 ${occupied.size}/${bins} 格 / 纵坡 p95 ${(p95Grade * 100).toFixed(1)}% max ${(maxGrade * 100).toFixed(1)}% / 累计爬升 ${ascent.toFixed(1)}m 下降 ${descent.toFixed(1)}m / 离地 ${gapMax.toFixed(2)}m`,
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 旧物
+/**
+ * 五件可摸索的旧物。
+ *
+ * ## 这条守的是什么
+ *
+ * 序章把"这双手摸一下，东西自己会讲它是谁"讲得很清楚，
+ * 然后游戏再也没给过玩家一次机会。这里守的是那五件**真的在世界里、
+ * 真的够得着、真的有话说**——三件事任何一件塌了，
+ * 玩家看到的就是"路上多了个装饰"或者"按了 F 什么都没发生"。
+ *
+ * ## 它凭什么会红
+ *
+ * | 断言 | 退回什么写法会红 |
+ * |---|---|
+ * | 5 件 / 五种物件 | 删掉 `RELICS` 的一项 → 红 `4 件` |
+ * | 一座碎片驿站一件 | 把 `relicSite` 改成用 `STATIONS[i]`（`i` 随 RELICS 变） → 红 `槽位对不上` |
+ * | 键在**两侧**表里 | 只加中文 → 红 `en 缺 relic_bowl_title` |
+ * | 不在路面上 | `RELIC_FROM_ROAD` 改小 → 落进沥青里 → 红 `压在路面上` |
+ * | 路肩外但够得着 | `RELIC_REACH` 改成 1.0 → 红 `够不着`；改成 40 → 红 `不用减速就能摸到` |
+ * | 坡度平 | 落位挪到陡坡上 → 红 `地基不平` |
+ * | 三角面预算 | 提示圈换回 4×28 → 红 `2272 三角面，超出 2000` |
+ * | 离中心线 = `RELIC_FROM_ROAD` | 退回"从驿站退固定米数"的写法（实测偏出 4.5m） → 红 `离中心线 x m` |
+ */
+check('verify_relics', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  asserts++;
+  if (RELICS.length !== 5) probs.push(`旧物 ${RELICS.length} 件，应为 5`);
+
+  // 与碎片槽位一一对应：第 i 件在第 i 座碎片驿站的路那侧。
+  // 两处各按自己的顺序排一遍的话，读数全绿而东西放错了驿站。
+  asserts++;
+  if (RELICS.length !== FRAGMENT_STATIONS.length) {
+    probs.push(`旧物 ${RELICS.length} 件 / 碎片驿站 ${FRAGMENT_STATIONS.length} 座，对不上`);
+  }
+
+  const sites: Array<{ kind: RelicKind; x: number; z: number; dRoad: number; dStation: number }> = [];
+  for (let i = 0; i < RELICS.length; i++) {
+    const st = FRAGMENT_STATIONS[i];
+    if (!st) continue;
+    const s = relicSite(st);
+    sites.push({
+      kind: RELICS[i].kind,
+      x: s.x,
+      z: s.z,
+      dRoad: distToCenterline(s.x, s.z),
+      dStation: Math.hypot(s.x - st.x, s.z - st.z),
+    });
+  }
+
+  const terrain = new Terrain();
+
+  for (let i = 0; i < sites.length; i++) {
+    const s = sites[i];
+    const half = ROADMESH.TOTAL_HALF_WIDTH;
+
+    // 1. 不许压在路面上。它必须在路肩之外——站上去就触发的那不叫旧物。
+    asserts++;
+    if (s.dRoad < half + 0.8) {
+      probs.push(`${s.kind} 离中心线 ${s.dRoad.toFixed(1)}m，压在路面（半宽 ${half}m）上`);
+    }
+
+    // 2. 路肩外但**够得着**：从路肩外缘走过去，伸手能到。
+    asserts++;
+    if (s.dRoad - half > RELIC_REACH) {
+      probs.push(`${s.kind} 在路肩外 ${(s.dRoad - half).toFixed(1)}m，够不着（伸手 ${RELIC_REACH}m）`);
+    }
+
+    // 3. 但也不是伸手就够——必须偏出路面才摸得到，
+    //    而 `verify_offslow` 从 +1.5m 起罚速，所以"摸一件旧物"这件事
+    //    天然带着一次减速。**这条是设计判据，不是几何判据。**
+    asserts++;
+    if (s.dRoad - half < 0.9) {
+      probs.push(`${s.kind} 几乎就贴在路肩上，站在路上就能摸到，不用减速`);
+    }
+
+    // 4. 地基要平。东西撒在陡坡上会一头悬空一头埋进土里。
+    asserts++;
+    const g = [0.9, 0].map((o) => terrain.getHeightAt(s.x + o, s.z));
+    const rise = Math.abs(g[0] - g[1]);
+    if (rise > 0.6) probs.push(`${s.kind} 地基不平：1.8m 内落差 ${rise.toFixed(2)}m`);
+
+    // 5. 文案两侧都要有。少一侧 = 英文界面显示 ⟨key⟩ 占位符。
+    asserts++;
+    const def = RELICS[i];
+    for (const key of [def.titleKey, def.textKey]) {
+      for (const lang of ['zh', 'en'] as const) {
+        const v = I18N[lang][key];
+        if (!v) probs.push(`${lang} 缺 ${key}`);
+      }
+    }
+  }
+
+  // 6. 物件种类不许重样。五件同形状 = 一条路上摆着五个一样的盒子。
+  asserts++;
+  if (new Set(RELICS.map((r) => r.kind)).size !== RELICS.length) {
+    probs.push(`物件种类有重复：${RELICS.map((r) => r.kind).join(',')}`);
+  }
+
+  // 7. 三角面预算。它们在屏幕上只有几十个像素。
+  asserts++;
+  const tris = new Relics(terrain).triangleCount();
+  if (tris > 2000) probs.push(`五件旧物合计 ${tris} 三角面，超出 2000 的预算`);
+
+  // 8. 离中心线的距离就是设计要钉住的那个数。
+  //    改路宽它自己跟着走——"离路多远"是设计关系，
+  //    "从驿站退几米"只是它的一种实现，而那种实现依赖驿站偏移（会变）。
+  asserts++;
+  for (let i = 0; i < sites.length; i++) {
+    if (Math.abs(sites[i].dRoad - RELIC_FROM_ROAD) > 0.05) {
+      probs.push(`${sites[i].kind} 离中心线 ${sites[i].dRoad.toFixed(2)}m，应为 ${RELIC_FROM_ROAD}m`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `5 件（${RELICS.map((r) => r.kind).join('/')}）· 离路肩 ${sites
+          .map((s) => (s.dRoad - ROADMESH.TOTAL_HALF_WIDTH).toFixed(1))
+          .join('/')}m · 伸手 ${RELIC_REACH}m · ${tris} 三角面 · 键两侧齐`,
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 上线字节数
+/**
+ * ## 为什么必须有这条
+ *
+ * 这是 39 条判据里**唯一一条量"有多少字节要发给玩家"**的，
+ * 而它本来就不该缺席：这个项目的第一设计目标是低配兼容，
+ * 而"低配"在用户手里的东西就是**流量与首屏时间**。
+ *
+ * 实际发生的事：AGENTS.md 写着"`public/` 里的资产已经压到 ~5MB，
+ * 提交时确认没被压回原图"——**它被压回去了**，`public/models` 从 ~5MB
+ * 涨到 16.84MB（+256%），而 39 条判据全绿。
+ *
+ * 病根和 `bottomOf()`、`MASS_MODELS`、`visibilityFactor` 是**同一族**：
+ * **意图写对了、代码没接上、症状安静**。区别是这一次连"意图"都没被自动化守住，
+ * 只写在 AGENTS.md 的一段散文里——散文不会被执行。
+ *
+ * ## 三层，而不是一个总数
+ *
+ * 一个总数会骗人：这个游戏**能玩**的时候一个模型都不需要
+ * （地形、路面、水面、驿站全是程序化生成的），所以"首屏 1.11MB"是真话，
+ * 而"包体 16.84MB"也是真话。混成一个数就会得出"没超标"或者"严重超标"
+ * 这种两边都不对的结论。
+ *
+ * | 层 | 是什么 | 现状 | 预算 |
+ * |---|---|---|---|
+ * | **能玩** | js + css + html + UI 字体，零模型 | 1.11MB | 2.0MB |
+ * | **补全世界** | 启动链上的 13 个模型 | **11.27MB** | 12.0MB |
+ * | **可选** | 链外的摩托车 | 4.82MB | 5.0MB |
+ *
+ * ## 关于 11.27MB 这个数：**这条判据不让它变小，只不让它再涨**
+ *
+ * 预算定在现状之上一点点，所以它现在是绿的——**这是故意的**。
+ * 一条一落地就红的判据会被当成噪音，而噪音是它唯一的失败方式
+ * （"反正它一直红" → 没人看 → 它保护不了任何东西）。
+ *
+ * 真正的问题还没解决，而这条判据诚实地把它记下来了：
+ *  · `motorcycle.glb` 4.82MB 里 **82% 是 215 张 JPEG**（69 个部件 ×
+ *    normal/basecolor/rm 各一张，AI 生成模型没走过贴图管道）。
+ *  · 这批模型的**源文件不存在**：`.cache/tex` 被 gitignore 从未入库，
+ *    而 Godot 源项目里也没有 motorcycle / survivor / skateboard /
+ *    pine / bamboo / mod_*。所以 `npm run assets:geo` 对它们**不可执行**。
+ *  · 能降的办法是 `npm run assets:retax`（直接重压已发布的 GLB 的贴图）。
+ *    它写好了并且**带自我保护**（压完更大就拒绝写盘），但在本机跑不起来：
+ *    `@gltf-transform/functions` → `ndarray-pixels` → 自带的
+ *    `sharp@0.35.5` 原生模块 `ERR_DLOPEN_FAILED`。
+ *
+ * 所以这一条的真实作用是：**从现在起，任何新加的模型都会立刻被这条拦住**，
+ * 直到有人跑通 `retax` 把预算重新压下去。
+ *
+ * ## 它凭什么会红
+ *
+ * | 断言 | 退回什么写法会红 |
+ * |---|---|
+ * | 能玩 ≤ 2MB | 把手写体 `handwriting.woff2`（404KB）挪进首屏链 → 红 |
+ * | 补全 ≤ 12MB | 往 `assetChain` 里再加一个模型 → 红 |
+ * | 可选 ≤ 5MB | 加第二个大模型进链外 → 红 |
+ * | **单个可选模型 ≤ 5MB** | 放一个 8MB 的模型进去 → 红 `单文件 8.00MB` |
+ * | 摩托车**不许**在启动链上 | 把它挪进 `assetChain` → 红（它现在是 4.82MB） |
+ */
+check('verify_payload', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const mb = (n: number) => n / 1048576;
+  // 回归由 `npm run verify` 跑，cwd 就是仓库根。用 cwd 而不是
+  // `import.meta.url` 反推——后者在 esbuild 打成单文件 ESM 之后
+  // 指向的是临时目录，会把路径算到 `.cache` 之外的某个随机位置。
+  const ROOT = process.cwd();
+
+  // ---- 能玩：一个模型都不需要 ----
+  asserts++;
+  const js = sizeOf(join(ROOT, 'dist/assets'), '.js');
+  const css = sizeOf(join(ROOT, 'dist/assets'), '.css');
+  const html = sizeOfFile(join(ROOT, 'dist/index.html'));
+  const uiFont = sizeOfFile(join(ROOT, 'public/fonts/ui.woff2'));
+  // 标题页主视觉。它在首屏上（标题页就是首屏），所以算进这一档。
+  // 199KB —— 一张 1920 宽的 JPEG 铺底，相对 926KB 的 JS 是小头，
+  // 而它是全作第一眼看到的东西。`verify_payload` 是唯一会盯着它的判据。
+  const titleArt = sizeOfFile(join(ROOT, 'public/ui/titleart.jpg'));
+  if (!js || !html) {
+    // 没构建过就量不到，不算失败——但必须说出来，
+    // 否则"这条判据没跑"和"这条判据绿了"看起来一模一样。
+    probs.push('dist/ 不存在或没有产物，先 npm run build（本条量的是实际发出的字节）');
+  } else {
+    if (titleArt === 0) probs.push('public/ui/titleart.jpg 不在（标题页会退成一块纯色）');
+    if (titleArt > 320 * 1024) probs.push(`标题主视觉 ${mb(titleArt).toFixed(2)}MB，超过 320KB`);
+    const playable = js + css + html + uiFont + titleArt;
+    if (mb(playable) > 2.0) probs.push(`能玩就要 ${mb(playable).toFixed(2)}MB，超过 2.0MB`);
+  }
+
+  // ---- 补全世界：启动链上的模型 ----
+  // 名单抄 `main.ts:assetChain` 的结构。**抄一份而不是 import**：
+  // 那是宿主代码，回归 import 它会把整个 main 的依赖树拖进来。
+  // 两边不一致时下面那条"链上不许有摩托车"会先红。
+  asserts++;
+  const BOOT_CHAIN = [
+    'bicycle.glb', // loadBikeModel —— 玩家第一眼盯着的那一个
+    'pine_split.glb', 'bush.glb', // loadVegetationModels
+    'bamboo_trim.glb', 'mod_tower.glb', 'mod_house.glb', // loadSceneryModels
+    'skateboard.glb', 'survivor.glb', // loadVehicleExtras
+    'station_0.glb', 'station_1.glb', 'station_2.glb', 'station_3.glb', 'station_4.glb', // 按距离渐进
+  ];
+  let chain = 0;
+  for (const f of BOOT_CHAIN) {
+    const s = sizeOfFile(join(ROOT, 'public/models', f));
+    if (s === 0) probs.push(`启动链上的 ${f} 不在 public/models`);
+    chain += s;
+  }
+  if (mb(chain) > 12.0) probs.push(`补全世界要 ${mb(chain).toFixed(2)}MB，超过 12.0MB`);
+
+  // ---- 可选：链外的 ----
+  // 摩托车**现在就是链外的**（`main.ts` 里 `void world.loadMotorcycleModel()`
+  // 挂在启动链之外，带 20 秒硬超时）。这是它该在的位置。
+  asserts++;
+  const moto = sizeOfFile(join(ROOT, 'public/models/motorcycle.glb'));
+  if (moto === 0) probs.push('public/models/motorcycle.glb 不在');
+  if (moto > 5 * 1048576) probs.push(`motorcycle.glb 单文件 ${mb(moto).toFixed(2)}MB，超过 5MB`);
+
+  // 4. 单个可选模型的上限。总数合规而单文件离谱时，只有这条会红。
+  asserts++;
+  for (const f of ['motorcycle.glb', 'survivor.glb', 'skateboard.glb']) {
+    const s = sizeOfFile(join(ROOT, 'public/models', f));
+    if (s > 5 * 1048576) probs.push(`可选模型 ${f} ${mb(s).toFixed(2)}MB，超过 5MB`);
+  }
+
+  // 5. 摩托车不许回到启动链上。
+  //    `assetChain` 的注释写着"**不进链也就不会被那次超时波及**"——
+  //    4.82MB 挂回链上就等于把一次超时风险挂回第一屏。
+  asserts++;
+  if (BOOT_CHAIN.includes('motorcycle.glb')) probs.push('motorcycle 在启动链上');
+
+  // 6. 全部模型只作为**报数**写进 detail，不设硬上限：
+  //    它是一个"知道了会难受但暂时改不掉"的数（贴图占 motorcycle 的 82%，
+  //    而源文件不存在，只能用 tools/retax.mjs 重压）。
+  asserts++;
+  const allModels = dirSize(join(ROOT, 'public/models'));
+  const audio = dirSize(join(ROOT, 'public/audio'));
+  if (allModels === 0) probs.push('public/models 是空的');
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `能玩 ${mb(js + css + html + uiFont + titleArt).toFixed(2)}MB（含主视觉 ${mb(titleArt).toFixed(2)}MB）· 补全 ${mb(chain).toFixed(2)}MB · 摩托车(链外) ${mb(moto).toFixed(2)}MB · 模型合计 ${mb(allModels).toFixed(2)}MB · 音频 ${mb(audio).toFixed(2)}MB`,
+    asserts,
+  );
+});
+
+function sizeOfFile(p: string): number {
+  try {
+    return statSync(p).size;
+  } catch {
+    return 0;
+  }
+}
+function sizeOf(dir: string, ext: string): number {
+  try {
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(ext))
+      .reduce((n, f) => n + statSync(join(dir, f)).size, 0);
+  } catch {
+    return 0;
+  }
+}
+function dirSize(dir: string): number {
+  try {
+    return readdirSync(dir).reduce((n, f) => n + sizeOfFile(join(dir, f)), 0);
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------- 三十日
+/**
+ * ## 为什么这条必须存在
+ *
+ * 律师函写着"三十日内不开业，依法征收"，反派第三场说"五天内不签字"，
+ * 两条都念给玩家听过。而在这之前，**三十天从来不会走**——
+ * 它是一句背景，不是一个期限。
+ *
+ * 于是这个游戏的两难是：要么它有时间限制（就有"白跑一趟"），
+ * 要么它没有（律师函就是在骗人）。**这条路选了第三条**：
+ * 过期不是失败画面，只是目标换了一个（`back_break` 那个结局就是为它写的，
+ * 而在这之前它**没有任何入口**——一个到不了的结局等于没写）。
+ *
+ * ## 它凭什么会红
+ *
+ * | 断言 | 退回什么写法会红 |
+ * |---|---|
+ * | 日期只增不减 | `day` 里减去 `laps` → 退回圈时日期会变小 → 红 |
+ * | 认真玩会用掉大部分期限 | `DAYS_PER_LAP` 改成 0 → 磨蹭零代价 → 红 `15 圈也只花 16 天` |
+ * | 磨蹭会过期 | `DAYS_PER_LAP` 改成 1 → 红 `10 圈才 26 天，永远过期不了` |
+ * | 过期后目标真的换 | `objectiveKey` 里去掉 `overdue` 分支 → 红 |
+ * | 存读往返保住日期 | `save()` 漏写 `laps` → 红 |
+ * | 天色随日期单调变暗 | `setByProgress` 去掉 `byDay` → 红 |
+ * | 三个键两侧都有 | 只加中文 → 红 |
+ */
+check('verify_days', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const g = new GameStateManager();
+
+  // 1. 从第 1 天起。
+  asserts++;
+  if (g.day !== 1) probs.push(`开局第 ${g.day} 天，应为 1`);
+
+  // 2. 只增不减：把 15 次打卡 + 5 圈全走一遍，每一步都不能倒退。
+  asserts++;
+  let prev = g.day;
+  let monotone = true;
+  const seen: number[] = [];
+  for (let lap = 0; lap < 6; lap++) {
+    g.noteLap();
+    seen.push(g.day);
+    for (let k = 0; k < 5; k++) {
+      const st = ROAD.FRAGMENT_SLOT_STATION_IDX[k % ROAD.FRAGMENT_SLOT_STATION_IDX.length];
+      g.checkIn(st);
+      seen.push(g.day);
+      if (g.day < prev) monotone = false;
+      prev = g.day;
+    }
+    if (g.day < prev) monotone = false;
+    prev = g.day;
+  }
+  if (!monotone) probs.push('日期会倒退');
+
+  // 3. **认真玩会用掉大部分期限**。
+  //    15 次打卡 + 5 圈 × 3 天 = 31 天 > 30 —— 一趟完整的活儿刚好会过期，
+  //    这就是口径的由来。放宽到"用得掉一半以下"就等于期限不存在。
+  asserts++;
+  const fullRun = 1 + 15 * GameStateManager.DAYS_PER_CHECKIN + 5 * GameStateManager.DAYS_PER_LAP;
+  if (fullRun < GameStateManager.DAYS_LIMIT) {
+    probs.push(`认真玩一遍才 ${fullRun} 天，期限 ${GameStateManager.DAYS_LIMIT} 天用不完`);
+  }
+
+  // 4. 磨蹭会过期：只打卡不骑圈，15 次 = 16 天，还在期限内。
+  //    反过来多骑几圈就一定过期——这一条量的是"圈要花日期"。
+  asserts++;
+  const lapsToOverdue = Math.ceil((GameStateManager.DAYS_LIMIT - 16) / GameStateManager.DAYS_PER_LAP) + 1;
+  const g2 = new GameStateManager();
+  for (let k = 0; k < 15; k++) g2.checkIn(ROAD.FRAGMENT_SLOT_STATION_IDX[k % 5]);
+  for (let l = 0; l < lapsToOverdue; l++) g2.noteLap();
+  if (!g2.overdue) probs.push(`${lapsToOverdue} 圈之后仍未过期，圈不花日期`);
+
+  // 5. 过期之后目标真的换掉，而且**不是失败**。
+  asserts++;
+  if (g2.objectiveKey !== 'objective_overdue') probs.push(`过期时目标是 ${g2.objectiveKey}`);
+  if (g2.objective === 'collect' && !g2.overdue) probs.push('未过期却不是 collect');
+
+  // 6. 存读往返。`laps` 漏进存档的话，读档之后玩家白赚几天。
+  //    **必须注入同一个内存 store**——`save()` / `load()` 都包在 try/catch 里，
+  //    而 Node 里没有 localStorage，于是默认后端会安静地什么都不做：
+  //    第一次跑这条判据时它报的是「第 8 天 → 读回第 1 天」，
+  //    而真正的原因是"后端不存在"，不是"字段没写进存档"。
+  asserts++;
+  const mem = new Map<string, string>();
+  const store = {
+    read: (k: string) => mem.get(k) ?? null,
+    write: (k: string, v: string) => void mem.set(k, v),
+    remove: (k: string) => void mem.delete(k),
+  };
+  const g3 = new GameStateManager(store);
+  g3.noteLap();
+  g3.noteLap();
+  g3.checkIn(ROAD.FRAGMENT_SLOT_STATION_IDX[0]);
+  const dayBefore = g3.day;
+  g3.save();
+  const g4 = new GameStateManager(store);
+  if (!g4.load()) probs.push('有存档却 load 不回来');
+  if (g4.day !== dayBefore) probs.push(`存读往返：第 ${dayBefore} 天 → 读回第 ${g4.day} 天`);
+
+  // 7. 天色随日期单调变暗。
+  asserts++;
+  const s1 = new Sky(new Scene(), 0, 0);
+  s1.setByProgress(1, 0.5, 1, 30);
+  const d0 = s1.dusk;
+  s1.setByProgress(1, 0.5, 20, 30);
+  const d1 = s1.dusk;
+  s1.setByProgress(1, 0.5, 30, 30);
+  const d2 = s1.dusk;
+  if (!(d0 < d1 && d1 <= d2)) probs.push(`天色不随日期单调变暗：${d0} / ${d1} / ${d2}`);
+  if (d0 !== 0) probs.push(`第 1 天不该是黄昏（dusk=${d0}）`);
+  if (d2 >= 1) probs.push(`期限那天不该全黑（dusk=${d2}）`);
+
+  // 8. 三个键两侧都有。
+  asserts++;
+  for (const k of ['hud_days_left', 'hud_days_over', 'objective_overdue']) {
+    for (const lang of ['zh', 'en'] as const) {
+      if (!I18N[lang][k]) probs.push(`${lang} 缺 ${k}`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `打卡 ${GameStateManager.DAYS_PER_CHECKIN} 天 / 圈 ${GameStateManager.DAYS_PER_LAP} 天 · 认真玩 ${fullRun} 天 vs 期限 ${GameStateManager.DAYS_LIMIT} 天 · 存读往返保住`,
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 骑行节拍
+/**
+ * 竹的骑行节拍 —— **第一件和"骑"有关的乐事**。
+ *
+ * ## 为什么它值得一条判据
+ *
+ * 五个小游戏原本全是单屏 2D 覆盖层，没有一件和"骑"有关。
+ * 这一件把其中一件搬回路上，于是"边骑边做"第一次成为可能。
+ * 而**能发生**这件事本身就得证明：竹丛在路边 26~110m，
+ * 窗口只在 13m 内开——玩家得真的骑得到。
+ *
+ * ## 它凭什么会红
+ *
+ * | 断言 | 退回什么写法会红 |
+ * |---|---|
+ * | 节拍点 > 20 | 竹丛散布被改小 → 红 `只有 n 个点` |
+ * | 有节拍点**够得着** | 窗口半径改小到 2m（骑不到） → 红 `0 个点在 13m 内可达` |
+ * | 窗口内按 = hit | 阈值写反 → 红 |
+ * | 超时**不算失手** | 超时也罚 → 红（`verify_offslow` 已经罚过压草，不该罚两次） |
+ * | 连按被挡 | 去掉 `allowPress` → 红 `0.2s 内连按 3 次` |
+ * | 满 5 下只发一次 | 去掉 `done` 闩锁 → 红 `发了两遍` |
+ * | **不改碎片** | 命中时写 `collected` → 红 `碎片次数被节拍改了` |
+ * | HUD 在完成后隐藏 | `setBeat` 漏了 `done` 分支 → 红（`setBeat` 是纯 UI，这里量逻辑） |
+ */
+check('verify_beat', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const terrain = new Terrain();
+  const sc = new Scenery(terrain);
+  const b = new BambooBeats(sc);
+
+  // 1. 节拍点够多。一条路上只有三四处能按，那不叫玩法，叫彩蛋。
+  asserts++;
+  if (b.pointCount < 20) probs.push(`只有 ${b.pointCount} 个节拍点，应至少 20`);
+
+  // 2. **绝大多数节拍点必须真的在骑行路线旁边。**
+  //    量的是**节拍点本身**，不是竹丛圆心——第一版量错了对象，
+  //    拿 26~110m 外的丛心去比 24m 的窗口，于是报「1/100 够得着」。
+  //    一条量错对象的判据会把正确的实现说成错的。
+  asserts++;
+  const reach = b.allPoints.filter(
+    (p) => distToCenterline(p.x, p.z) - ROADMESH.TOTAL_HALF_WIDTH <= BEAT_ARM_RADIUS,
+  ).length;
+  const ratio = b.pointCount > 0 ? reach / b.pointCount : 0;
+  if (ratio < 0.9) probs.push(`只有 ${reach}/${b.pointCount} 个节拍点够得着（${(ratio * 100).toFixed(0)}%）`);
+
+  // 2b. 节拍点必须落在路侧、且**不压在路面上**。
+  asserts++;
+  const onRoad = b.allPoints.filter((p) => distToCenterline(p.x, p.z) < ROADMESH.TOTAL_HALF_WIDTH).length;
+  if (onRoad > 0) probs.push(`${onRoad} 个节拍点压在路面上`);
+
+  // 2c. 窗口必须短到仍然是个"节拍"。一个 3 秒的窗口玩家会站在那儿等。
+  asserts++;
+  if (BEAT_WINDOW > 1.5) probs.push(`窗口 ${BEAT_WINDOW}s 太长，不是节拍是等待`);
+  if (BEAT_WINDOW < 0.6) probs.push(`窗口 ${BEAT_WINDOW}s 太短，来不及反应`);
+
+  // 3. 窗口内按 = hit。
+  asserts++;
+  const b1 = new BambooBeats(sc);
+  const p0 = b1.allPoints[0];
+  if (p0) {
+    b1.update(0.016, p0.x, p0.z, 0);
+    const armed = b1.state.open;
+    b1.update(0.1, p0.x, p0.z, 0.1); // 窗口内
+    const r = b1.press();
+    if (!armed) probs.push('站到竹丛上窗口没有打开');
+    if (r !== 'hit') probs.push(`窗口内按得到 ${r}，应为 hit`);
+  } else {
+    probs.push('没有竹丛可测');
+  }
+
+  // 4. 超时**不算失手**。
+  //    `verify_offslow` 已经因为压草罚过一次速，窗口超时再罚一次是罚两次。
+  asserts++;
+  const b2 = new BambooBeats(sc);
+  if (p0) {
+    b2.update(0.016, p0.x, p0.z, 0);
+    b2.update(BEAT_WINDOW + 0.2, p0.x, p0.z, 1.4); // 拖到窗口外
+    if (b2.state.hits !== 0) probs.push('超时也算命中');
+    if (b2.press() === 'hit') probs.push('超时之后按下仍然算命中');
+  }
+
+  // 5. 连按被挡。
+  asserts++;
+  const b3 = new BambooBeats(sc);
+  b3.update(0.016, p0 ? p0.x : 0, p0 ? p0.z : 0, 0);
+  let allowed = 0;
+  for (let k = 0; k < 5; k++) if (b3.allowPress(k * 0.05)) allowed++;
+  if (allowed > 1) probs.push(`0.2s 内放行了 ${allowed} 次连按`);
+
+  // 6. 集满 5 下**只**发一次 done。
+  asserts++;
+  const b4 = new BambooBeats(sc);
+  const pts = b4.allPoints;
+  let doneCount = 0;
+  for (let k = 0; k < Math.min(pts.length, BEAT_GOAL + 3); k++) {
+    b4.update(0.016, pts[k].x, pts[k].z, k * 2);
+    b4.update(0.1, pts[k].x, pts[k].z, k * 2 + 0.1);
+    if (b4.press() === 'done') doneCount++;
+  }
+  if (doneCount !== 1) probs.push(`完成提示发了 ${doneCount} 次，应恰好 1 次`);
+
+  // 7. **不改碎片**。这一条是整个设计里最重要的一条边界。
+  //    碎片次数被 `verify_mini_game`（15 局每件 3 次）钉着；
+  //    往里加一路来源，玩家会问"我明明只打了一次，为什么显示三次"。
+  asserts++;
+  const g = new GameStateManager();
+  for (let k = 0; k < 12; k++) g.checkIn(ROAD.FRAGMENT_SLOT_STATION_IDX[k % 5]);
+  const before = ROAD.FRAGMENT_SLOT_STATION_IDX.map((i) => g.getStationCount(i)).join(',');
+  // 打满一整套节拍
+  const b5 = new BambooBeats(sc);
+  for (let k = 0; k < Math.min(pts.length, 8); k++) {
+    b5.update(0.016, pts[k].x, pts[k].z, k * 2);
+    b5.update(0.1, pts[k].x, pts[k].z, k * 2 + 0.1);
+    b5.press();
+  }
+  const after = ROAD.FRAGMENT_SLOT_STATION_IDX.map((i) => g.getStationCount(i)).join(',');
+  if (before !== after) probs.push(`碎片次数被节拍改了：${before} → ${after}`);
+
+  // 8. 三个键两侧都有。
+  asserts++;
+  for (const k of ['beat_hit', 'beat_miss', 'beat_done']) {
+    for (const lang of ['zh', 'en'] as const) {
+      if (!I18N[lang][k]) probs.push(`${lang} 缺 ${k}`);
+    }
+  }
+
+  // 9. **前置提示档**（`BEAT_CUE_RADIUS`）必须真的存在、真的先于窗口发生。
+  //
+  // 原来节拍一条提示都没有：玩家看到圈亮起时不知道那是什么，也不知道按哪个键，
+  // 而窗口只有 1.15s。于是这一件乐事的第一分钟是白扔的。
+  asserts++;
+  if (!(BEAT_CUE_RADIUS > BEAT_ARM_RADIUS)) {
+    probs.push(`前置档 ${BEAT_CUE_RADIUS}m 不比窗口 ${BEAT_ARM_RADIUS}m 更远——那它就不是"前置"`);
+  }
+  // 提前量按**极速**算，不按巡航：踩满的人没有时间读提示。
+  asserts++;
+  if (BEAT_CUE_RADIUS - BEAT_ARM_RADIUS < RIDE.MAX_SPEED) {
+    probs.push(`按极速 ${RIDE.MAX_SPEED} m/s 算只有 ${(BEAT_CUE_RADIUS - BEAT_ARM_RADIUS).toFixed(1)}s 提前量，读不完一句提示`);
+  }
+  asserts++;
+  {
+    // 站在**真实路面**上问：会不会先收到 cue、而窗口还没开。
+    //
+    // ⚠️ 第一版是"找一对相距 24~48m 的竹丛点，站到其中一个上面"——
+    // 那是**量错了对象**：竹丛是成片长的，那个位置上往往还站着第三丛，
+    // 窗口是它开的，于是报「收到的是 armed」。它量到的是**邻居**，
+    // 不是"这一档会不会触发"。
+    //
+    // 现在量的是玩家真的会经历的那件事：沿中心线一路问下去，
+    // 有没有哪个位置是"该提示、还没开窗口"。用的是真实落位与真实半径。
+    let cueAt = -1;
+    let alsoOpen = false;
+    let cues = 0;
+    for (let i = 0; i < CENTERLINE.length; i += 4) {
+      const c = CENTERLINE[i];
+      const b8 = new BambooBeats(sc);
+      if (b8.update(0.016, c.x, c.z, 0) !== 'cue') continue;
+      cues++;
+      if (cueAt < 0) {
+        cueAt = i;
+        alsoOpen = b8.state.open;
+        // 同一片只提示一次：站着不动不该被反复催。
+        asserts++;
+        if (b8.update(0.016, c.x, c.z, 0.1) === 'cue') probs.push('同一片竹在原地反复播"前面有竹"');
+      }
+    }
+    if (cueAt < 0) {
+      probs.push(
+        `沿整条中心线都遇不到「前面有竹」——${BEAT_CUE_RADIUS}m 那一档在真实骑行里触发不了（240 个采样点里 ${cues} 个会先收到提示）`,
+      );
+    } else if (alsoOpen) {
+      probs.push('提示与窗口同时开——两者先后反了');
+    }
+  }
+  // 10. `beat_cue` 两侧都要有——`armed` 不弹提示，全靠这一句。
+  asserts++;
+  for (const lang of ['zh', 'en'] as const) {
+    if (!I18N[lang].beat_cue) probs.push(`${lang} 缺 beat_cue`);
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `${b.pointCount} 个节拍点 · ${reach} 个够得着（${(ratio * 100).toFixed(0)}%）· 窗口 ${BEAT_WINDOW}s / 半径 ${BEAT_ARM_RADIUS}m · 提示档 ${BEAT_CUE_RADIUS}m · 目标 ${BEAT_GOAL} 下 · 不改碎片`,
+    asserts,
+  );
 });
 
 // ---------------------------------------------------------------- 触屏
@@ -1238,7 +2061,7 @@ check('verify_scenery', () => {
 
     // 3. 不在水下。
     asserts++;
-    const wet = pts.filter((p) => p.y < WATER.WATER_LEVEL + 0.6);
+    const wet = pts.filter((p) => p.y < WATER_LEVEL + 0.6);
     if (wet.length) probs.push(`${kind} 有 ${wet.length} 个在水里`);
 
     // 4. 离路**落在区间内**。下限是别压路；上限是"玩家看得见"——
@@ -2850,6 +3673,30 @@ check('verify_story', () => {
     if (ok) probs.push('narrativeBusy 为真时竟然还能骑——路边字一旦锁上就解不开了');
   }
 
+  // 2e. **序章必须开可点掉**，而路边那些字必须不开。
+  //
+  // 量的是**字面上那一句**：`main.ts` 里 `showStorySequence(...)` 的第三个参数。
+  // 读源码是唯一诚实的量法——序章那七句是在宿主里排的队，
+  // 无头环境里没有宿主，而"评审第一分钟能不能点掉它"这件事不能靠推断。
+  //
+  // 口径写在这里，免得它退化成"谁都能开"：
+  // **"停下来读"的段落开（序章、驿里的声音），"骑过去顺便读"的不开（碑文、路口）。**
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    const at = src.indexOf('showStorySequence(');
+    asserts++;
+    if (at < 0) {
+      probs.push('main.ts 里找不到 showStorySequence 调用');
+    } else {
+      // 只量这一处调用的参数表：从 `(` 到第一个 `);`
+      const call = src.slice(at, src.indexOf(');', at));
+      if (!/dismissible:\s*true/.test(call)) {
+        probs.push('序章没有开 dismissible —— 七句读完要一分半钟，评审在第一分钟就会想跳过');
+      }
+    }
+  }
+
   // 摘掉临时桩。**必须放在本函数最后一条断言之后**——
   // 放早了的话，后面那些用桩的判据会读到 undefined，
   // 而症状是"桩看起来装了却没生效"，极难查。
@@ -2861,7 +3708,7 @@ check('verify_story', () => {
   }
 
   const summary =
-    `序章一次性 · 动机三条中英齐全 · 声音五件对得上槽位且一次性落盘 · 读卡时长按语言分流量且单段不撞上限 · 静音不留队列残留 · 只有可跳过卡吃点击 · 反派 ${ECON.VILLAIN_SCENE_COUNT} 集各一次 · 小游戏不锁操作`;
+    `序章一次性 · 动机三条中英齐全 · 声音五件对得上槽位且一次性落盘 · 读卡时长按语言分流量且单段不撞上限 · 静音不留队列残留 · 只有可跳过卡吃点击 · 序章可点掉 · 反派 ${ECON.VILLAIN_SCENE_COUNT} 集各一次 · 小游戏不锁操作`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 
@@ -3143,7 +3990,19 @@ check('verify_phase', () => {
     }
   }
 
-  return expect(probs.length === 0, probs.length ? probs.join('；') : '六个阶段 / 五个否决理由 / HUD 与可骑同源', asserts);
+  // 演示的弧长衔接。**三条都是契约，不是症状**——
+  // `unwrapArc()` 在真实闭环里 45 秒触发零次（见 `verify_demo_drive`），
+  // 所以这里量它"该放行什么、该挡什么"，而不是量它挡住了什么。
+  asserts++;
+  if (Math.abs(unwrapArc(0.3, 0.3002) - 0.3002) > 1e-9) probs.push('一帧内的正常前进被当成了跳变挡掉了');
+  asserts++;
+  if (unwrapArc(0.3, 0.8) !== 0.3) probs.push('半圈那种换支跳变没有被挡住（8 字自交口）');
+  asserts++;
+  if (Math.abs(unwrapArc(0.998, 0.002) - 0.002) > 1e-9) {
+    probs.push('跨过环首尾的正常前进被当成了后退——那会让车在起终点原地倒一下');
+  }
+
+  return expect(probs.length === 0, probs.length ? probs.join('；') : '六个阶段 / 五个否决理由 / HUD 与可骑同源 / 演示弧长衔接三契约', asserts);
 });
 
 // ---------------------------------------------------------------- 自行车装配
@@ -3530,6 +4389,17 @@ check('verify_bike_rig', () => {
 // ---------------------------------------------------------------- 骑行
 check('verify_ride', () => {
   const r = assertRide();
+  return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+});
+
+/**
+ * 演示模式那辆车自己往前骑。
+ *
+ * 独立成一条而不是塞进 `verify_ride`：它量的不是"车能不能动"，
+ * 而是"没有人按键时车会不会自己开进草地"——那个按钮原来根本不开车。
+ */
+check('verify_demo_drive', () => {
+  const r = assertDemoDrive();
   return { ok: r.ok, detail: r.detail, asserts: r.asserts };
 });
 
@@ -5500,6 +6370,31 @@ check('verify_pedal_sync', () => {
               probs.push(`脚离最近踏板均值 ${mean.toFixed(3)}m（应 ≤ 0.06m）—— 骑手读作在旁边空踩`);
             }
             notes.push(`脚→踏板均值 ${(mean * 100).toFixed(1)}cm（烘焙前 17.1cm）`);
+            // ②c-2 ★★ **循环必须真的闭合**：这一条是专门给「跨腿复用可变量」
+            //   那一族 bug 留的。
+            //
+            //   曾经把 `footWorld`（脚掌的世界朝向）声明在**腿循环外面**，
+            //   于是 `i === 0` 时左腿写进去一次、右腿紧接着覆盖一次，
+            //   **左腿整条动画都在用右脚的世界朝向**。症状是「只有左脚不自然」，
+            //   而上面那条均值判据**照样绿**（0.0176 < 0.06）——
+            //   均值把偶发的尖峰平均掉了。
+            //
+            //   真正变红的是接缝：坏的时候 0.0287，好的时候 0.00003，
+            //   闸门 0.005 隔得开。而均值判据要收到 0.015 才拦得住，
+            //   离素材噪声太近，不如直接钉接缝。
+            asserts++;
+            {
+              const s2 = v.rideSeam;
+              if (!s2) {
+                probs.push('量不到循环接缝 —— 烘焙后必须仍然接得上');
+              } else if (s2.footGap > 0.005) {
+                probs.push(
+                  `循环接缝姿势差 ${s2.footGap.toFixed(4)}（应 ≤ 0.005）—— 每转一圈脚会闪一下` +
+                    `（坏值 0.0287 = 脚掌朝向被两条腿共用一个变量）`,
+                );
+              }
+              notes.push(`接缝 ${s2!.footGap.toFixed(5)}`);
+            }
             // ②d ★ **骑手坐回鞍面**：烘焙的圆心由鞍面反推，所以骨盆同时落回。
             //     烘焙之前这里是 13.6cm 的悬空（B 方案那个取舍）。
             asserts++;
@@ -5771,6 +6666,386 @@ check('verify_minigame_resume', () => {
     asserts,
   );
 });
+
+// ---------------------------------------------------------------- 界面按键
+/**
+ * **面板页面的键盘归属，以及小游戏必须先等对白念完。**
+ *
+ * ## 这一族在还原什么
+ *
+ * 玩家报的症状是一句话：「小游戏按键玩的时候**部分**游戏玩不了」。
+ * "部分"两个字是关键——它排除了"整个输入系统坏了"这种大改动的假设，
+ * 指向一条**只挡空格**的通路。而空格正是三个小游戏（云落笔 / 茶注水 / 竹下刀）
+ * 唯一的输入；琴和禽用数字键，数字键不在被挡的名单上，所以它们照常能玩。
+ *
+ * ## 它凭什么会红
+ *
+ * | 判据 | 怎么弄坏它 |
+ * |---|---|
+ * | 小游戏运行时 `spaceKeyOwnedHere()` 为 false | 把 `setSpaceKeyOwner` 装成 `() => true`（即恢复成"永远独占"） |
+ * | 没有小游戏时为 true | 装成 `() => false`——面板上的按钮按空格就再也不会激活 |
+ * | 五座碎片驿站的对白都长于打卡过场 | 数据改动让某站对白变短（那时 `whenDialogueIdle()` 才变成可删的空等） |
+ * | 结算页有一颗可点的、不清档的「回到世界」 | 把那颗按钮删掉，或让它改调 `onRestart` |
+ *
+ * 最后两条量的都是**真东西**：第三条量的是两个常量之间的关系，而这两个常量
+ * 正是那条时序的全部依据；第四条真的造一个 `EndCard` 并点它那颗按钮。
+ */
+
+// 打卡过场里，从 `moving` 结束（对白发出）到 `outro` 结束（小游戏开始）的时长。
+// 抄自 `world.ts` 的 `advanceCheckIn`：holding 1.5s + outro 0.4s。
+// **必须和 world.ts 一起改**——这是本条判据唯一的时序依据。
+function checkInCutsceneSec(): number {
+  return 1.5 + 0.4;
+}
+
+/** 一段对白念完要多久。对白是**逐字**显示的（`CHARS_PER_SEC`），且每句之间
+ *  玩家要按一次键——那一次按键的犹豫时间不在数据里，所以这里只量下限。
+ *  与 `dialogue.ts` 的 `CHARS_PER_SEC` 保持一致。 */
+function dialogueSeconds(lines: readonly string[]): number {
+  const CHARS_PER_SEC = 26;
+  let t = 0;
+  for (const l of lines) t += Math.max(l.length, 1) / CHARS_PER_SEC;
+  return t;
+}
+
+check('verify_ui_keys', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ---- 1. 空格的归属由宿主说了算，且默认安全 ----
+  //
+  // 默认值必须是 `true`（独占）：模块被单独 import 而宿主还没装判定时，
+  // 宁可多拦一次（面板按钮仍然可用），也不能少拦一次
+  // （空格漏到 main 的 `onConfirm` 会让暂停页的空格变成"确认"）。
+  asserts++;
+  if (!spaceKeyOwnedHere()) {
+    probs.push('宿主还没装判定时，空格默认不归按钮所有——面板上的空格会漏给 main');
+  }
+
+  // ---- 2. 装上判定后，两种状态各自成立 ----
+  setSpaceKeyOwner(() => false);
+  asserts++;
+  if (spaceKeyOwnedHere()) {
+    probs.push('小游戏运行时空格仍然被按钮独占——云/茶/竹按空格会毫无反应');
+  }
+
+  setSpaceKeyOwner(() => true);
+  asserts++;
+  if (!spaceKeyOwnedHere()) {
+    probs.push('没有小游戏时空格却没有归按钮所有——面板上的按钮按空格不再激活');
+  }
+
+  // ---- 3. 小游戏必须晚于对白结束 ----
+  //
+  // 五座碎片驿站每一座的首访对白都要念 ~4 秒，而小游戏在 1.9 秒后就开。
+  // 这不是"可能会撞上"，是**必然撞上**——所以宿主那一句
+  // `await whenDialogueIdle()` 是承重的，删掉它就红。
+  const budget = checkInCutsceneSec();
+  const late: string[] = [];
+  for (const st of STATIONS) {
+    if (st.slot < 0) continue;
+    const lines = st.def.dialogue;
+    if (!lines || !lines.length) continue;
+    const need = dialogueSeconds(lines);
+    asserts++;
+    if (need > budget) {
+      late.push(
+        `${st.def.fragment ?? st.def.name} ${need.toFixed(1)}s>${budget.toFixed(1)}s`,
+      );
+    }
+  }
+  if (!late.length) {
+    probs.push(
+      `没有一站的对白超过打卡过场的 ${budget.toFixed(1)}s——` +
+        '`whenDialogueIdle()` 那一行就变成了永不触发的空等（数据变了才合理）',
+    );
+  }
+
+  // 上面那条量的是**数据事实**（对白确实长于过场），它本身守不住那行 await：
+  // 把 `await` 删掉，数据一个字没变，它照样绿。
+  // 所以这里再钉一条**真的会因为删掉 await 而红**的：宿主源码里
+  // `mg.run()` 之前必须有那一等。
+  //
+  // 为什么读源码而不构造 `App`：`App` 的构造要 WebGL 上下文、要真 World，
+  // 无头环境里根本起不来（这正是 `verify_ride` 只能测纯逻辑层的原因）。
+  // 而这一条问的是"那行 await 在不在"，读源码是唯一诚实的量法——
+  // 它量的是**字面上那一句**，不是我们对它的理解。
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    // 只看 `runMiniGame` 这一个函数体：从它的声明切到下一个 `  private `。
+    // 不切作用域的话，全文搜 `whenDialogueIdle` 会命中 `completeChapterOne`
+    // 里那处**本来就有的**调用（它早就在等对白了），于是这一条永远绿。
+    const fnStart = src.indexOf('private async runMiniGame(');
+    const fnEnd = src.indexOf('\n  private ', fnStart + 1);
+    asserts++;
+    if (fnStart < 0 || fnEnd < 0) {
+      probs.push('main.ts 里找不到 runMiniGame 的函数边界 —— 判据要跟着改');
+    } else {
+      const body = src.slice(fnStart, fnEnd);
+      const runIdx = body.indexOf('this.mg.run(');
+      const awaitIdx = body.indexOf('await this.ui.whenDialogueIdle()');
+      asserts++;
+      if (runIdx < 0) {
+        probs.push('runMiniGame 里找不到 this.mg.run( —— 小游戏入口改名了，这条判据要跟着改');
+      } else if (awaitIdx < 0) {
+        probs.push(
+          '`runMiniGame` 里没有等对白念完 —— 小游戏会盖在还没念完的对白上，' +
+            '而对白在捕获阶段吃掉空格，云/茶/竹就再也按不动了',
+        );
+      } else if (awaitIdx > runIdx) {
+        probs.push('`whenDialogueIdle()` 排在 `mg.run()` 之后 —— 等的是一场还没开的乐事');
+      }
+    }
+  }
+
+  // ---- 4. 结算页必须有一条"回到世界"的出口 ----
+  //
+  // `finishRun()` 会 `loop.suspend()`，而结算页原来唯一的动词是「重新开始」
+  // ——它走 `resetRun()` 清档。于是玩家点完「结束这一趟 · 收下明信片」之后，
+  // 只剩"清档重来"和"刷新页面"。
+  //
+  // 真造一个 `EndCard`（最小 DOM 桩），然后**点那颗按钮**：判据是
+  // `onCloseEndCard` 被调到了、而 `onRestart` 没有。删掉按钮就红——
+  // 这不是"接口上声明过"，是"玩家真的按得到"。
+  asserts++;
+  const dom = ensureStubDom();
+  try {
+    const calls: string[] = [];
+    const card = new EndCard({
+      parent: dom.parent(),
+      game: new GameStateManager(),
+      toast: { show() {} } as unknown as Toast,
+      hooks: {
+        onRestart: () => void calls.push('restart'),
+        onCloseEndCard: () => void calls.push('close'),
+        onWriteBack: () => {},
+        onExportPostcard: () => {},
+        onEndingPick: () => {},
+      } as unknown as UIHooks,
+    });
+    card.show();
+    const btns = card.root.querySelectorAll('button') as unknown as HTMLElement[];
+    const label = (b: HTMLElement) => b.textContent ?? '';
+    // 那颗"回到世界"的按钮，文案来自 `continue_explore`。
+    const close = btns.find((b) => label(b).includes(t('continue_explore')));
+    const restart = btns.find((b) => label(b).includes(t('restart_end')));
+    if (!close) {
+      probs.push('结算页上没有「回到世界」的按钮——那一页唯一的动词是清档的「重新开始」');
+    } else {
+      asserts++;
+      if (close === restart) {
+        probs.push('「回到世界」和「重新开始」是同一颗按钮——关掉一页会把这一趟清掉');
+      }
+      close.click();
+      asserts++;
+      if (!calls.includes('close')) probs.push('点了「回到世界」，onCloseEndCard 没有被调用');
+      asserts++;
+      if (calls.includes('restart')) {
+        probs.push('点「回到世界」却触发了 onRestart——关掉一页会把这一趟清掉');
+      }
+    }
+
+    // Esc 也必须能关。玩家在这一页能按的键不多，而 Esc 是唯一那个
+    // "在任何面板上都成立"的键——它不成立的话，键盘玩家手里就没有出口了。
+    calls.length = 0;
+    dom.pressKey('Escape');
+    asserts++;
+    if (!calls.includes('close')) {
+      probs.push('结算页上按 Esc 没有关掉这一页——键盘玩家手里就没有出口了');
+    }
+    card.dispose();
+  } catch (e) {
+    probs.push(`造 EndCard 抛异常：${String((e as Error)?.message ?? e).split('\n')[0]}`);
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `空格归属随相位切换 · ${late.length} 座站点的对白长于过场（宿主会等） · 结算页有可点的「回到世界」`,
+    asserts,
+  );
+});
+
+/**
+ * 最小 window 桩：只实现 `addEventListener` / `removeEventListener` 加一个
+ * 手工触发入口。
+ *
+ * 为什么需要它：`EndCard.show()` 会在 window 的**捕获**阶段挂 Esc 监听。
+ * 无头环境里没有 `window` 这个全局，`show()` 直接抛 —— 于是判据测的是
+ * "桩够不够全"，而不是"结算页有没有出口"。**测不出来和坏了长得一模一样。**
+ *
+ * 监听按「捕获 / 冒泡」两档分开存，`pressKey()` 按 DOM 的真实顺序发：
+ * 先捕获（window 上的监听器），再冒泡（元素上的监听器）。
+ */
+function ensureStubWindow(g: { window?: unknown }): void {
+  if (g.window) return;
+  const cap = new Map<string, ((e: unknown) => void)[]>();
+  const bub = new Map<string, ((e: unknown) => void)[]>();
+  g.window = {
+    addEventListener: (ev: string, fn: (e: unknown) => void, opts?: { capture?: boolean }) => {
+      const m = opts?.capture ? cap : bub;
+      const list = m.get(ev) ?? [];
+      list.push(fn);
+      m.set(ev, list);
+    },
+    removeEventListener: (ev: string, fn: (e: unknown) => void, opts?: { capture?: boolean }) => {
+      const m = opts?.capture ? cap : bub;
+      const list = m.get(ev);
+      if (!list) return;
+      const i = list.indexOf(fn);
+      if (i >= 0) list.splice(i, 1);
+    },
+    __press: (code: string, target?: unknown) => {
+      const ev = {
+        code,
+        repeat: false,
+        shiftKey: false,
+        target: target ?? null,
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true;
+        },
+        stopPropagation() {},
+        stopImmediatePropagation() {},
+      };
+      // 捕获阶段（window 上挂的，如 EndCard 的 Esc）
+      for (const fn of [...(cap.get('keydown') ?? [])]) fn(ev);
+      // 冒泡阶段（元素上挂的，如 wireKeyActivate）
+      for (const fn of [...(bub.get('keydown') ?? [])]) fn(ev);
+    },
+  };
+}
+
+/**
+ * 最小 DOM 桩。装一次，全局复用，装完不摘。
+ *
+ * 为什么放在文件级而不是 `verify_story` 内部：现在有两条判据要造真的 DOM
+ * （`StoryCards` 与 `EndCard`），而两份桩各写一套是这个项目明令禁止的
+ * 「同一条判据在不同假环境里给出不同答案」的来源。理由见 `verify_story`
+ * 里 `hadDocument` 那段（`globalThis` 间接属性，避开 esbuild 的常量折叠）。
+ *
+ * 刻意**不**实现布局与真实事件派发：`click()` 走自己的 listener 列表，
+ * 所以点击判据照样成立。
+ */
+interface StubDom {
+  doc: Document;
+  parent(): HTMLElement;
+  /** 触发一次 window 上的 keydown。`EndCard` 的 Esc 走这条。 */
+  pressKey(code: string, opts?: { target?: unknown }): void;
+}
+
+let stubDom: StubDom | null = null;
+
+function ensureStubDom(): StubDom {
+  if (stubDom) return stubDom;
+  const g = globalThis as { document?: Document; window?: Window & typeof globalThis };
+  ensureStubWindow(g);
+  if (!g.document) {
+    g.document = {
+      createElement(tag: string) {
+        const cls = new Set<string>();
+        const kids: unknown[] = [];
+        const listeners: Record<string, (() => void)[]> = {};
+        const attrs: Record<string, string> = {};
+        const text = { v: '' };
+        return {
+          tagName: tag.toUpperCase(),
+          className: '',
+          type: '',
+          style: {} as Record<string, string>,
+          children: kids,
+          value: '',
+          get textContent() {
+            return text.v;
+          },
+          set textContent(v: string) {
+            text.v = v;
+          },
+          focus() {},
+          blur() {},
+          contains: (n: unknown) => kids.includes(n),
+          /** `EndCard` 构造里就要拿 2D 上下文，缺了它构造直接抛。
+           *  给一个只记录调用、不真的画的（和 `fakeCtx` 同一套思路）。 */
+          getContext: () => fakeCtx(),
+          get classList() {
+            return {
+              add: (c: string) => void cls.add(c),
+              remove: (c: string) => void cls.delete(c),
+              contains: (c: string) => cls.has(c),
+              toggle: (c: string, on?: boolean) => {
+                if (on === undefined) cls.has(c) ? cls.delete(c) : cls.add(c);
+                else if (on) cls.add(c);
+                else cls.delete(c);
+              },
+            };
+          },
+          appendChild: (n: unknown) => {
+            kids.push(n);
+            return n;
+          },
+          remove: () => {
+            const i = kids.indexOf(this);
+            if (i >= 0) kids.splice(i, 1);
+          },
+          addEventListener: (ev: string, fn: () => void) => {
+            (listeners[ev] ??= []).push(fn);
+          },
+          /** `dom.ts` 的 setFlag 走的是 setAttribute，缺了它 setShown 会抛。 */
+          setAttribute: (name: string, value: string) => {
+            attrs[name] = value;
+          },
+          getAttribute: (name: string) => attrs[name] ?? null,
+          /** 手工触发：绕开真实事件系统，只走我们自己挂的 listener。 */
+          click: () => (listeners.click ?? []).forEach((f) => f()),
+          /** 标签选择器 + 类选择器，只这两种——判据只用到这两种。 */
+          querySelector: (sel: string) => findAll(kids, sel)[0] ?? null,
+          querySelectorAll: (sel: string) => findAll(kids, sel),
+        };
+      },
+    } as unknown as Document;
+  }
+
+  /** 深度优先找匹配项。`sel` 形如 `.g-btn` 或 `button`。 */
+  const findAll = (nodes: unknown[], sel: string): unknown[] => {
+    const byClass = sel.startsWith('.');
+    const want = byClass ? sel.slice(1) : sel.toUpperCase();
+    const out: unknown[] = [];
+    const walk = (list: unknown[]) => {
+      for (const n of list) {
+        const node = n as {
+          tagName?: string;
+          classList?: { contains(c: string): boolean };
+          children?: unknown[];
+        };
+        if (!node) continue;
+        const hit = byClass ? node.classList?.contains(want) : node.tagName === want;
+        if (hit) out.push(n);
+        walk(node.children ?? []);
+      }
+    };
+    walk(nodes);
+    return out;
+  };
+
+  stubDom = {
+    doc: g.document,
+    /** 一个能挂东西的父节点。 */
+    parent: () => {
+      const host = g.document!.createElement('div');
+      (host as unknown as { children: unknown[] }).children = [];
+      return host as unknown as HTMLElement;
+    },
+    pressKey: (code, opts) => {
+      (g.window as unknown as { __press: (c: string, t?: unknown) => void }).__press(
+        code,
+        opts?.target,
+      );
+    },
+  };
+  return stubDom;
+}
 
 // ---------------------------------------------------------------- 跑
 export function runAll(): { name: string; ok: boolean; detail: string; asserts: number }[] {

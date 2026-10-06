@@ -144,6 +144,8 @@ export class Hud {
   private lvbiEl: HTMLSpanElement;
   private moodEl: HTMLSpanElement;
   private chapterEl: HTMLSpanElement;
+  /** 期限：余 N 天 / 已过期 N 天 */
+  private daysEl: HTMLSpanElement;
   private offRoadEl: HTMLSpanElement;
   private nextEl: HTMLDivElement;
 
@@ -157,6 +159,11 @@ export class Hud {
   private ringBtn: HTMLButtonElement;
   private ringLabel: HTMLDivElement;
   private ringShown = false;
+  /** 骑行节拍：容器 / 收缩的圈 / 键帽 / 五个进度点 */
+  private beatEl: HTMLDivElement;
+  private beatRing: HTMLDivElement;
+  private beatKey: HTMLDivElement;
+  private beatDots: HTMLSpanElement[] = [];
   private ringX = NaN;
   private ringY = NaN;
   private ringScale = NaN;
@@ -185,6 +192,13 @@ export class Hud {
     // "我现在在第几章"——而集齐五件之后这一章的走法会整个变掉。
     this.chapterEl = el('span', 'g-stat g-stat-chapter');
     left.appendChild(this.chapterEl);
+    /**
+     * 期限。放在状态组最前面，排在「已过 N 驿」**之前**——
+     * 因为它是唯一一个"会因为什么都不做而变少"的数，
+     * 而其余几个都只会往上加。玩家扫一眼顶栏时，它该是最先被扫到的那一格。
+     */
+    this.daysEl = el('span', 'g-stat g-stat-days');
+    left.insertBefore(this.daysEl, this.seenEl);
     /**
      * 离路提示。**只在真的偏出去时出现。**
      *
@@ -228,6 +242,24 @@ export class Hud {
     wireKeyActivate(this.ringBtn, o.onCheckIn);
     this.root.appendChild(this.ringHold);
     setShown(this.ringHold, false);
+
+    // ---------------- 骑行节拍 ----------------
+    // 放在圈的正上方一点：两者都在"脚下"，但节拍是**骑行中**的，
+    // 圈是**停下来**的，上下分开才不会看错。
+    this.beatEl = el('div', 'g-beat g-hidden');
+    this.beatRing = el('div', 'g-beat-ring');
+    this.beatKey = el('div', 'g-beat-key', t('key_relic'));
+    this.beatEl.appendChild(this.beatRing);
+    this.beatEl.appendChild(this.beatKey);
+    const bd = el('div', 'g-beat-dots');
+    this.beatDots = [];
+    for (let i = 0; i < 5; i++) {
+      const d = el('span', 'g-beat-dot');
+      this.beatDots.push(d);
+      bd.appendChild(d);
+    }
+    this.beatEl.appendChild(bd);
+    this.root.appendChild(this.beatEl);
 
     // ---------------- 小地图 ----------------
     this.minimap = new Minimap(this.root, this.world, this.game);
@@ -288,7 +320,17 @@ export class Hud {
     setText(this.lvbiEl, t('lvbi_label', { 0: this.game.lvbi }));
     setText(this.moodEl, t('mood_label', { 0: this.game.mood, 1: ECON.MOOD_CEIL }));
     setText(this.chapterEl, t(`chapter_label_${this.game.chapter}`, { 0: this.game.chapter }));
-    // 离路提示：与降速同源（`ride.ts` 的 `applyOffRoad`），
+    // 期限。**它是顶栏第一件被读到的数**，不是角落里的一个提醒：
+    // 律师函说三十日，玩家就得随时能看见"我还剩多少"。
+    // 过期之后这一格换字（`hud_days_over`）——不是变红、不是闪烁，
+    // 这个世界里没有警报音，只有一句话变了。
+    setText(
+      this.daysEl,
+      this.game.overdue
+        ? t('hud_days_over', { 0: this.game.day - GameStateManager.DAYS_LIMIT })
+        : t('hud_days_left', { 0: this.game.daysLeft }),
+    );
+    setFlag(this.daysEl, 'is-over', this.game.overdue);    // 离路提示：与降速同源（`ride.ts` 的 `applyOffRoad`），
     // 用它自己的布尔而不是重新判路面，免得两处判据漂移。
     setShown(this.offRoadEl, this.world.ride.offRoad);
 
@@ -421,6 +463,31 @@ export class Hud {
   }
 
   /**
+   * 骑行节拍。
+   *
+   * **一个收缩的圈 + 五个点**，没有别的。
+   *
+   * 为什么不给文字：窗口只有 1.15s，而一行 4 个汉字的 toast 要读 1.5s——
+   * 玩家会先读完再按，窗口早就过了。**一个会缩的圈比一行字快**，
+   * 而且它能被余光读到，而这件事需要的恰恰是余光而不是注意力。
+   *
+   * 五个点是进度。节拍给旅币但**不给碎片**（见 `game/beat.ts` 的文件头），
+   * 于是这个计数是这一件乐事唯一的可见痕迹——它得一直待在那儿。
+   *
+   * 圈用 CSS 变量 `--beat` 表示剩余比例，逐帧只改一个自定义属性，
+   * 不重建 DOM：它在骑行中每帧都要动。
+   */
+  setBeat(s: { open: boolean; remain: number; hits: number; goal: number; done: boolean }): void {
+    setShown(this.beatEl, !s.done);
+    if (s.done) return;
+    setFlag(this.beatEl, 'is-open', s.open);
+    this.beatEl.style.setProperty('--beat', String(Math.max(0, Math.min(1, s.remain))));
+    for (let i = 0; i < this.beatDots.length; i++) {
+      setFlag(this.beatDots[i], 'is-on', i < s.hits);
+    }
+  }
+
+  /**
    * 圈上那行字。分派规则只在这一处，而 kind 来自 `interactAt()`——
    * 和宿主 `tryCheckIn()` 同一个函数，所以标签与动作不可能对不上。
    */
@@ -493,8 +560,46 @@ export class Hud {
 export function wireKeyActivate(btnEl: HTMLElement, fn: () => void): void {
   btnEl.addEventListener('keydown', (e) => {
     if (e.code !== 'Space' && e.code !== 'Enter') return;
-    e.stopPropagation();
+    // ⚠️ **不能**在这里无条件 `stopPropagation()`。
+    //
+    // 它当初解决的是 main 那个 window 冒泡监听器抢空格（见上面那段），
+    // 而"目标阶段拦住、不再往上冒"正是这么写的。但目标阶段同时也是
+    // **小游戏收键的那条路**：小游戏宿主也在 window 上挂监听，而它要的是
+    // 空格（云落笔 / 茶注水 / 竹下刀）。
+    //
+    // 症状：玩家用空格打卡 → 圈按钮拿到焦点 → 打卡过场走完、小游戏开始，
+    // 圈按钮仍然持有焦点 → 此后每一次空格都在这里被 `stopPropagation()` 截住，
+    // **永远到不了小游戏**。而琴和禽用数字键，数字键不在这个名单里，
+    // 于是它们照常能玩——正好是"**部分**游戏玩不了"。
+    //
+    // 所以这里改成**显式地问宿主**：宿主知道现在是暂停/结算页还是小游戏，
+    // 只有前两者才需要独占空格。
+    //
+    // ⚠️ 但 `preventDefault()` **必须留着**，无条件留。
+    // 它挡的是浏览器对 `<button>` 的原生激活（那会让空格在按钮上
+    // 既触发这里、又冒到 main）。而 `stopPropagation()` 一旦放行，
+    // 小游戏自己会对吃掉的键调 `preventDefault`（见 minigameHost），
+    // 原生激活一样不会发生——两件事各管一段，合起来才对。
+    if (spaceKeyOwnedHere()) e.stopPropagation();
     e.preventDefault();
     if (!e.repeat) fn();
   });
+}
+
+/**
+ * `wireKeyActivate` 的**同一个** `stopPropagation` 判定，从宿主侧问过来。
+ *
+ * 拆成两个函数是因为上面那条在 UI 模块里，而相位在 `main.ts`：
+ * 不传相位进来，UI 就没有判断依据，只能像原来那样无条件拦截。
+ */
+let spaceKeyOwner: () => boolean = () => true;
+
+/** 由宿主在相位变化时装进来。见 `verify_ui_keys` 的判据。 */
+export function setSpaceKeyOwner(fn: () => boolean): void {
+  spaceKeyOwner = fn;
+}
+
+/** 这一屏现在要不要独占 Space/Enter。宿主答。 */
+export function spaceKeyOwnedHere(): boolean {
+  return spaceKeyOwner();
 }

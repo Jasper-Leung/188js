@@ -125,6 +125,12 @@ export class Onboarding {
       ['key_mute', 'M'],
       ['key_camera_desc', 'V'],
       ['key_vehicle_desc', 'E'],
+      // F = 摸旧物 / 竹丛里按节拍。**必须列在这里**：旧物那一头它是全作
+      // 唯一一个有"对话"后果的单键，而它所在的位置（路肩外 2m）不是任何
+      // 其它按键能到达的地方——不告诉玩家，他会一辈子把它当成路边的装饰。
+      // 节拍那一头更急：窗口只有 1.15s，键帽没在引导页出现过的话，
+      // 玩家多半是在窗口关上之后才想起"F 是干什么的"。
+      ['key_relic_desc', 'F'],
       ['key_item_bar_desc', '1 ~ 4'],
     ];
     for (const [k, glyph] of items) {

@@ -33,6 +33,7 @@ import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
 import { ECON, SHOPS, WORLD } from './data/raw';
 import { UI } from './ui';
+import { setSpaceKeyOwner } from './ui/hud';
 import { clamp } from './core/math';
 import { perf } from './core/perf';
 import { getBasins } from './world/basins';
@@ -42,7 +43,9 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportBothSides, seededBackText, type EndingId } from './game/postcard';
 
-import { canRide as canRideNow, interactAt, type Phase, type SettleOutcome } from './game/phase';
+import { canRide as canRideNow, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
+import type { BeatEvent } from './game/beat';
+import type { RideInput } from './world/ride';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
 const bootSub = document.getElementById('boot-sub') as HTMLElement;
@@ -495,9 +498,21 @@ class App {
   debug: DebugPanel | null = null;
 
   private keys = new Set<string>();
+
+  /** 已经弹过"那边有东西"的旧物。**只活在本次会话**，不落盘。 */
+  private relicHinted = new Set<number>();
+  /** 已经报出过名字的旧物。和上面那个分开，理由见 `updateRelicHint`。 */
+  private relicNamed = new Set<number>();
   private touchMode = false;
   private demoActive = false;
   private demoT = 0;
+  /**
+   * 演示那辆车记住的弧长。-1 = 还没起步，第一帧直接采信 `nearestArcParam()`。
+   *
+   * 它必须自己记一份而不能每帧现取：8 字在中央穿过自己，
+   * 现取的那一下会在两条支路之间跳（弧长差半圈），见 `demoDrive()`。
+   */
+  private demoArc = -1;
 
   constructor(world: World, settings: SettingsData, capability: Capability) {
     this.world = world;
@@ -550,6 +565,7 @@ class App {
           game.setEnding(e);
           this.ui.syncFromState();
         },
+        onCloseEndCard: () => this.closeEndCard(),
         onExportPostcard: (side) => void this.exportPostcard(side),
         onWriteBack: (text) => {
           this.backText = text;
@@ -605,6 +621,17 @@ class App {
 
     mark('boot_step_bind');
     this.bindInput();
+    // 空格归谁：`wireKeyActivate` 靠它决定要不要独占空格。
+    //
+    // 只有**面板页**需要独占——那些按钮就是这一屏唯一的出口，按空格必须
+    // 触发它们而不是漏到别处。小游戏页相反：它在 window 上收键，
+    // 而云落笔 / 茶注水 / 竹下刀全靠空格，一路上任何一处 `stopPropagation()`
+    // 都会让那一局变成"按了没反应"。
+    //
+    // 这里只答"是不是小游戏"，不答别的相位：`main.ts` 自己的 window 监听器
+    // 对非小游戏相位已经各走各的分支（Space→onConfirm、Esc→暂停/继续），
+    // 多答一份只会制造第二个判定点。
+    setSpaceKeyOwner(() => !this.mg.isRunning);
     window.addEventListener('resize', () => this.world.renderer.resize());
 
     // 世界事件
@@ -613,6 +640,7 @@ class App {
     // 差别不是好不好看，是**toast 要求玩家注意到它，而字应该"顺路读到"**——
     // 玩家在过弯，不该为了一块石头停下来。
     this.world.onRoadsideLine = (text) => this.ui.showStoryCard(text, t('stele_title'));
+    this.world.onBeat = this.beatOn;
     this.world.onBgmMood = (slot) => audio.setBgmMood(slot);
     game.on('state', () => this.ui.syncFromState());
     game.on('lvbi', () => this.ui.syncFromState());
@@ -880,6 +908,26 @@ class App {
             );
           }
           break;
+        case 'KeyF': {
+          // **F 同时服务两件事**，而顺序是有讲究的：先节拍，后旧物。
+          //
+          // 节拍窗口只有 1.15s，而旧物要停下来才够得着——
+          // 窗口开着的时候玩家正在骑，不是在路边站着。
+          // 所以先把窗口吃掉：它有截止时间，旧物没有。
+          const beat = this.world.pressBeat();
+          if (beat !== 'miss' || this.world.beats.state.open) {
+            this.ui.setBeat(this.world.beats.state);
+            break;
+          }
+          // 摸旧物。**主角唯一属于自己的那件事**——序章里他明说
+          // "我这双手只会做一件事"，而那三张卡之后游戏再也没给过他一次机会。
+          //
+          // 够不着的时候**什么都不做，也不解释**：玩家正对着它，按了没反应
+          // 本身就是"我得再靠近一点"的反馈，一句提示反而是在教他读界面。
+          const r = this.world.touchRelic();
+          if (r) this.ui.showStoryCard(t(r.textKey), t(r.titleKey));
+          break;
+        }
         case 'Digit1':
         case 'Digit2':
         case 'Digit3':
@@ -945,6 +993,7 @@ class App {
     this.backText = '';
     writeBackText('');
     this.demoActive = false;
+    this.demoArc = -1;
     this.world.teleportToStation(0);
     this.ui.setShopOpen(false);
   }
@@ -963,8 +1012,12 @@ class App {
     //
     // 这是整个游戏里最该被送达而一直没送达的三句——
     // 律师函、母亲、还有"代价是没有人记得你"。它决定玩家知不知道
-    // 自己这一趟在替谁跑。不锁操作、自动推进、按 `E` 跳过，
+    // 自己这一趟在替谁跑。不锁操作、自动推进、**点一下就能退场**，
     // 所以正在过弯的玩家什么都不用做，骑过去也会读完。
+    //
+    // ⚠️ 这段注释原来写的是「按 `E` 跳过」。`E` 早就改成换载具了，
+    // 而且它从来就没跳过过任何字——`storyCard.ts` 的卡不吃键盘。
+    // 一句与代码不符的注释比没有注释更贵：下一个人会照着它去找那个键。
     //
     // `prologue_0_1..3` 是**动机**：他为什么从公司辞了手回来。
     // 排在原有三句**之前**，因为顺序就是因果——
@@ -979,6 +1032,11 @@ class App {
     // 六句**顺序播**，不是一张卡：中文侧读完要 66 秒、英文侧 86 秒，
     // 而单卡上限 22 秒。塞进一张就是必然腰斩，而腰斩没有任何提示。
     // 拆开之后每张都读到完整，算法见 `storyCard.ts:readingMs`。
+    //
+    // `dismissible` 和驿里那三句同一条理由（`world.ts:408`）：**这是"停下来读"
+    // 而不是"骑过去顺便读"**。六句加起来一分半钟，站在起点看完是一种惩罚；
+    // 而路边碑文、路口那三个字仍然不开——它们要的是"别打断我过弯"。
+    // 判据：谁长谁开，不是谁想开谁开。
     if (!game.prologueDone) {
       game.markPrologueDone();
       this.ui.showStorySequence(
@@ -992,6 +1050,7 @@ class App {
           t('prologue_3'),
         ],
         t('prologue_speaker'),
+        { dismissible: true },
       );
     }
   }
@@ -1036,11 +1095,19 @@ class App {
     if (this.phase === 'checkin') this.phase = 'roaming';
   }
 
+  /**
+   * 标题页的「演示」。
+   *
+   * 原来这一段只做三件事：解锁音频、放 BGM、对白自动推进——**车不动**。
+   * 现在车自己往前骑（`readInput()` → `demoDrive()`），而"车往草地里开"
+   * 这件事由 `verify_demo_drive` 在 Node 里闭环跑一遍，不靠人眼看。
+   */
   private startDemo() {
     void audio.unlock();
     audio.playBgm('bgm', 0.5);
     this.demoActive = true;
     this.demoT = 0;
+    this.demoArc = -1;
     // 演示里没有人按键，对白必须自己往前走
     this.ui.setDialogueAutoAdvance(2.4);
     this.enterWorld();
@@ -1052,6 +1119,31 @@ class App {
     this.loop.suspend();
     this.ui.showEndCard();
     audio.sfx('export', 0.6);
+  }
+
+  /**
+   * 关掉结算页，回到世界。
+   *
+   * ## 为什么要单独一个方法，而不是复用 `resume()`
+   *
+   * `resume()` 的第一行是 `if (this.phase !== 'paused') return;`，而这一页的
+   * 相位是 `endcard`——直接调它**什么都不会发生**，症状是"按了关闭但页面还在"。
+   * 同理也不能调 `toRoaming()` 就完事：它只改相位和主循环，不把结算页收起来。
+   *
+   * 三件事一件都不能少：
+   *   1. 相位回到 `roaming` —— `canRide` 只认它，否则车不动；
+   *   2. `loop.resume()` —— `finishRun()` 停过主循环，漏了就是"能看不能动"；
+   *   3. `ui.closeEndCard()` —— `showEndCard()` 藏了 HUD、推了结算页。
+   *
+   * **不清档**。玩家点的是"关掉这一页"，不是"重新开始"；
+   * 这一趟的驿数、乐事、背面写的字全部留着，`restart()` 仍然只在
+   * 「重新开始」那一个动词后面发生。
+   */
+  private closeEndCard() {
+    this.phase = 'roaming';
+    this.loop.resume();
+    this.ui.closeEndCard();
+    this.ui.syncFromState();
   }
 
   setQuality(tier: Tier) {
@@ -1162,6 +1254,17 @@ class App {
     const visit = game.getStationCount(stationIdx); // 打卡前的次数
     const id = MiniGameHost.idFor(st.slot, visit);
     this.phase = 'minigame';
+    // 把焦点从"脚下那个圈"上摘下来。
+    //
+    // 打卡是**用空格**触发的，而空格落在 HUD 的圈按钮上时，那个按钮会成为
+    // `document.activeElement`（原生按钮的键盘激活路径）。此后圈按钮一直持有
+    // 焦点直到它被隐藏——而 `hud.syncRing()` 要等下一次 `sync()` 才收它，
+    // 于是**整个小游戏期间焦点都在它上面**。
+    //
+    // 后果见 `wireKeyActivate` 那段注释：一路上的 `stopPropagation()` 把空格
+    // 截在目标阶段，小游戏永远收不到。交出去是对的动作：这一屏上没有
+    // 任何需要键盘焦点的控件（五个小游戏都在 canvas 上自己收键）。
+    this.ui.releaseFocus();
     // 告诉世界「现在在小游戏里」：反派的对白要等，
     // 但引子（手机响了）照样会压暗一下——它不结束任何东西。
     this.world.setBusyForMinigame(true);
@@ -1187,6 +1290,20 @@ class App {
 
     // 种子由 (驿站, 第几次到访) 决定：同一趟重玩是同一局，
     // 玩家重打一遍不会因为随机数换了一串而拿到另一道题。
+    //
+    // ⚠️ **必须等对白念完再开**。
+    //
+    // 打卡过场在 `moving` 结束那一刻就发出了这座驿站的对白，而小游戏要等到
+    // `holding`(1.5s) + `outro`(0.4s) 之后才开——中间只隔 1.9 秒。五座碎片驿站
+    // 的对白都是三句、约 4 秒（`verify_minigame_dialogue` 量着这个数），
+    // 所以**小游戏每次都盖在还没念完的对白上**。
+    //
+    // 症状安静得离谱：`Dialogue` 在 window 的**捕获**阶段吃掉 Space/Enter/Esc，
+    // 而小游戏是在**冒泡**阶段收键的。于是玩家看见的是一屏乐事、按空格毫无反应，
+    // Esc 也退不出去——而五个小游戏里有三个（云/茶/竹）只认空格。
+    // 琴和禽用数字键，数字键不在被吃掉的名单里，所以它们"能玩"——
+    // 正好是"**部分**游戏玩不了"这个症状的来源。
+    await this.ui.whenDialogueIdle();
     const handle = await this.mg.run(id, seedFor(stationIdx, visit));
     // **三态，不是两态**。`MiniGameResult` 早就把「玩法失败」与「玩家按 Esc」
     // 拆成两个值，而这里原来只认 `win`——于是玩家主动取消的一局，
@@ -1224,6 +1341,14 @@ class App {
     if (game.allCollected() && !game.chapter1Done) {
       this.toRoaming();
       this.ui.showToast(t('objective_return'), 4200);
+      return;
+    }
+    // 过期。这一趟**不结束**，但目标换了。
+    // `back_break` 那个结局是为它写好的，而在这之前它没有任何入口——
+    // 一个写好了却到不了的结局，和没写是一样的。
+    if (game.overdue) {
+      this.toRoaming();
+      this.ui.showToast(t('objective_overdue'), 5200);
       return;
     }
     // 完满评级（五座各去三次）是**可选**的另一条路，仍然就地结算
@@ -1355,18 +1480,40 @@ class App {
   }
 
   // ---------------------------------------------------------------- 循环
+  /**
+   * 固定步长。**所有阶段都跑**——非骑行阶段也要推进，
+   * 好让世界的时间继续走（对白、暂停面板背后的黄昏都要动）。
+   */
   private fixed(dt: number) {
-    if (this.phase !== 'roaming' && this.phase !== 'checkin') {
-      // 非骑行阶段仍然推进固定步长，好让世界的时间继续走
-      // （对白、暂停面板背后的黄昏都要动）
-    }
     const canRide = canRideNow({
       phase: this.phase,
       checkInPressed: this.ui.touch.checkInPressed,
       narrativeBusy: this.world.narrativeBusy,
       checkInStage: this.world.checkInStage,
     });
+    this.world.fixedUpdate(dt, this.readInput(), canRide);
+    this.ui.touch.checkInPressed = false;
+    // 小游戏的状态机也按固定步长走。漏掉这一句，`step()` 永远不被调用：
+    // 茶的注水不走、竹的引子不放、琴的示范不响、禽的倒计时不动，
+    // 而且 `resultT` 不倒完所以 `run()` 的 Promise 永远不 resolve，
+    // 五件乐事全部卡死。
+    this.mg.fixedUpdate(dt);
+    this.world.postFixedUpdate();
+    this.updateRelicHint();
+    this.updateDayToast();
+  }
 
+  /**
+   * 这一帧的车把。**只读输入，不改任何状态。**
+   *
+   * 拆出来是因为它有两个来源：玩家的键／摇杆，和演示模式那辆自己骑的车。
+   * 挤在 `fixed()` 里的时候，第二个来源要覆盖第一个只能靠一层 if 套一层 if，
+   * 而"演示到底有没有在开车"这件事就没有任何一处能一眼看见了。
+   *
+   * ⚠️ 顺序不能动：`canRide` 必须在 `touch.checkInPressed` 被清零**之前**问，
+   * 那是"按住空格确认时不该同时骑行"这条规则的唯一落点。
+   */
+  private readInput(): RideInput {
     let throttle = 0;
     let steer = 0;
     if (this.phase === 'roaming') {
@@ -1377,14 +1524,101 @@ class App {
       throttle += this.ui.touch.moveY;
       steer += this.ui.touch.moveX;
     }
-    this.ui.touch.checkInPressed = false;
-    this.world.fixedUpdate(dt, { throttle: clamp(throttle, -1, 1), steer: clamp(steer, -1, 1) }, canRide);
-    // 小游戏的状态机也按固定步长走。漏掉这一句，`step()` 永远不被调用：
-    // 茶的注水不走、竹的引子不放、琴的示范不响、禽的倒计时不动，
-    // 而且 `resultT` 不倒完所以 `run()` 的 Promise 永远不 resolve，
-    // 五件乐事全部卡死。
-    this.mg.fixedUpdate(dt);
-    this.world.postFixedUpdate();
+    // 演示模式下没有人按键，这一行是**唯一的**来源。
+    // 它覆盖而不是叠加：叠加的话，评审在演示里碰一下摇杆车就会一顿。
+    if (this.demoActive) {
+      const d = this.demoDrive();
+      throttle = d.throttle;
+      steer = d.steer;
+    }
+    return { throttle: clamp(throttle, -1, 1), steer: clamp(steer, -1, 1) };
+  }
+
+  /**
+   * 演示模式那辆车怎么打方向。
+   *
+   * **只有两行是这里自己的**：记住弧长（`demoArc`），以及每帧去问一次
+   * "车头该往哪边摆"（`demoAim`）。换算成车把是 `demoInput` 的事。
+   *
+   * 为什么要自己记弧长：8 字在中央穿过自己，而那个路口正好落在弧长 0
+   * （也就是演示的起点）——两条支路在那儿同一个坐标、弧长差半圈。
+   * `unwrapArc()` 挡的是"车偏到两支一样近"时量到的那一下换支；
+   * 正常骑它一次都不触发（实测 45 秒零次），它是兜底，理由见 `phase.ts:unwrapArc`。
+   */
+  private demoDrive(): { throttle: number; steer: number } {
+    const ride = this.world.ride;
+    const p = ride.pos;
+    const raw = nearestArcParam(p.x, p.z);
+    this.demoArc = unwrapArc(this.demoArc < 0 ? raw : this.demoArc, raw);
+    return demoInput(demoAim(p.x, p.z, ride.headingValue, this.demoArc), ride.speedValue);
+  }
+
+  /**
+   * 旧物的两级提示。
+   *
+   * **18m（`relicSpotted`）说"那边有东西"，2.8m（`relicNearby`）说"这件叫什么，按 F"。**
+   * 分两级是因为一句提示只能干一件事：
+   * 只在够得着时弹，玩家已经停稳了，提示毫无用处；
+   * 只在 18m 弹，玩家走过去之后不知道该按哪个键。
+   *
+   * 每件各给一次，记在 `relicHinted` 里。它和 `Relics.heard` 分开：
+   * 提示过了但还没摸是常态（他可能直接骑过去了），
+   * 把两件事记成一个，玩家就得停下来摸才有资格再被提醒一次。
+   */
+  private updateRelicHint() {
+    if (this.phase !== 'roaming') return;
+    const spotted = this.world.relicSpotted;
+    if (spotted >= 0 && !this.world.relics.isHeard(spotted) && !this.relicHinted.has(spotted)) {
+      this.relicHinted.add(spotted);
+      this.ui.showToast(t('relic_near'), 1800);
+    }
+    const i = this.world.relicNearby;
+    if (i < 0 || this.world.relics.isHeard(i) || this.relicNamed.has(i)) return;
+    this.relicNamed.add(i);
+    const title = t(this.world.relics.placements[i].def.titleKey);
+    this.ui.showToast(t('relic_hint', { name: title }), 2200);
+  }
+
+  /**
+   * 节拍的三档反馈。
+   *
+   * · `cue`（48m）：**「前面有竹」**。这是这一件乐事原本完全缺的那一档——
+   *   没有它，玩家看到圈亮起时既不知道那是什么，也不知道该按哪个键。
+   * · `armed`（24m，窗口开了）：**不弹提示**。窗口只有 1.15s，再叠一条
+   *   1.8s 的 toast，玩家会先读完字再按键，窗口早就过了。
+   *   窗口本身由 HUD 上那个收缩的圈表示（`ui.setBeat`），它比任何一行字都快。
+   * · `hit` / `miss` / `done`：打中了、打偏了、凑满五下。
+   */
+  private beatOn = (e: BeatEvent, hits: number) => {
+    this.ui.setBeat(this.world.beats.state);
+    if (e === 'cue') this.ui.showToast(t('beat_cue'), 1800);
+    else if (e === 'hit') this.ui.showToast(t('beat_hit', { 0: hits, 1: this.world.beats.state.goal }), 1200);
+    else if (e === 'miss') this.ui.showToast(t('beat_miss'), 1200);
+    else if (e === 'done') {
+      // 完成一件乐事：给一笔旅币，**不改碎片计数**（见 beat.ts 的文件头）。
+      game.earn(12, 'beat_done');
+      this.ui.syncFromState();
+      this.ui.showToast(t('beat_done'), 4200);
+    }
+  };
+
+  /** 上一次看到的日期。用来在翻页时给一句话。 */
+  private lastDay = 1;
+
+  /**
+   * 日期翻页时报一句。
+   *
+   * **不是"还剩几天"的倒计时播报，而是一句"第 N 天"。**
+   * 理由：顶栏那一格每时每刻都在写着余数，播报是重复的；
+   * 而"第 N 天"是**一件新发生的事**，和顶栏那个持续变化的数不是同一句话。
+   * 一天只在打卡或骑完一圈时翻，所以这句话一天最多出现一次——
+   * 一天一次的东西才值得占用注意力。
+   */
+  private updateDayToast() {
+    if (this.phase !== 'roaming') return;
+    if (game.day === this.lastDay) return;
+    this.lastDay = game.day;
+    this.ui.showToast(t('day_passed', { 0: game.day }), 2400);
   }
 
   private render(dt: number) {

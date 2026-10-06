@@ -307,8 +307,8 @@ export const ROAD_PATCH: PatchHooks = {
     uniform vec3 asphalt_color;
     uniform vec3 grain_dark_color;
     uniform vec3 dirt_color;
-    uniform vec3 edge_line_color;
-    uniform vec3 center_line_color;
+    uniform vec3 rut_dark_color;
+    uniform vec3 rut_light_color;
     uniform float road_half_width;
     uniform float total_half_width;
     uniform float roughness_base;
@@ -392,26 +392,45 @@ export const ROAD_PATCH: PatchHooks = {
     float wet = smoothstep(0.42, 0.56, fbm2(wp * 0.13 + vec2(7.0, 2.0)));
     rcol *= 1.0 - 0.18 * wet;
 
-    // 路肩 → 泥土过渡。路口把这条边界推远（wide），标线一起淡出（mark）
-    float shoulder = smoothstep(road_half_width * wide, total_half_width * wide, edge);
+    // 路肩 → 泥土过渡。路口把这条边界推远（wide）。
+    //
+    // 过渡**从沥青外沿就开始**，而不是留出一段干净的沥青边——
+    // 原来的 road_half_width 到 total_half_width 之间是纯泥土，
+    // 加上双白实线之后整条路读成"双向两车道国道"：
+    // 虚线中线、白色实线、砂石路肩，一整套高速公路语汇。
+    // 而这条路空了六百年。这三样东西是全作最响的调性冲突。
+    float shoulder = smoothstep(road_half_width * wide * 0.72, total_half_width * wide, edge);
     rcol = mix(rcol, dirt_color, shoulder * mark);
 
-    // 标线：中央白虚线（线长 4m / 间隔 6m）。路口内不画
-    float asp_mask = 1.0 - smoothstep(road_half_width - 0.06, road_half_width, edge);
-    float phase = mod(along, 10.0);
-    float dash = smoothstep(0.0, 0.12, phase) * (1.0 - smoothstep(3.88, 4.0, phase));
-    float center_lines = (1.0 - smoothstep(0.070, 0.100, abs(lateral))) * dash * asp_mask * mark;
-    rcol = mix(rcol, center_line_color, center_lines);
-    rcol = mix(rcol, rcol * (0.84 + 0.32 * grain), center_lines * 0.3);
+    // 草从沥青边缘往里长。乡道的沥青边不是一刀切的，是被草吃掉的。
+    float overgrow = smoothstep(0.52, 0.94, fbm2(wp * vec2(0.9, 0.16) + vec2(31.0, 5.0)));
+    rcol = mix(rcol, dirt_color * vec3(0.86, 1.06, 0.72), overgrow * shoulder * 0.55 * mark);
 
-    // 边线：贴着沥青外沿**内侧**的一条实线。
-    // 中心线断续是因为它在路中间；路缘线的作用是定住那条边界，
-    // 断续的话边界反而读不出来。没有它，沥青到泥土是靠 smoothstep
-    // 混出来的，而泥土偏黄、沥青偏冷，两色直接相接读成"路面画到一半断了"。
-    float d_edge = abs(abs(lateral) - (road_half_width - 0.18));
-    float edge_line = (1.0 - smoothstep(0.06, 0.12, d_edge)) * markEdge;
-    rcol = mix(rcol, edge_line_color, edge_line);
-    rcol = mix(rcol, rcol * (0.84 + 0.32 * grain), edge_line * 0.3);
+    // ---- 辙痕：代替标线的那两笔 ----
+    //
+    // 标线删掉之后路面会读成一整块均匀的灰——**没有标线不等于没有信息**。
+    // 真实的老乡道读作"路"，靠的是**两道被车轮压出来的辙**：
+    // 辙底被压实磨光、比周围深；辙之间的中脊积了灰土、比周围浅。
+    //
+    // 位置不是"车道中心 ±0.9m"那种画出来的数，而是跟着**沥青实际宽度**
+    // 按比例走（0.34 / 0.66 半宽处），所以 road_half_width 一改
+    // 辙痕自己跟着挪，不会留在路外面。
+    float rut_p = road_half_width * wide * 0.34;
+    float rut_q = road_half_width * wide * 0.66;
+    float asp_mask = 1.0 - smoothstep(road_half_width * wide - 0.05, road_half_width * wide, edge);
+    // 辙底：窄、深
+    float rut = (1.0 - smoothstep(0.0, 0.30, abs(abs(lateral) - rut_p)))
+              + (1.0 - smoothstep(0.0, 0.30, abs(abs(lateral) - rut_q)));
+    rut = clamp(rut, 0.0, 1.0);
+    // 沿路不匀：有些地方辙深、有些地方被草土填了
+    rut *= 0.55 + 0.45 * vnoise(vec2(along * 0.06, 13.7));
+    rcol = mix(rcol, rut_dark_color, rut * 0.55 * asp_mask * markEdge);
+    // 两辙之间那条没被压到的中脊：积灰土，偏浅偏黄
+    float crown = 1.0 - smoothstep(0.0, rut_p * 0.72, abs(lateral));
+    rcol = mix(rcol, rut_light_color, crown * 0.20 * asp_mask * mark);
+    // 轮迹之间偶尔露出来的碎砾
+    float gravel = smoothstep(0.72, 0.88, vnoise(vec2(along * 2.6, lateral * 3.1 + 5.0)));
+    rcol = mix(rcol, rcol * 1.22, gravel * 0.35 * asp_mask * mark);
   `,
   colorExpr: /* glsl */ `
     diffuseColor.rgb *= rcol;

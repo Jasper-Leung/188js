@@ -14,6 +14,8 @@
     "data:extract": "node tools/extract-data.mjs",
     "assets:tex": "node tools/compress-textures.mjs",
     "assets:geo": "node tools/optimize-assets.mjs",
+    "assets:retax": "node tools/retax.mjs",
+    "assets:title": "node tools/make-titleart.mjs --write",
     "assets:font": "node tools/subset-font.mjs",
     "assets:all": "npm run assets:font && npm run assets:tex && npm run assets:geo",
     "promo:wt-probe": "node tools/wt-probe.mjs",

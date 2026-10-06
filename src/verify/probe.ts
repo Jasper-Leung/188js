@@ -6,7 +6,8 @@
  * 这类问题**只有看数才看得见**，而看图看不见。
  */
 import { CENTERLINE, shapeReport, TOTAL_ARCLENGTH } from '../data/route';
-import { naturalHeightAt } from '../world/basins';
+import { naturalHeightAt, NATURAL_FLOOR } from '../world/basins';
+import { TERRAIN } from '../data/raw';
 import { fbm, noise2d } from '../core/noise';
 
 export function probeAll() {
@@ -72,7 +73,18 @@ function probeTerrain() {
   let atCeil = 0;
   const N = 41;
   let total = 0;
-  const hist = new Array(12).fill(0);
+  // 直方图的格数与宽度由**实际的 clamp 区间**决定，不再写死 12 格 / 0.75m。
+  //
+  // 写死的时候它是对的：那时自然地形被 clamp 在 [-3, 6]。起伏放大之后
+  // 上限不再是 6，于是从 6m 往上的采样点全被 `Math.min(11, ...)` 塞进
+  // 最后一格——**探针自己把最该看的那段高度分布藏起来了**，
+  // 打印出来像"绝大部分地形挤在 5.25~6.00"，而真相是它铺满了 6~24m。
+  // 一个量错东西的探针比没有探针更坏，所以这里跟着 `NATURAL_FLOOR` /
+  // `TERRAIN.MAX_HEIGHT` 走。
+  const bins = 16;
+  const span = TERRAIN.MAX_HEIGHT - NATURAL_FLOOR;
+  const bw = span / bins;
+  const hist = new Array(bins).fill(0);
   for (let iz = 0; iz < N; iz++) {
     for (let ix = 0; ix < N; ix++) {
       const x = (ix / (N - 1)) * 800 - 400;
@@ -80,21 +92,27 @@ function probeTerrain() {
       const h = naturalHeightAt(x, z);
       min = Math.min(min, h);
       max = Math.max(max, h);
-      if (Math.abs(h + 3) < 1e-9) atFloor++;
-      if (Math.abs(h - 6) < 1e-9) atCeil++;
+      if (Math.abs(h - NATURAL_FLOOR) < 1e-9) atFloor++;
+      if (Math.abs(h - TERRAIN.MAX_HEIGHT) < 1e-9) atCeil++;
       total++;
-      const b = Math.min(11, Math.max(0, Math.floor((h + 3) / 0.75)));
+      const b = Math.min(bins - 1, Math.max(0, Math.floor((h - NATURAL_FLOOR) / bw)));
       hist[b]++;
     }
   }
   console.log(`  采样 ${total} 点（${N}×${N}）`);
-  console.log(`  范围 [${min.toFixed(3)}, ${max.toFixed(3)}]`);
-  console.log(`  压在 -3.0 下限 ${atFloor} 点（${((atFloor / total) * 100).toFixed(1)}%）`);
-  console.log(`  压在  6.0 上限 ${atCeil} 点（${((atCeil / total) * 100).toFixed(1)}%）`);
-  console.log('  直方图（每格 0.75m，从 -3.0 起）:');
+  console.log(`  范围 [${min.toFixed(3)}, ${max.toFixed(3)}]   **高差 ${(max - min).toFixed(2)}m**`);
+  console.log(
+    `  压在 ${NATURAL_FLOOR.toFixed(1)} 下限 ${atFloor} 点（${((atFloor / total) * 100).toFixed(1)}%）`,
+  );
+  console.log(
+    `  压在 ${TERRAIN.MAX_HEIGHT.toFixed(1)} 上限 ${atCeil} 点（${((atCeil / total) * 100).toFixed(1)}%）`,
+  );
+  console.log(`  直方图（每格 ${bw.toFixed(2)}m，从 ${NATURAL_FLOOR} 起）:`);
   for (let i = 0; i < hist.length; i++) {
     const bar = '#'.repeat(Math.round((hist[i] / total) * 120));
-    console.log(`    ${(-3 + i * 0.75).toFixed(2).padStart(6)} ~ ${(-3 + (i + 1) * 0.75).toFixed(2).padStart(6)}  ${bar}`);
+    console.log(
+      `    ${(NATURAL_FLOOR + i * bw).toFixed(2).padStart(6)} ~ ${(NATURAL_FLOOR + (i + 1) * bw).toFixed(2).padStart(6)}  ${bar}`,
+    );
   }
 
   console.log('');

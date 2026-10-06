@@ -37,7 +37,7 @@
  * 预览和导出的 PNG 用的就是同一次加载结果。
  */
 import { t, isEnglish } from '../i18n';
-import { button, clear, el, note, rule, setDisabled, setFlag, setShown, setText } from './dom';
+import { blurWithin, button, clear, el, note, rule, setDisabled, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate, stationName } from './hud';
 import { FONT_HANDWRITE } from './theme';
 import type { PostcardInput } from '../game/postcard';
@@ -112,6 +112,9 @@ export class EndCard {
   private expB: HTMLButtonElement;
   private endKeep: HTMLButtonElement;
   private endBreak: HTMLButtonElement;
+  private closeBtn: HTMLButtonElement;
+  /** Esc 监听是否已挂上。见 `bindEsc()`。 */
+  private escBound = false;
 
   constructor(o: EndCardOpts) {
     this.hooks = o.hooks;
@@ -181,6 +184,23 @@ export class EndCard {
 
     // ================= 右：清单与动作 =================
     const right = el('div', 'g-end-r');
+
+    // ---- 关闭 ----
+    //
+    // 这一页原来**没有任何出口**：`finishRun()` 把 phase 设成 `endcard` 并
+    // `loop.suspend()`，而右栏里唯一的动词是「重新开始」——它走 `resetRun()`，
+    // 把这一趟清干净。症状是玩家按了暂停里的「结束这一趟 · 收下明信片」之后，
+    // 只剩两条路：丢掉全部进度重来，或者刷新页面。
+    //
+    // 放**右栏最上面**而不是混进行末的 `g-tools`：那一行里已经挤着
+    // 「复制分享文本 / 重新开始」，而关掉这一页恰恰是玩家进来之后
+    // 最先想找的那个动作——它必须一眼可见，不能和两个次要动词并排。
+    this.closeBtn = button(t('continue_explore'), {
+      cls: 'g-btn-wide',
+      onClick: () => this.hooks.onCloseEndCard(),
+    });
+    right.appendChild(this.closeBtn);
+
     // 纸面档位名（没买套餐时 paperTierNameKey 返回 null，这一格就空着）
     const paperRow = el('div', 'g-end-paper');
     this.paperEl = el('span', 'g-end-paper-n');
@@ -239,6 +259,7 @@ export class EndCard {
   show(): void {
     setShown(this.root, true);
     this.sync();
+    this.bindEsc();
     if (!this.mod) {
       // 模块还在路上：先铺一张纸色的空卡，玩家看到的是「一张正在生成的卡」
       this.paintBlank();
@@ -254,7 +275,62 @@ export class EndCard {
   }
 
   hide(): void {
+    this.unbindEsc();
     setShown(this.root, false);
+    // 焦点不能留在一个已经 display:none 的按钮上：Tab 的下一站会从
+    // body 开始乱跳，而玩家刚关掉这一页正打算继续骑车。
+    blurWithin(this.root);
+  }
+
+  // ---------------------------------------------------------------- Esc
+
+  /**
+   * Esc 关掉这一页。
+   *
+   * ## 为什么不在 `main.ts` 的全局 switch 里做
+   *
+   * 那道 switch 只有 `paused → resume()` 和 `roaming → pause()` 两条分支，
+   * 而结算页的相位是 `endcard`：套进任一条都不对——`resume()` 要求
+   * `phase === 'paused'`，`pause()` 要求 `phase === 'roaming'`，
+   * 两道门它都进不去。所以在宿主里加第三条分支，等于把"关掉这一页"
+   * 这件事的语义（回世界，而不是回到某个别的相位）塞进一个只管
+   * 暂停/继续的开关。放在面板自己身上更准：**这一页知道该去哪**。
+   *
+   * ## 为什么用捕获阶段
+   *
+   * `main.ts` 的监听挂在 `window` 冒泡阶段，而**编辑器里的 textarea**
+   * 会在 keydown 上正常冒泡。不抢在前面的话，玩家在写背面时按 Esc
+   * 会先被 main 看到——而 main 此刻什么都不做（相位不匹配），
+   * 事件继续往下走，本屏的处理器照样收得到。
+   * 但**焦点在 textarea 上时 Esc 不该关页面**（那会把正在写的东西连页一起扔掉），
+   * 所以捕获阶段先判目标：目标在编辑器里就放行，让浏览器的"退出输入"照常发生。
+   */
+  private onEsc = (e: KeyboardEvent) => {
+    if (e.code !== 'Escape') return;
+    // 正在背面编辑器里打字：Esc 归输入框，不关页面。
+    const tgt = e.target as HTMLElement | null;
+    if (tgt && typeof tgt.closest === 'function' && tgt.closest('.g-editor')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.repeat) return;
+    // 编辑器开着先收编辑器——否则玩家写了一半按 Esc，整页连着草稿一起没了。
+    if (this.editorOpen) {
+      this.closeEditor();
+      return;
+    }
+    this.hooks.onCloseEndCard();
+  };
+
+  private bindEsc(): void {
+    if (this.escBound) return;
+    this.escBound = true;
+    window.addEventListener('keydown', this.onEsc, true);
+  }
+
+  private unbindEsc(): void {
+    if (!this.escBound) return;
+    this.escBound = false;
+    window.removeEventListener('keydown', this.onEsc, true);
   }
 
   private async loadMod(): Promise<void> {
@@ -414,6 +490,7 @@ export class EndCard {
     setText(this.captionEl, this.side === 'front' ? t('postcard_variant_hint') : backCaption);
 
     setText(this.writeBtn, t('write_back'));
+    setText(this.closeBtn, t('continue_explore'));
     // 导出两颗按钮要能分辨：同一个「导出明信片」摆在两处，玩家不知道
     // 哪颗出正面。这里拼的是「动词 · 名词」，不是新文案。
     setText(this.expF, `${t('export')} · ${t('card_side_front')}`);
@@ -506,6 +583,7 @@ export class EndCard {
   }
 
   dispose(): void {
+    this.unbindEsc();
     this.root.remove();
   }
 }

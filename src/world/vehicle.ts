@@ -1865,6 +1865,16 @@ export class Vehicle {
   private rideFootOrbit: Vector3 | null = null;
   /** 已经烘焙过腿的那条片段（按对象认，模型换了自然失效）。 */
   private rideBakedFor: AnimationClip | null = null;
+  /**
+   * 骑手骨盆落在鞍面上方多少（占身高的比例）。默认 `PELVIS_ABOVE_SADDLE`。
+   *
+   * 压低它会给腿**多出一点余量**（行程最低点离髋更近，两骨 IK 不那么容易被夹紧），
+   * 代价是骑手看起来陷进鞍面。实测取舍曲线见 `bakeRideLegs` 的注释。
+   *
+   * 导成一个可写字段而不是写死的常数，是为了**能被量**：这个数既影响观感
+   * 又影响脚的到位精度，只能两头量出来选。
+   */
+  pelvisAboveSaddle = PELVIS_ABOVE_SADDLE;
   /** 自行车的装配节点。`null` = 没装（不是 bike 模式，或模型没到）。 */
   private rig: BikeRig | null = null;
   /** 车把当前偏转（弧度），由航向变化率推出来（见 `bikeSteerTarget`）。 */
@@ -2157,7 +2167,7 @@ export class Vehicle {
     //   那个点才是新动画该绕着转的圆心。
     const sBike = bike.scale.x || 1;
     const seat = this.rig.seat ?? new Vector3(0, SADDLE_H / sBike, 0);
-    const pelvisY = seat.y * sBike + CHAR_HEIGHT * PELVIS_ABOVE_SADDLE;
+    const pelvisY = seat.y * sBike + CHAR_HEIGHT * this.pelvisAboveSaddle;
     const saddlePos = new Vector3(
       seat.x + PELVIS_BEHIND_SADDLE / sBike,
       (pelvisY - this.pelvisH * cs) / sBike,
@@ -2954,7 +2964,7 @@ export class Vehicle {
         if (bike) {
           // 全程在**车模本地单位**里算，最后一次 `bike.matrix` 换到 group 空间。
           //   鞍面在车模空间；骨盆高度在角色空间，要除以角色缩放换到同一单位。
-          const pelvisY = seat.y * s + CHAR_HEIGHT * PELVIS_ABOVE_SADDLE;
+          const pelvisY = seat.y * s + CHAR_HEIGHT * this.pelvisAboveSaddle;
           const p = new Vector3(
             // 后方 = 车模 +X（车头在 −X）。骑手重心要在坐垫后面一点。
             seat.x + PELVIS_BEHIND_SADDLE / s,

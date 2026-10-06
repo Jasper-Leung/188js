@@ -103,6 +103,18 @@ export interface UIHooks {
   onEndingPick(ending: 'leave_door' | 'let_go'): void;
   onExportPostcard(side: 'front' | 'back'): void;
   onWriteBack(text: string): void;
+  /**
+   * 关掉结算页，**回到世界**，这一趟的进度原样留着。
+   *
+   * 它和 `onRestart` 是两件事，别混：后者走 `resetRun()` 把这一趟清干净，
+   * 而这一页原来**只有那一个出口**——玩家按了暂停里的「结束这一趟 · 收下明信片」
+   * 之后，剩下的是"丢掉全部进度重来"或者"刷新页面"。
+   *
+   * 和相位的关系写在 `main.ts` 的 `closeEndCard()` 里：结算页的相位是
+   * `endcard`，而暂停面板那两个动词各自要求 `paused` / `roaming`，
+   * 所以这一条不能靠复用它们实现。
+   */
+  onCloseEndCard(): void;
 }
 
 export interface UIOptions {
@@ -510,6 +522,26 @@ export class UI {
     this.endCard.show();
   }
 
+  /**
+   * 关掉结算页，**回到世界**。
+   *
+   * `showEndCard()` 做了两件事，这里逐件撤销：`setWorldVisible(false)` 把 HUD
+   * 收了起来（不撤的话玩家回到路上是"没有顶栏、没有小地图"的世界），
+   * `hidePanels()` 之后 `endCard.show()` 把结算页推了上来。
+   *
+   * **不动 `game` 的任何进度**——关掉一页说明"我想回去继续骑"，
+   * 不是"我要重新开始"。真正清档的是 `restart()`，那件事仍然只在
+   * 「重新开始」那一个动词后面发生。
+   *
+   * 和 `enterWorld()` 的区别：那一条是**从标题/引导页走进世界**，
+   * 会顺带重放序章；这一条是**从结算页走回世界**，序章早播过了。
+   */
+  closeEndCard(): void {
+    this.endCard.hide();
+    this.setWorldVisible(true);
+    this.hud.sync();
+  }
+
   // ---------------------------------------------------------------- 每帧
 
   /**
@@ -669,6 +701,29 @@ export class UI {
     this.perf.setTier(tier);
   }
 
+  // ---------------------------------------------------------------- 焦点
+
+  /**
+   * 把键盘焦点从界面上摘下来。
+   *
+   * **为什么需要它**：打卡是用空格触发的，而空格落在 HUD 的"脚下提示圈"
+   * 那个 `<button>` 上时，浏览器会把它变成 `document.activeElement`。
+   * 那个按钮挂了 `wireKeyActivate`，而它在 keydown 的**目标阶段**
+   * `stopPropagation()` ——于是往 window 冒泡的那条路被截断，
+   * 小游戏（也在 window 上收键）永远收不到空格。
+   *
+   * 调用时机只有一个：小游戏开始之前。那一屏上没有任何需要键盘焦点的控件
+   * （五个小游戏都是 canvas 自己收键），所以把焦点交出去是零代价的。
+   *
+   * 不用 `blur()` 的原因：焦点可能落在**别的**面板上（结算页、暂停页），
+   * 而这一层只知道自己这几个子面板。这里直接对 `document.activeElement`
+   * 判一次，落在 `.g-root` 里才摘——落在画布上就说明本来就是对的。
+   */
+  releaseFocus(): void {
+    const a = document.activeElement;
+    if (a instanceof HTMLElement && this.root.contains(a)) a.blur();
+  }
+
   // ---------------------------------------------------------------- 性能面板
 
   setPerfVisible(v: boolean): void {
@@ -700,6 +755,15 @@ export class UI {
     this.onboarding.setTouch(on);
     this.hud.setTouchMode(on);
     this.applyTouchVisibility();
+  }
+
+  /**
+   * 骑行节拍。**只转调 HUD 那一个方法**——
+   * 界面上除了"一个会缩的圈 + 五个点"之外不该有任何节拍相关的东西，
+   * 所以这里不新增面板、不新增状态，只把状态递过去。
+   */
+  setBeat(s: { open: boolean; remain: number; hits: number; goal: number; done: boolean }): void {
+    this.hud.setBeat(s);
   }
 
   /** 触屏控件 = 判定为触屏 **且** 已经进到世界里。两个条件都要。 */

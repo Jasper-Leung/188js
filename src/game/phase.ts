@@ -9,7 +9,16 @@
  *
  * 一个"动词失效但画面正常"的 bug 不该只能靠人肉看出来。所以：
  * 判定收在这里（可测），阶段在性能面板上可见（可现场读）。
+ *
+ * 末尾的 `demoInput()` 是同一件事的另一个实例：**演示模式那辆车自己往前骑**。
+ * 它也写成纯函数、由 `verify_demo_drive` 在 Node 里真的闭环跑一遍——
+ * 判据写在 `main.ts` 里的话，车往草地里开这件事没人能提前知道。
+ *
+ * 它要读中心线（`data/route`），所以本文件不再是零依赖：
+ * 但那两个模块都是纯计算，不碰 DOM、不碰 three，这个前提没变。
  */
+import { clamp, TAU } from '../core/math';
+import { TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 
 export type Phase = 'boot' | 'title' | 'onboarding' | 'roaming' | 'paused' | 'checkin' | 'minigame' | 'synthesis' | 'endcard';
 
@@ -180,3 +189,141 @@ export function interactAt(i: InteractInput): InteractKind {
   if (i.hasFragment && i.needsVisit) return 'checkin';
   return 'none';
 }
+
+// ---------------------------------------------------------------- 演示驾驶
+
+/**
+ * 演示模式的车自己往前骑。
+ *
+ * ## 原来这里是个假按钮
+ *
+ * `startDemo()` 原来只做了三件事：解锁音频、放 BGM、把对白设成自动推进。
+ * **车不动。** 评审点「演示」之后看到的是一片会呼吸的天空。
+ * 一个不能兑现的按钮比没有按钮更糟——它把"这个做不出来"写在了界面上。
+ *
+ * ## 为什么是纯函数
+ *
+ * 和 `interactAt()` 同一个理由：判定写在 `main.ts` 里，无头回归就问不到它。
+ * 演示车把方向打反这件事，肉眼在 90 秒里未必看得出来（它只是慢慢歪出去），
+ * 而它一旦歪出去，`verify_demo_drive` 的闭环回归立刻红。
+ *
+ * ## 为什么判据是"车头该往哪边摆"，而不是两个弧长
+ *
+ * 最初想的是 `demoInput(arc, targetArc)`：车在环上的参数、目标点在环上的参数。
+ * **那样什么也测不出来。** 弧长是车在中心线上的**投影**，而投影对横向偏移不敏感：
+ * 车压在中心线右侧 3m、车头也正，前方 16m 那个点落回中心线时仍然是"前方 16m"——
+ * 弧长差纹丝不动，控制器于是永远认为自己在路上，开出去再也回不来。
+ *
+ * 换成"横向偏移"也不够：偏航测不到（把点积投到路的方向上，
+ * 纯转头不产生任何横向分量，车头歪 20° 那一项恒等于 0）。
+ *
+ * 最后落在**纯追踪**上：`demoAim()` 算"车头该往右摆多少弧度"，
+ * 横向偏了与车头歪了都进这一个数——偏出去 3m 换算成 3/16 rad，
+ * 歪了 20° 就是 0.35 rad，控制器不需要知道自己错在哪一项上。
+ */
+
+/** 巡航速度（米/秒）。比极速 15 慢一档：评审要看的是路，不是车有多快。 */
+export const DEMO_CRUISE = 11;
+/**
+ * 前视距离（米）。12m ≈ 1.1 秒的预判。
+ *
+ * **这个数是量出来的，不是拍的**（`verify_demo_drive` 的那套闭环，同一条 188 环线）：
+ *
+ * | 前视 | 最大横向偏移 | 离路帧数 |
+ * |---|---|---|
+ * | 8m  | 0.95m | 0 |
+ * | 10m | 1.39m | 0 |
+ * | **12m** | **1.90m** | **0** |
+ * | 16m | 3.07m | 0 |
+ * | 20m | 4.37m | 19~50 |
+ *
+ * 路半宽 4m。20m 那一档已经骑到路肩外了——纯追踪的稳态偏差约 `L²/(2R)`，
+ * 前视越长切弯切得越狠，而 188 环线上最紧的那个弯半径只有 40m 出头。
+ */
+export const DEMO_LOOKAHEAD = 12;
+/** 每弧度瞄偏给多少转向。1.0（满舵）对应 0.4 rad ≈ 23°。 */
+const DEMO_STEER_GAIN = 2.5;
+/** 弯道收油：转向打出去多少，就从油门里扣多少。 */
+const DEMO_TURN_BRAKE = 0.55;
+/** 车速误差 → 油门。0.32 意味着差 3m/s 就给满一档。 */
+const DEMO_SPEED_GAIN = 0.32;
+
+/**
+ * 车头该往哪边摆（纯追踪）。
+ *
+ * @param px,pz 车在哪儿
+ * @param heading 车头角。车头方向是 `(-sin h, -cos h)`（`ride.ts` 的约定，-Z 为前）
+ * @param arc 车在环上的参数 [0,1)。**用 `unwrapArc()` 过滤过的那个**——
+ *        8 字自交口上现取的弧长会在两条支路之间跳，详见 `unwrapArc`。
+ * @returns 弧度，**正 = 该往右打**。已经在 [-π, π] 里。
+ */
+export function demoAim(
+  px: number,
+  pz: number,
+  heading: number,
+  arc: number,
+  lookahead = DEMO_LOOKAHEAD,
+): number {
+  // 目标：脚下这段中心线往前 lookahead 米的那个点。
+  const q = pointAtArcLength(arc * TOTAL_ARCLENGTH + lookahead);
+  const want = Math.atan2(-(q.pos.x - px), -(q.pos.z - pz));
+  let aim = heading - want;
+  // 车头角与目标角都只差一个模 2π，不归一化的话
+  // 会在 ±π 附近突然反向打一满舵。
+  while (aim > Math.PI) aim -= TAU;
+  while (aim < -Math.PI) aim += TAU;
+  return aim;
+}
+
+/**
+ * 这一帧的车把。
+ *
+ * @param aim `demoAim()` 的输出（弧度，正 = 往右打）
+ * @param speed 当前车速（米/秒）。收油要它，缺了它就是一脚到底的直线。
+ * @returns `throttle` 与 `steer`，都在 [-1, 1]。**注意油门符号与键盘相反**：
+ *        负数才是往前推（`ride.ts` 里 `vert < 0` 才是加速）。
+ */
+export function demoInput(aim: number, speed: number): { throttle: number; steer: number } {
+  const steer = clamp(aim * DEMO_STEER_GAIN, -1, 1);
+  // 目标速度以下就推，以上就收；再按转向补一脚刹车，好让车在弯里慢下来。
+  const throttle = clamp((speed - DEMO_CRUISE) * DEMO_SPEED_GAIN + Math.abs(steer) * DEMO_TURN_BRAKE, -1, 1);
+  return { throttle, steer };
+}
+
+/**
+ * 把这一帧量到的弧长接上一帧的，**并且挡掉 8 字自交口那一下跳变**。
+ *
+ * ## 它挡的是什么
+ *
+ * `nearestArcParam()` 扫全路径取最近段。188 号环线在中央穿过自己一次
+ * （`JUNCTION.center` 落在弧长 0），两条支路在那儿**同一个坐标、差了半圈弧长**。
+ * 只要车偏到两支一样近（几厘米之内），量出来的那一下就会换支，
+ * 于是前视点瞬间落到 600m 外——`demoAim()` 返回一个大角度，车被甩一舵。
+ *
+ * ## 实测口径，别把它说得更神
+ *
+ * 正常闭环跑 45 秒**一次都不触发**（去掉它，45 秒的横向偏移与车速逐帧相同）：
+ * 因为车贴着中心线骑的时候，最近的那一支永远是它自己那一支。
+ * 留着它是给"车偏到路口中心那几米"兜底——那一档能不能真的发生，
+ * 取决于车偏得多离谱，而**演示车没有玩家会去把它骑偏**。
+ * 真正守住它的是 `verify_phase` 里那三条契约断言，不是"车会抖"这种描述。
+ *
+ * ## 判据
+ *
+ * 一帧之内弧长只可能前进 `车速 × dt / 环长`（11 m/s、1/60s 固步长 ≈ 0.00015）。
+ * 超过 `maxStep` 的跳变只可能来自换支路，**丢掉它、沿用上一帧的值**。
+ *
+ * @param prev 上一帧接受的弧长。首帧传 `raw` 本身。
+ * @param raw 这一帧 `nearestArcParam()` 的结果。
+ * @param maxStep 一帧允许的最大弧长变化（归一化，环长 1.0）。
+ */
+export function unwrapArc(prev: number, raw: number, maxStep = 0.01): number {
+  let d = raw - prev;
+  // 环是首尾相接的：0.998 → 0.002 是"前进 0.004"，不是"退了 0.996"。
+  if (d > 0.5) d -= 1;
+  if (d < -0.5) d += 1;
+  if (Math.abs(d) > maxStep) return prev;
+  const next = prev + d;
+  return next < 0 ? next + 1 : next >= 1 ? next - 1 : next;
+}
+

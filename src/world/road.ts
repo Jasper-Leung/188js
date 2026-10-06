@@ -89,8 +89,30 @@ export const ROAD = {
    * 16m 的过渡带把这 0.16m 摊开，坡度约 1.6%，看不出来。
    */
   JUNCTION_FLAT_RADIUS: 16,
-  /** 完全共面的核心半径。1.5m 足够把两条 ribbon 的沥青压到同一个面上 */
-  JUNCTION_CORE_RADIUS: 1.5,
+  /**
+   * 完全共面的核心半径。
+   *
+   * **从 1.5m 改成 5.0m，理由是地形不再是一块平地。**
+   *
+   * 原来是 1.5m，配套的逻辑是"两支只差 0.16m，取 core+0.5 内的最高点当基准，
+   * 然后**只抬不降**"。这两件事在 10.66m 高差的世界上都成立。
+   *
+   * 起伏做实之后（`verify_relief`：高差 30.8m、纵坡 p95 11.5%）它们一起失效：
+   *  · 两条支路在坡上采到的地形高程差到了 **0.5m 量级**，
+   *    而"只抬不降"意味着**天然高于基准的那一支完全不被拉平**——
+   *    `max(ys[i], ...)` 里的 `ys[i]` 赢了，压平对它不起任何作用。
+   *    实测核心区偏差 9.9cm，而判据要的是 5cm。
+   *  · 同时基准取自 1.5m 圈，圈外的点自然更高，于是偏差更大。
+   *
+   * 5.0m 覆盖实测的叠合区（沥青 ±4m、夹角 75.6°，沿分支伸到 6.5m）里
+   * 真正参与深度打架的那一部分，剩下的交给 16m 的过渡带摊开。
+   *
+   * **"核心边缘会留下一道坎"这个担心在现在这套权重下不成立**：
+   * `ys[i] + (planeY - ys[i]) * w` 在 `w = 1` 与 `w < 1` 两侧是连续的
+   * （只有 `ys[i] > planeY` 那一支会被 `max` 原样保留，而那正是共面性
+   * 唯一需要它让步的地方）。
+   */
+  JUNCTION_CORE_RADIUS: 5.0,
   /**
    * 标线在多远处恢复：内圈之内完全不画，到外圈恢复完。
    * 比压平范围短——标线是平的东西，晚一点收尾更像"过路口了，线又画起来"。
@@ -298,26 +320,38 @@ export class Road {
    * 于是低的那一支要被抬 0.58m，路口中央凭空鼓一个包。
    * **半径要用来看"叠合区多大"，不能用来当"基准取多高"。**
    *
+   * ## 基准高度：取**中位**，不是最高
+   *
+   * 原来取 core 圈内的**最高**点，再配上"只抬不降"。在 10.66m 高差的世界上
+   * 两支只差 0.16m，于是"最高"≈"两支的平均"，怎么取都对。
+   * 起伏做实之后两支差到 0.5m 量级，"只抬不降"就成了 bug：
+   * **天然高于基准的那一支在 `max(ys[i], ...)` 里原样保留，一点都没被拉平。**
+   * 实测核心区偏差 9.9cm（判据要 5cm），而且路口平面比当地地面高 0.54m。
+   *
+   * 改成**中位**有两个好处：
+   *  · 填方与挖方各摊一半，土方量最小——真实路口就是这么平的。
+   *  · 平面落在两支之间，于是 `max` 那一层不再是"要不要压平"的裁判，
+   *    它只剩下"别把路埋进山里"这一个职责，语义干净了。
+   *
+   * 取样窗口是 `core + 0.5`：比完全共面的核心圈大一圈，
+   * 这样"核心区内所有点都被拉齐"是**构造上**成立的，而不是碰巧。
+   *
    * ## 权重的形状
    *
    * `w = 1 - smoothstep(0, 1, (d - core) / (flat - core))`：
    * 核心区 `w = 1`（完全共面），过渡带平滑收到 0。
    *
-   * 核心半径只有 1.5m，是为了让"从自然高度到共面高度"这一步发生在
-   * 1.5m 之内——那一段自然高度本身只变化 2cm，踩上去没有台阶。
-   * 核心给大了（比如 6m）就会在核心边缘留下一道 0.16m 的坎。
+   * ## 允许压低，但不许埋进山里
    *
-   * ## 只抬不降
-   *
-   * `max(ys, ...)` 保证压平不会把路面压到原地形以下。
-   * 它在 `ys > planeY` 时不生效，而 `ys = planeY` 处两条分支连续，
-   * 所以不会在高度曲线上留下折角。
+   * `max(拉平结果, 当地地形 + 抬升)` 兜住"别把路压到地形以下"。
+   * 这一层原来是靠 `max(ys[i], ...)` 顺手做的，现在它有了明确的职责：
+   * 压低可以，**低于地形不行**。
    *
    * ## 剩下的不平整有多少
    *
-   * `w` 在过渡带上不等于 1，所以两支在 `d = 3m` 处仍差
-   * `(1-w) × 0.16m ≈ 2cm`。深度缓冲在 30m 处的精度约 0.2mm，
-   * 2cm 是它的一百倍——Z-fighting 早就没了。
+   * `w` 在过渡带上不等于 1，所以两支在核心区外仍差 `(1-w) × 两支高差`。
+   * 两支高差实测 0.5m 量级，核心圈外 1.5m 处 `1-w ≈ 0.05`，
+   * 残差约 2~3cm——判据量的正是核心区，那里是**严格共面**的。
    */
   private flattenJunction() {
     const core = ROAD.JUNCTION_CORE_RADIUS;
@@ -325,19 +359,40 @@ export class Road {
     const cl = this.centerline;
     const ys = this.roadYs;
 
-    // 基准：交叉点附近（core + 0.5m）两条支路的较高者
-    let planeY = -Infinity;
+    // 单一共享高度：**核心区内「地形 + 抬升」的最高者**。
+    //
+    // 这一条替代了原来那套"取最高当基准 + max() 只抬不降"。原来那套在
+    // 10.66m 高差的世界上成立，是因为两支只差 0.16m；起伏做实之后它有两个
+    // 独立的问题，两个都在坡地上才显形：
+    //
+    //  1. `max(ys[i], ys[i] + (planeY - ys[i]) * w)` 在 `ys[i] > planeY` 时
+    //     原样保留 —— **天然高于基准的那一支一点都没被拉平**。实测偏差 9.9cm。
+    //  2. 我试过的"取中位 + 逐点 max(拉平, 当地地形)"更糟（19.4cm）：
+    //     那个逐点守卫在坡地上**恰好在需要它的地方生效**——上坡侧地形高，
+    //     `ground + LIFT > planeY`，于是它把路面又顶出平面。守卫和共面互相拆台。
+    //
+    // 现在只取一个数，让两支在核心区**构造上**落在同一个值上：
+    //   · 全部等于 `junctionY` → 共面是恒等式，不是"压得够准"的副产品。
+    //   · `junctionY ≥ 核心区每一处地形 + 抬升` → 路面不会被埋进山体。
+    //     代价是下坡侧有一段填方，而**坡地上的平交口必然要有填方或挖方**，
+    //     这不是妥协，是几何。填方高度 ≈ 核心区直径内的地形落差。
+    let junctionY = -Infinity;
     for (let i = 0; i < cl.length; i++) {
       const p = cl[i];
-      if (Math.hypot(p.x - PLAZA_CENTER_X, p.z - PLAZA_CENTER_Z) <= core + 0.5 && ys[i] > planeY) {
-        planeY = ys[i];
-      }
+      if (Math.hypot(p.x - PLAZA_CENTER_X, p.z - PLAZA_CENTER_Z) > core + 0.5) continue;
+      const s = sideAt(cl, i);
+      const ground = Math.max(
+        this.terrainH(this.terrain, p.x, p.z),
+        this.terrainH(this.terrain, p.x + s.x * ROAD_HALF_WIDTH, p.z + s.z * ROAD_HALF_WIDTH),
+        this.terrainH(this.terrain, p.x - s.x * ROAD_HALF_WIDTH, p.z - s.z * ROAD_HALF_WIDTH),
+      );
+      if (ground + ROAD_LIFT > junctionY) junctionY = ground + ROAD_LIFT;
     }
-    if (!Number.isFinite(planeY)) {
+    if (!Number.isFinite(junctionY)) {
       JUNCTION.planeY = Number.NaN;
       return;
     }
-    JUNCTION.planeY = planeY;
+    JUNCTION.planeY = junctionY;
 
     for (let i = 0; i < cl.length; i++) {
       const p = cl[i];
@@ -345,7 +400,9 @@ export class Road {
       if (d >= R) continue;
       const t = Math.min(Math.max((d - core) / (R - core), 0), 1);
       const w = 1 - t * t * (3 - 2 * t);
-      ys[i] = Math.max(ys[i], ys[i] + (planeY - ys[i]) * w);
+      // 核心区内 w ≡ 1，两支都变成 junctionY —— 共面。
+      // 过渡带上 w 平滑收到 0，路面交回它自己的地形高程。
+      ys[i] = ys[i] + (junctionY - ys[i]) * w;
     }
   }
 
@@ -546,21 +603,25 @@ function makeRoadMaterial(): MeshStandardMaterial {
     dithering: true,
   });
   patchStandard(mat, ROAD_PATCH, {
-    // 这三个常量带 source_color，所以它们是 **sRGB**。
+    // 这几个常量带 source_color，所以它们是 **sRGB**。
     // 沥青的线性反照率大致 0.10~0.15，折回 sRGB 是 0.35~0.42。
     // 旧值 0.168 折成线性只有 0.023——比真实沥青暗四到五倍，
     // 近处路面读成蓝紫霉斑，而且黄昏把太阳压到 9° 时路面直接黑掉。
     asphalt_color: { value: [0.355, 0.35, 0.34] },
     grain_dark_color: { value: [0.215, 0.212, 0.206] },
-    dirt_color: { value: [0.3, 0.256, 0.184] },
-    edge_line_color: { value: [0.9, 0.9, 0.858] },
-    center_line_color: { value: [0.928, 0.928, 0.898] },
+    // 泥土：往土黄偏。原值 (0.30, 0.256, 0.184) 偏灰，
+    // 配上白边线读成"国道路肩"；土黄 + 无标线才读成"没人管的乡道"。
+    dirt_color: { value: [0.34, 0.288, 0.196] },
+    // **不再有白线。** 这两个颜色现在是辙痕的两条：被车轮磨光压实的深色带。
+    // 见 ROAD_PATCH 里"辙痕"那一节。
+    rut_dark_color: { value: [0.238, 0.216, 0.182] },
+    rut_light_color: { value: [0.402, 0.372, 0.322] },
     road_half_width: { value: ROAD_HALF_WIDTH },
     total_half_width: { value: TOTAL_HALF_WIDTH },
     total_width: { value: TOTAL_WIDTH },
     tile_size: { value: UV_SCALE },
     roughness_base: { value: 0.85 },
-    // 交叉口：着色器按到**另一条支路中心线**的横向距离淡出标线。
+    // 交叉口：着色器按到**另一条支路中心线**的横向距离淡出路面细节。
     // 两条轴与铺面半宽由 `measureJunctionAxes()` 量出，不是写死的。
     junction_center: { value: [PLAZA_CENTER_X, PLAZA_CENTER_Z] },
     junction_axis_a: { value: [JUNCTION.axisA.x, JUNCTION.axisA.z] },
@@ -579,8 +640,16 @@ function writeVert(arr: Float32Array, i: number, x: number, y: number, z: number
   arr[i * 3 + 2] = z;
 }
 
-/** 每个中心线点的横向单位向量（法线方向） */
-function sideAt(cl: Vec3Flat[], i: number): { x: number; z: number } {
+/**
+ * 每个中心线点的横向单位向量（法线方向）。
+ *
+ * **导出给 `verify_relief` 用**：那条判据要沿中心线复算路面高度来量纵坡，
+ * 而路面高度是"左中右三点取最高"——三点里的左右两点要的就是这个横向向量。
+ * 导出它而不是让回归自己写一份，是因为**两份切线约定必然会漂**：
+ * 一份用前向差分、一份用中心差分，纵坡读数就会差一个量级，
+ * 而两边都是绿的。
+ */
+export function sideAt(cl: Vec3Flat[], i: number): { x: number; z: number } {
   const n = cl.length;
   let tx: number;
   let tz: number;
