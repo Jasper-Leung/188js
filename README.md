@@ -3,6 +3,24 @@
 把 Godot 4.6 的《188号礼物》移植到 Web。玩法、数值、文案 1:1 保持，
 表现层与工程结构重做，并把**低配兼容**当成一等设计目标。
 
+## 下载
+
+不想装环境的话，直接拿装好的版本，Windows / macOS / Linux 都有：
+**[Releases](https://github.com/Jasper-Leung/188js/releases)**
+（浏览器直接玩：<https://jasper-leung.github.io/no188-gift-web/>）
+
+| 你的系统 | 认哪个后缀 | 怎么装 |
+|:---|:---|:---|
+| Windows 10 / 11（64 位） | `x64-setup.exe`，约 19MB | 双击，一路下一步，**不需要管理员** |
+| macOS（Apple Silicon + Intel 通用） | `universal.dmg` | 拖进「应用程序」 |
+| Ubuntu / Debian / Mint 系 | `.deb` | `sudo apt install ./<包名>.deb` |
+| 其它 Linux | `.AppImage` | `chmod +x` 之后双击 |
+
+**包没有签名**，第一次打开被系统拦一下是正常的：macOS 右键 → 打开，
+Windows 点「更多信息 → 仍要运行」。自己打包见[部署](#部署)一节。
+
+## 开发
+
 ```bash
 npm install
 npm run data:extract     # 从 Godot 源项目机械提取数据表（已提交产物，可跳过）
@@ -16,6 +34,34 @@ npm run build            # 产物在 dist/
 `?touch=1` / `?touch=0` 强制挂 / 不挂触屏控件。
 `window.gift188` 是只读状态出口（车在哪、离路多远、draw call 数）。
 `F8` 开性能面板：帧率 / 绘制调用 / 三角面 / 渲染分辨率 / **车速 / 是否在路上** / 画质档。
+
+---
+
+## 参赛提交页
+
+赛事表单要的三个字段——**演示录屏视频 / 在线 DEMO 链接 / 下载链接**——
+收在一个页面里，评委点开就能拿齐：
+
+**<https://jasper-leung.github.io/no188-gift-web/submission/>**
+
+| 字段 | 那一页上是什么 |
+|:---|:---|
+| 演示录屏视频 | 内嵌播放（3:52 英配解说 walkthrough），另有直链 mp4 可下 |
+| 在线 DEMO 链接 | 一个按钮就打开，免登录、免安装 |
+| 下载链接 | 源码 zip + 本地运行三步命令（可一键复制） |
+
+页面源码在 [`submission/`](submission/README.md)。链接的**唯一来源**是
+`submission/site.json`：`npm run build` 把它烘进 `dist/submission/`，
+而 `verify_submission` 守着这一页——三件东西都在、链接与配置一致、
+页面上写的体积等于文件真实体积、不许出现游戏里其实没有的卖点。
+
+```bash
+npm run submission:links   # 打印现在对外宣称的几个地址（改完链接先跑这个）
+npm run package:web        # 打一个可分发 zip，给「下载链接」那一栏用
+```
+
+游戏本身仍在 `dist/` 根目录，位置一个字没动（`base: './'` 决定了它只能在根，
+详见 `vite.config.ts` 的注释）；提交页走的是不经打包的路子，换个主机也能直接用。
 
 ---
 
@@ -297,6 +343,43 @@ Worker；本项目没有请求会进 Worker，所以插件在这里没用，却�
 
 `.github/workflows/pages.yml` 在每次推 main 时自动构建部署。**两套部署会同时存在**，
 改完记得确认自己改的是哪一个。
+
+### 桌面端 Release（跨平台发版）
+
+Tauri 依赖各平台原生的 webkit 和工具链，**交叉编译是走不通的**——本机编出来
+的包到别的系统上跑不起来。所以 macOS / Windows / Linux 三份产物是三台
+runner 各编各的，由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 负责：
+
+```bash
+# 1. 改 src-tauri/tauri.conf.json 里的 version
+# 2. 打同名 tag
+git tag v1.0.0
+# 3. 推 tag，流水线自己跑完并发版
+git push origin v1.0.0
+```
+
+| 平台 | 产物 | 说明 |
+|:---|:---|:---|
+| macOS | `.dmg` | **universal**：M 芯片和 Intel 共用一个文件，下载的人不用先判断自己是哪种 Mac |
+| Windows | `-setup.exe` | NSIS，`installMode: currentUser`，免管理员 |
+| Linux | `.deb` + `.AppImage` | 前者给 Ubuntu/Debian 系，后者给其它发行版 |
+
+三件容易踩的事，都是改这个流水线时踩出来的：
+
+- **版本号只认 `tauri.conf.json`**，tag 只是标签。产物名用的是前者，
+  所以 tag 和 `version` 对不上时，CI 会直接失败——否则页面上写着 v1.2.0、
+  点进去包里其实是 1.0.0，这种错三个 job 全绿也看不出来。
+- **Release 先建草稿、产物传齐了才 publish**。中途失败时页面上看不到这个版本，
+  而不是看到一个缺了两个平台的版本。重跑同一次流水线会复用那个草稿。
+- **每个平台的 `--bundles` 是逐个平台写的**，因为它按当前系统校验取值
+  （在 Windows 上写 `--bundles deb` 会直接报 `invalid value`）。
+  想加 `msi` / `rpm` 就改矩阵里那一行，不用动别处。
+
+`npm run verify` 也在发版流水线上当门：桌面端把整个 `dist/` 打进二进制，
+一条跑不过的断言会变成**所有平台**的安装包里都有的 bug。
+
+本机（Windows）想自己出包：`npm run desktop:build`，
+产物在 `src-tauri/target/release/bundle/`。
 
 ### 两条都必须成立的假设
 

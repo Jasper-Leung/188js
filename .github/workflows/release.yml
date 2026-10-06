@@ -1,0 +1,247 @@
+name: 桌面端 Release
+
+# 发版只有一条正路：
+#   1. 改 src-tauri/tauri.conf.json 里的 version
+#   2. 打同名 tag（v1.0.0）
+#   3. 推 tag
+# workflow_dispatch 是补救口子（tag 打漏了、或者想在 main 上先试跑一遍流水线）。
+#
+# 桌面端跨平台**只能**靠 CI：Tauri 依赖各平台原生的 webkit / 工具链，
+# 本机交叉编译出来的包是跑不起来的（见 tauri.app「跨平台编译」）。
+# 所以这三台 runner 是三个独立的构建环境，不是三份配置。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发的 tag。留空则按 src-tauri/tauri.conf.json 的 version 自动取 v<version>'
+        required: false
+        type: string
+
+# 建 release、传产物、补推 tag 都要写权限；默认的 read-all 不含 write。
+permissions:
+  contents: write
+
+# 同一次发版只跑一遍。
+# 但**不**取消上一次：发版中途失败时重跑一遍，比掐掉重跑常见得多。
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  # ── 第 1 步：把回归跑过，再建一个**空的草稿** release ──────────────────────
+  # 产物全齐之后才 publish（见最后一个 job）。这样中途失败时页面上
+  # **看不到**这个版本，而不是看到一个只有 Windows、缺 macOS/Linux 的版本。
+  prepare:
+    name: 回归 + 建 Release 草稿
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 要判断 tag 存不存在，浅克隆（默认 depth=1）看不到 tag。
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # ★ 回归是上线的门，理由和 pages.yml 里同一段：
+      # 桌面端把整个 dist/ 打进二进制，一个跑不过的断言会变成
+      # **所有平台**的安装包里都有的 bug——比网页版更贵，因为要重发三个包。
+      - run: npm run typecheck
+      - run: npm run verify
+
+      - id: tag
+        name: 定下这次发的 tag
+        env:
+          # 用户输入一律走 env 进来，不直接插值进 shell 脚本。
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          else
+            TAG="v$VERSION"
+          fi
+
+          # 产物名里的版本号来自 tauri.conf.json，**不是**来自 tag。
+          # 两者不一致的后果是：页面上写着 v1.2.0，点进去的包里其实是 1.0.0。
+          # 这种错在 CI 里完全看不出来（三个 job 都会绿），所以在这里拦住。
+          case "$TAG" in
+            v*) TAG_VERSION="${TAG#v}" ;;
+            *)  TAG_VERSION="$TAG" ;;
+          esac
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "::error::tag $TAG 的版本（$TAG_VERSION）与 src-tauri/tauri.conf.json 的 version（$VERSION）不一致。产物名用的是后者——先把 version 改成 $TAG_VERSION 再打 tag。" >&2
+            exit 1
+          fi
+
+          # 手动跑、且这个 tag 还不存在时，在触发的那次提交上补一个。
+          # 推 tag 触发的那条路径里 tag 已经在远端了，这里是 no-op。
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "补建并推送 tag $TAG -> $GITHUB_SHA"
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - id: create
+        name: 建 Release 草稿
+        uses: actions/github-script@v7
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        with:
+          script: |
+            const fs = require('fs');
+            const tag = process.env.TAG;
+            const version = tag.replace(/^v/, '');
+            const body = fs
+              .readFileSync('.github/release-body.md', 'utf8')
+              .replace(/__VERSION__/g, version);
+
+            // 草稿 release 用 getReleaseByTag 查**不到**（那个接口只返回已发布的），
+            // 所以走 listReleases 自己按 tag_name 找：重跑一次流水线要能接上
+            // 上次那个草稿，而不是撞一个 "already_exists"。
+            const { data: all } = await github.rest.repos.listReleases({
+              ...context.repo,
+              per_page: 100,
+            });
+            const found = all.find((r) => r.tag_name === tag);
+
+            if (found) {
+              core.info(`复用已存在的 release ${tag}（#${found.id}）`);
+              // 顺带把标题和正文刷回模板：重跑时不要留着上一版的说明。
+              const { data } = await github.rest.repos.updateRelease({
+                ...context.repo,
+                release_id: found.id,
+                name: `188号礼物 v${version}`,
+                body,
+                draft: true,
+                prerelease: false,
+              });
+              core.setOutput('release_id', data.id);
+            } else {
+              const { data } = await github.rest.repos.createRelease({
+                ...context.repo,
+                tag_name: tag,
+                name: `188号礼物 v${version}`,
+                body,
+                draft: true,
+                prerelease: false,
+              });
+              core.info(`已建 release ${tag}（#${data.id}），草稿`);
+              core.setOutput('release_id', data.id);
+            }
+
+  # ── 第 2 步：三个平台各编各的，把产物传进同一个 release ────────────────────
+  build:
+    name: 打包 ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      # 一个平台挂了另外两个照样能传上去（下面的 publish 反正不会跑），
+      # 这样一个平台的编译错误不会把另外两个的结果一起吞掉。
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS（Apple Silicon + Intel）
+            platform: macos-latest
+            # 通用二进制：一个 dmg 两边都能跑，不用让下载的人先判断自己是哪种 Mac。
+            # universal 需要两个 rust target 都装上（见下面 rust-toolchain 的 targets）。
+            args: --target universal-apple-darwin --bundles dmg
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+          - label: Windows
+            platform: windows-latest
+            # 只 nsis + currentUser：双击即装、不要管理员（tauri.conf.json 里配的）。
+            # 想要 msi 的话在这里加上去。
+            args: --bundles nsis
+            rust-targets: ''
+
+          - label: Linux
+            platform: ubuntu-24.04
+            # deb 给 Ubuntu/Debian 系，AppImage 给其它发行版。
+            # 想要 rpm 就在这里加 rpm。
+            args: --bundles deb,appimage
+            rust-targets: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Linux 的原生依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # 这一行是 Tauri 官方的 Linux 依赖清单，**照抄别删**：
+          # - libwebkit2gtk-**4.1**-dev 是 Tauri v2 的（v1 是 4.0，名字不一样）
+          # - libxdo-dev / libssl-dev 缺了会在 cargo 链接阶段才炸，
+          #   错误信息长到看不出是少了哪个包
+          # - patchelf 用来改 AppImage 里可执行文件的 rpath
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl wget file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # 只在 macOS 那条矩阵上有值，其余平台是空串（省掉一点装 target 的时间）。
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+
+      # 放在最后：tauri-action 自己会跑 tauri.conf.json 里的 beforeBuildCommand
+      # （npm run build → vite build → dist/），所以上面不要再手动 build 一次。
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+  # ── 第 3 步：三个平台都传完了，才把它从草稿放出来 ──────────────────────────
+  publish:
+    name: 发布 Release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+        with:
+          script: |
+            const id = Number(process.env.RELEASE_ID);
+            await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: id,
+              draft: false,
+              prerelease: false,
+            });
+            core.info(`release #${id} 已发布：三个平台的产物都在里面了。`);
