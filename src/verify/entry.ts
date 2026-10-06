@@ -7107,7 +7107,15 @@ check('verify_paper_backing', () => {
     }
   }
 
-  // 2. 标题页那张卡：**保持半透明**，但不许薄过 0.8。
+  // 2. 标题页那张卡：**保持半透明**，但不许薄过 0.9。
+  //
+  // 下限从 0.8 提到 0.9 是量出来的。底色是 `236×α + 45×(1-α)` 撑起来的
+  // 浅色（45 是主视觉里淡墨山体实测的最暗处），而卡上最短的那一档字是
+  // `--ink-soft` #6b5f4c：0.86 → 3.82:1，0.90 → 4.10:1，0.95 → 4.48:1。
+  // 实机截图里「字浮在画上、发灰」就是 0.86 那一档。
+  // 反过来 `--ink-faint` #9a8d76 在任何一档都只有 2.0–2.3:1，
+  // **加厚纱救不了它**——所以标题页上"有意义"的字一律用 `--ink-soft`，
+  // 那一档只留给版权与几何调试这类真正无关紧要的字。
   asserts++;
   {
     const bg = lastBg('.g-root .g-card-title');
@@ -7119,10 +7127,11 @@ check('verify_paper_backing', () => {
         probs.push(`.g-card-title 被改成实色了（${bg}）—— 主视觉会被一张纸盖住`);
       } else if (a === -1) {
         probs.push(`.g-card-title 用了 color-mix()（${bg}）—— 判据量不了它的浓度`);
-      } else if (a < 0.8) {
+      } else if (a < 0.9) {
         probs.push(
-          `.g-card-title 的纱只有 ${a}：压到淡墨山体（rgb≈45）只剩 rgb(155) 上下，` +
-            '卡上每一行字都会浮在中灰上',
+          `.g-card-title 的纱只有 ${a}：卡上最短的那档字（--ink-soft #6b5f4c）` +
+            '压在淡墨山体（最暗处约 rgb(45)）上只有 3.8:1 上下，读不出来' +
+            '（0.90 → 4.1:1，0.95 → 4.5:1）',
         );
       }
     }
@@ -7146,11 +7155,66 @@ check('verify_paper_backing', () => {
     }
   }
 
+  // 4. **不许用逗号语法写带通道变量的颜色函数**——那是本项目唯一一个
+  //    「判据全绿、而页面上什么都不剩」的 bug。
+  //
+  //    `--pw` / `--pg` / `--pb` 是**裸 calc 值**（`calc(236 - var(--dusk) * 78)`）。
+  //    裸 calc 通道只在**斜杠语法** `rgb(a b c / α)` 里能解析；写成逗号语法的
+  //    `rgba(var(--pw) …, 0.86)` 时整条声明 invalid at computed-value time，
+  //    `getComputedStyle` 读回来是 `rgba(0, 0, 0, 0)`。
+  //
+  //    标题卡的那层纱就是这么丢的：它从上线起**压根没有底**，
+  //    而 `verify_paper_backing` 读到声明文本里的 `0.86` 判绿——
+  //    `CSS.supports()` 对这条也返回 true（它只查语法，不查变量能否求值）。
+  //
+  //    静态判据看不见计算值，所以这里不判「浓度对不对」，只**禁掉会静默失效
+  //    的那种写法**。正例：`rgb(var(--pw) calc(var(--pg) + 2) var(--pb) / 0.95)`。
+  asserts++;
+  {
+    // 不能用 `[^)]*` 去够到逗号：`rgba(var(--pw) calc(var(--pg) + 2) var(--pb), 0.95)`
+    // 里面有一层 `calc(...)`，第一个 `)` 就截断了，第一版判据因此**对真正的
+    // bug 判绿**——和被它抓的那条 bug 是同一类毛病。所以老老实实配括号。
+    const balanced = (open: number): number => {
+      let depth = 0;
+      for (let i = open; i < src.length; i++) {
+        if (src[i] === '(') depth++;
+        else if (src[i] === ')' && --depth === 0) return i;
+      }
+      return -1;
+    };
+    /** 顶层逗号（不在任何一层括号里）——它就是「用了旧式逗号语法」。 */
+    const hasTopLevelComma = (body: string): boolean => {
+      let depth = 0;
+      for (const ch of body) {
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (ch === ',' && depth === 0) return true;
+      }
+      return false;
+    };
+    const re = /\brgba?\(/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src)) !== null) {
+      const open = m.index + m[0].length - 1;
+      const close = balanced(open);
+      if (close < 0) continue;
+      const body = src.slice(open + 1, close);
+      if (!/var\(\s*--(?:pw|pg|pb|paper)\b/.test(body)) continue;
+      if (!hasTopLevelComma(body)) continue; // 斜杠语法，正例
+      probs.push(
+        `旧式逗号语法 ${m[0]}${body}) 不会生效：--pw/--pg/--pb 是裸 calc 值，` +
+          '只能喂给斜杠语法 rgb(a b c / α)，否则整条声明 invalid at computed-value time、' +
+          '底下等于没画',
+      );
+      re.lastIndex = close;
+    }
+  }
+
   return expect(
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : '碎片栏实色 · 标题卡薄纱但 α≥0.8 · 顶栏渐隐落在固定高度的空区里',
+      : '碎片栏实色 · 标题卡薄纱但 α≥0.9 · 顶栏渐隐落在固定高度的空区里 · 没有静默失效的逗号语法颜色',
     asserts,
   );
 });
