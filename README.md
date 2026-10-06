@@ -467,6 +467,28 @@ isolate at all" into a daily gamble. Use `preview:cf` to try things in workerd.
 `.github/workflows/pages.yml` builds and deploys on every push to main. **Two
 deployments exist at once** — remember which one you're changing.
 
+#### Pages caches `index.html`, so a deploy does not reach returning visitors at once
+
+The JS and CSS filenames are content-hashed, which is exactly right — but it also
+means **the only thing that decides which build a browser runs is `index.html`**,
+and GitHub Pages serves that from cache. The symptom is precise and misleading:
+
+1. You push a fix; the deploy succeeds; `web_fetch` on `/188js/` shows the new
+   hashed bundle.
+2. You open the site in a browser that has visited it before. **It still runs
+   the old build** — because the HTML it cached last time still points at the old
+   hash. This was observed here: after `15f1625` the live HTML already advertised
+   `index-D5KIwlld.js`, yet a freshly opened tab still rendered the previous
+   build until the URL was given a cache-busting query.
+
+**How to tell the two apart**: read `dist/index.html` (or the live one with a
+cache-busting query) and compare the `assets/index-*.js` filename against what
+the browser actually ran. A stale *filename* is a cache issue; a fresh filename
+with old behaviour is a real regression.
+
+Pages gives no way to set response headers, so the fix has to live on the
+**Cloudflare** side (see below) if you care about it.
+
 ### Desktop releases (cross-platform)
 
 Tauri depends on each platform's native webkit and toolchain, and
