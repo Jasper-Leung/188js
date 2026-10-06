@@ -15,6 +15,7 @@
     "submission:build": "node tools/build-submission.mjs",
     "submission:links": "node tools/build-submission.mjs --check",
     "package:web": "node tools/package-web.mjs",
+    "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
     "typecheck": "tsc --noEmit",
