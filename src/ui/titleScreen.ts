@@ -35,7 +35,7 @@ import { t } from '../i18n';
 import { TIER_KEYS, qualityHint, tierSummary } from '../core/settings';
 import type { Tier } from '../core/capability';
 import type { Capability } from '../core/capability';
-import { button, clear, el, note, row, rule, setDisabled, setFlag, setShown, setText } from './dom';
+import { button, clear, el, note, row, rule, setAttr, setDisabled, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import type { UIHooks } from './index';
 
@@ -316,12 +316,15 @@ export class TitleScreen {
     setShown(this.qualityBody, this.qualityOpen);
     // 折叠时不能只把内容藏起来就算完——玩家会以为这一档没有代价。
     // 摘要行留在折叠线上，所以标题按钮自己就是那一行摘要。
-    setText(
-      this.qualityToggle,
-      this.qualityOpen
-        ? `${t('quality')} ${t('fold_close')}`
-        : `${t('quality')} · ${t(TIER_KEYS[this.picked])} ${t('fold_open')}`,
-    );
+    //
+    // ⚠ **可见文字里不要拼 `fold_open` / `fold_close`。**
+    // 实机上线后读到的是 `Quality · High show` ——「展开」两个字和右边的 ▾
+    // 说的是同一件事，拼在一起却成了一句断掉的英文（中文侧「画质 · 高 展开」
+    // 同样别扭）。这两个键不是没用，它们该待在 `aria-label` / `title` 里：
+    // 那里本来就需要一句完整的话，而读屏用户拿到的正是这个状态。
+    const label = `${t('quality')} · ${t(TIER_KEYS[this.picked])}`;
+    setText(this.qualityToggle, label);
+    setAttr(this.qualityToggle, 'aria-label', `${label} ${t(this.qualityOpen ? 'fold_close' : 'fold_open')}`);
     setFlag(this.qualityToggle, 'is-open', this.qualityOpen);
   }
 

@@ -8305,6 +8305,24 @@ check('verify_first_run', () => {
     probs.push('demo_loading 和 demo_start 是同一句 —— 按钮在等车时看不出在等什么');
   }
 
+  // 折叠状态**不许进可见文字**。
+  //
+  // 上线后实机读到的是 `Quality · High show` ——「展开」两个字和右边的 ▾
+  // 说的是同一件事，拼在一起却成了一句断掉的英文（中文侧同样别扭）。
+  // 它能上线是因为两边都"有这条文案"，只是没人把它摆出来看过。
+  // 判据：折叠的两个键只能经 `setAttr` 进 aria-label，不能经 `setText` 上屏。
+  asserts++;
+  {
+    const setTextFold = /setText\s*\([^)]*fold_(?:open|close)/.test(title);
+    const setAttrFold = /setAttr\s*\([^)]*fold_(?:open|close)/.test(title);
+    if (setTextFold) {
+      probs.push('titleScreen.ts 把 fold_open / fold_close 拼进了可见文字 —— 折叠线上会出现「Quality · High show」这种断句');
+    }
+    if (!setAttrFold) {
+      probs.push('titleScreen.ts 没有把 fold_open / fold_close 放进 aria-label —— 读屏用户拿不到折叠状态');
+    }
+  }
+
   // ④ 心神三处同名，且不再是 Heart。
   //
   //    `verify_i18n_glossary` 已经钉住"引导页教的词 == HUD 用的 label"，

@@ -354,7 +354,7 @@
     "cap_reason_restored": "Keeping your saved quality — this machine reports %s",
     "demo_loading": "Demo · loading the bike",
     "demo_loading_hint": "The bicycle is still on its way — the demo starts the moment it lands.",
-    "fold_open": "show",
-    "fold_close": "hide"
+    "fold_open": "Show settings",
+    "fold_close": "Hide settings"
   }
 }
