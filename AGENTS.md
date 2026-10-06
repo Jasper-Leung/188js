@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：52 条 / 796 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：57 条 / 829 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 52 / FAIL 0 / 没跑成 0`，
-断言 796 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 57 / FAIL 0 / 没跑成 0`，
+断言 829 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -127,8 +127,18 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 47 条 / 713 断言
+npm run verify      # 57 条 / 829 断言
 ```
 
 三条都过再提交。`dist/` 与 `package-lock.json` 不进版本库；
-`public/` 里的资产已经压到 ~5MB，**提交时确认没被压回原图**。
+`public/models` 现在是 **16.84 MB**（22 个 GLB，全部已过 Meshopt），
+**其中 53% 压在三个文件上**：`motorcycle.glb` 4.82 / `bicycle.glb` 2.79 /
+`survivor.glb` 1.33 MB。`bicycle.glb` 在首屏关键路径上。
+
+> ⚠ **资产管线在干净克隆上跑不起来，这不是能靠重跑解决的。**
+> `tools/compress-textures.mjs` 的输入是**仓库之外**的 Godot 源项目
+> （默认 `D:/code/20260926/no188/…`，可用 `GIFT188_SRC_MODELS` /
+> `GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA` 覆盖），中间产物落在被 gitignore 的
+> `.cache/tex/`。所以 `npm run assets:all` **要么压，要么响亮地报错**——
+> 它不会"成功"地产出一个空缓存（那是上一版的行为：空数组 + `exit(0)`）。
+> 要真正减小体积，得先把源项目指过来。

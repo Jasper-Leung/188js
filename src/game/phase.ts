@@ -241,6 +241,30 @@ export const DEMO_CRUISE = 11;
  * 前视越长切弯切得越狠，而 188 环线上最紧的那个弯半径只有 40m 出头。
  */
 export const DEMO_LOOKAHEAD = 12;
+/**
+ * 按当前车速换算前视距离，让**预判时间**恒定，而不是让距离恒定。
+ *
+ * ## 为什么不能写死 12m
+ *
+ * `DEMO_LOOKAHEAD = 12` 那张标定表是在 **11 m/s** 下量出来的（12m ≈ 1.1 秒）。
+ * 前视的物理意义是**时间**：同样 12m，11 m/s 时是 1.1 秒的预判，
+ * 6 m/s（徒步极速）时变成整整 2 秒——纯追踪开始大幅摆头，实测演示车
+ * 在 +238s ~ +309s 之间里程零增长，是卡住而不是慢。
+ *
+ * 所以这里按速度缩放，把那张表锚在它被量出来的那一档上：
+ * 11 m/s 时返回 12m（与标定表逐字相符），别的速度按比例缩放。
+ * 上限 20m 是标定表里"开始骑出路肩"的那一档，不许越过。
+ *
+ * 有了它，`mountDemoVehicle()` 万一切不到自行车也不会把演示开坏——
+ * 那时前视自动缩到 6.5m，仍然是约 1.1 秒。
+ */
+export function demoLookahead(speed: number): number {
+  const v = Math.max(0, speed);
+  return Math.min(DEMO_LOOKAHEAD * (v / DEMO_CRUISE), DEMO_LOOKAHEAD_MAX);
+}
+/** 标定表里 20m 那一档会骑到路肩外，所以这是硬上限。 */
+const DEMO_LOOKAHEAD_MAX = 20;
+
 /** 每弧度瞄偏给多少转向。1.0（满舵）对应 0.4 rad ≈ 23°。 */
 const DEMO_STEER_GAIN = 2.5;
 /** 弯道收油：转向打出去多少，就从油门里扣多少。 */
@@ -262,10 +286,13 @@ export function demoAim(
   pz: number,
   heading: number,
   arc: number,
-  lookahead = DEMO_LOOKAHEAD,
+  lookahead?: number,
+  speed = DEMO_CRUISE,
 ): number {
-  // 目标：脚下这段中心线往前 lookahead 米的那个点。
-  const q = pointAtArcLength(arc * TOTAL_ARCLENGTH + lookahead);
+  // 不传就按当前车速算前视，见 `demoLookahead()`。
+  const ahead = lookahead ?? demoLookahead(speed);
+  // 目标：脚下这段中心线往前 ahead 米的那个点。
+  const q = pointAtArcLength(arc * TOTAL_ARCLENGTH + ahead);
   const want = Math.atan2(-(q.pos.x - px), -(q.pos.z - pz));
   let aim = heading - want;
   // 车头角与目标角都只差一个模 2π，不归一化的话
@@ -280,13 +307,20 @@ export function demoAim(
  *
  * @param aim `demoAim()` 的输出（弧度，正 = 往右打）
  * @param speed 当前车速（米/秒）。收油要它，缺了它就是一脚到底的直线。
+ * @param maxSpeed 当前载具的极速。巡航目标必须**不超过它**——否则控制器
+ *        会一直要一个够不到的速度，油门永久贴在 -1 上，
+ *        而那个 -1 里没有任何信息，演示车读作"一直在拼命但不动"。
+ *        徒步极速 6 而 `DEMO_CRUISE` 是 11，就是这么卡住的。
  * @returns `throttle` 与 `steer`，都在 [-1, 1]。**注意油门符号与键盘相反**：
  *        负数才是往前推（`ride.ts` 里 `vert < 0` 才是加速）。
  */
-export function demoInput(aim: number, speed: number): { throttle: number; steer: number } {
+export function demoInput(aim: number, speed: number, maxSpeed = DEMO_CRUISE): { throttle: number; steer: number } {
   const steer = clamp(aim * DEMO_STEER_GAIN, -1, 1);
+  // 巡航再慢也要给载具极速的八成：太低的话车在起点几乎不动，
+  // 评审看到的是"一辆停着的车"。
+  const cruise = Math.min(DEMO_CRUISE, maxSpeed * 0.8);
   // 目标速度以下就推，以上就收；再按转向补一脚刹车，好让车在弯里慢下来。
-  const throttle = clamp((speed - DEMO_CRUISE) * DEMO_SPEED_GAIN + Math.abs(steer) * DEMO_TURN_BRAKE, -1, 1);
+  const throttle = clamp((speed - cruise) * DEMO_SPEED_GAIN + Math.abs(steer) * DEMO_TURN_BRAKE, -1, 1);
   return { throttle, steer };
 }
 

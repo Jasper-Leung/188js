@@ -151,11 +151,30 @@ verify_economy     all-clear 799 / all-buy 1010 / shortfall 211 / riding only 42
 verify_water       3 bowls / water level -3.4 always below the terrain floor / shoreline ≥ 16 m from the road
 verify_mini_game   15 sessions × 3 tries each / first visit = your own item / never two of the same in a row
 verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / low tier kills shadows and grass
+verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
 verify_i18n        234 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
+verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_terrain     800 m / 128 cells / 6.25 m per cell
 ```
+
+`verify_first_run` is the newest one, and it exists because of a whole family of
+bugs that the rest of the suite structurally cannot see. They are all the same
+shape — *the code is fine, the interface gives the player no way out*:
+
+- The demo's first vehicle **must** be the bicycle, but the bicycle GLB arrives
+  on a background chain the title screen deliberately does not wait for. When it
+  was late, `set('bike')` was refused by `canEnter()` and the 90-second showpiece
+  — for a **3D cycling game** — was a person running with a backpack, with
+  nothing on screen saying why. The fix is not to wait: it is to make the wait
+  **visible** (button disabled, `demo_loading` on it) and to put the player on
+  the bicycle the instant it lands, unless they have already pressed `E`.
+- The shop reuses the `checkin` phase, and the `Escape` branch only knew
+  `paused` / `roaming` — so inside a shop `Escape` did nothing at all. `Esc` is
+  the first key a stuck player presses.
+
 
 **This suite caught a real bug during the port**: `hash2d` was missing one of
 the source project's `fmod(..., 1.0)` layers, so the noise range became
@@ -335,11 +354,31 @@ site exclusion list, or turn off its browser integration.
 
 | | Source | Output | How |
 |:---|:---|:---|:---|
-| 3D models | 22.3 MB | **5.0 MB** | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression |
+| 3D models | 22.3 MB | **16.84 MB** ⚠ | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression. All 22 GLBs carry `EXT_meshopt_compression`. ⚠ *Not* the 5.0 MB this table used to promise — see below |
 | Textures | 3.9 MB | 1.3 MB | as above |
 | Font | 24.4 MB | **181 KB** (first screen) | subset to the 880 characters that actually appear in the game + WOFF2 |
 | Font (handwritten) | 24.4 MB | 404 KB (lazy) | the ~3500 most common Chinese characters, loaded only when the back of the postcard is opened |
 | Audio | 2.2 MB | 2.2 MB | as-is (already ogg; recompressing hurts the ambience) |
+
+### ⚠ The models are 3.4× over target, and re-running the pipeline won't fix it
+
+The source GLBs live **outside this repository** (the Godot project — default
+`D:/code/20260926/no188/…`, overridable with `GIFT188_SRC_MODELS` /
+`GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA`), and the intermediate `.cache/tex/` is
+gitignored. So on a clean clone `npm run assets:all` now **fails loudly**. It
+used to do the opposite: `existsSync(…) ? … : []` gave it an empty job list, it
+printed "no source models found, skipping", and exited **0** — leaving
+`public/models/` at its previous size with every downstream number in this
+README still looking correct.
+
+Half the budget sits in three files, and one of them is on the critical path:
+
+| File | Size | Note |
+|:---|---:|:---|
+| `motorcycle.glb` | 4.82 MB | optional vehicle, its own loading chain |
+| `bicycle.glb` | **2.79 MB** | **first screen** — the first thing the player looks at |
+| `survivor.glb` | 1.33 MB | the player character |
+| the other 19 | 7.90 MB | |
 
 **Meshopt rather than Draco**: a 20 KB decoder versus 250 KB, with no hitch on
 first decode. On a low-end machine "the decode stutters for a moment" costs more
@@ -353,9 +392,13 @@ write-out step with `colourspace: parameter space not set` — while **byte-for-
 byte identical** files read from disk behave fine. Once the investigation
 drifts toward "this particular image is bad", it goes round in circles forever.
 
-First-screen payload ≈ 5.5 MB (JS ~0.5 MB + bicycle 0.3 MB + terrain and road
-generated on the fly + UI font 0.18 MB + audio warming up); the rest arrives by
-distance.
+**The ~12 MB that has to arrive before the world is dressed loads as three
+parallel chains** (bike / vegetation / scenery+extras), not one serial chain —
+they have no dependency on each other, so wall-clock cost is `max(…)` rather
+than the sum. A serial chain of that size reliably hit the 20-second hard
+timeout on anything but a fast link. That timeout is a *designed* degradation,
+not an error: the title screen never waits on it, the road is rideable without
+trees, and the bicycle switches itself on the instant it lands.
 
 ---
 
@@ -484,13 +527,21 @@ Run against a production build (`vite preview`) on an **AMD Radeon RX 5500 XT /
 
 | Measurement | Result |
 |:---|:---|
-| World build (bowl placement + road indexing + vegetation placement + sky) | **77–111 ms** |
+| World build (bowl placement + road indexing + vegetation placement + sky) | **77–111 ms** (measured 237–296 ms on the Pages build including asset-chain kickoff) |
 | Time to an interactive title screen | 200–350 ms (with HTTP cache) |
-| JS bundle | 820 KB raw / **229 KB gzip** |
-| CSS | 18.7 KB raw / 4 KB gzip |
-| Total artifact | **8.6 MB** (of which 2.2 MB audio loads in the background, not on the first-screen path) |
+| JS bundle | 980 KB raw / **~280 KB gzip** |
+| CSS | 27.3 KB raw / 4 KB gzip |
+| Total artifact | **20.78 MB** — of which **16.84 MB is models (81%)**; audio 2.2 MB loads in the background, not on the first-screen path |
 | Spawn point to centreline | all 16 stations **0.000 m** |
 | `nearestArcParam` round-trip error | **0.00000** |
+| Headless regression | `PASS 57 / FAIL 0 / 0 not-run`, **829 assertions**, 0 red |
+
+⚠ These artifact numbers are what the repository actually contains, measured
+directly. An earlier revision of this file claimed **8.6 MB** total and a
+**299 KB** bicycle; neither was true (`bicycle.glb` is **2.79 MB**), and the
+error survived because the asset pipeline it described could not run on a clean
+clone and reported success while doing nothing. See the note under
+[Assets](#assets).
 
 Capability detection on this machine reports `Discrete GPU: AMD Radeon RX 5500
 XT` → high tier, with the reason displayed verbatim on the title screen.
@@ -498,9 +549,9 @@ XT` → high tier, with the reason displayed verbatim on the title screen.
 ### The critical path was rewritten by a measurement
 
 The first version pulled all 17 audio files (including `bgm.ogg` at **1667 KB**)
-concurrently at t=0, competing for the same bandwidth as `bike.glb` (299 KB, but
-that's the first thing the player looks at). The network timeline showed
-`bike.glb` taking 3.4 s when it should have taken about 134 ms.
+concurrently at t=0, competing for the same bandwidth as the bicycle GLB
+(**2.79 MB**, and that is the first thing the player looks at). The network
+timeline showed it taking 3.4 s when it should have taken about 134 ms.
 
 More fundamentally: **browsers won't make a sound before a user gesture**, so at
 startup not one of those bytes was usable. After switching to a serial background
@@ -567,9 +618,26 @@ bytes.
   Deliberately timbre-only, never melody: `playbackRate` offsets are capped at
   0.4%, past which it's audibly out of tune, and that would turn a piece that is
   supposed to be calm into something uneasy.
+- **The three asset chains run in parallel** (bike / vegetation / scenery+extras)
+  instead of one serial chain. They have no dependency on each other, so the cost
+  is `max(…)` rather than the sum of ~12 MB.
+- **The demo waits visibly, and never silently degrades.** The title screen's
+  demo button is disabled until the bicycle lands, labelled `demo_loading`
+  instead of looking broken, and the player is put on the bicycle the moment it
+  arrives — unless they already chose a vehicle themselves. Previously a slow
+  link produced a 90-second demo with a runner in it and no explanation.
+- **The quality panel on the title screen is collapsed by default.** It was the
+  first thing a first-time player's eye landed on, and it is
+  `Render scale 100% / Shadows 2048px / 130m` — three numbers a new player can
+  read three times and still not know what to do with. The tier summary stays on
+  the collapsed line; the reasoning is one click away.
 - **28 new strings** for the web edition (`tools/i18n-supplement.json`,
   additions only, with strictly matching key sets on both sides). Mostly panel
   text the original drew with `_draw()` and never put into the string table.
+- **`Composure`, not `Heart`.** 心神 is a resource that *goes down* — one per
+  fragment. The original's English split it across two words: the onboarding
+  taught `Heart` while the HUD and the tea shop's own item description said
+  `Composure`. All three now say `Composure`.
 
 **Unverified**
 

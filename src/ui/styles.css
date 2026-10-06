@@ -277,6 +277,69 @@
   margin: 0.5em 0 0.35em;
 }
 
+/* ---- 可折叠组（标题页的画质）----
+ *
+ * 折叠线上那一行**就是摘要**，所以不需要另做一行"展开"提示：
+ * 玩家读到的是「画质 · 高 ▾」，点开才看到三档与那三行代价。
+ *
+ * 这样排序的用意：标题页的第一眼落在「188 / 主张 / 两颗按钮」上，
+ * 而不是 `Render scale 100% / Shadows 2048px / 130m`。
+ * 那三行没被删——判定理由对低配玩家是真有用的（见 titleScreen.ts 的注释），
+ * 只是不再抢第一眼。
+ */
+.g-root .g-fold-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  width: 100%;
+  padding: 0.35em 0.5em;
+  font-size: 0.92em;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  text-align: left;
+}
+
+.g-root .g-fold-h::after {
+  content: '▾';
+  font-size: 0.9em;
+  color: var(--ink-faint);
+  transition: transform 0.18s ease;
+}
+
+.g-root .g-fold-h.is-open::after {
+  transform: rotate(180deg);
+}
+
+.g-root .g-fold-b {
+  padding-top: 0.5em;
+}
+
+/* 折叠体用 `g-hidden` 走 CSS 过渡，但内容不该在收起时还能被 Tab 到——
+ * `g-hidden` 已经带 `display:none`（见 dom.ts 的 setShown），这里补一条
+ * 兜底：万一以后有人把 g-hidden 改成 opacity 过渡，收起区的按钮
+ * 仍然不会变成"看不见但能聚焦"的幽灵 Tab 站。 */
+.g-root .g-group-fold .g-fold-b.g-hidden {
+  display: none;
+}
+
+/* ---- 「等模型到货」态 ----
+ *
+ * 演示按钮在自行车模型到达之前是禁用的（见 titleScreen.ts 的 `demoReady`）。
+ * 它不能只是变灰：那读作"这个按钮坏了"。所以给它一个**明确的等待说法**
+ * （文案是 `demo_loading`，由 i18n 走），底下那行小字同步换成在等什么。
+ */
+.g-root .g-btn.is-waiting {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.g-root .g-note.is-waiting {
+  color: var(--accent);
+}
+
 .g-root .g-rule {
   height: 1px;
   background: var(--line);
@@ -851,6 +914,28 @@
   font-weight: 500;
 }
 
+/**
+ * 顶栏分组：前四格是「这一趟的账」，章节是「我在故事的哪一段」。
+ *
+ * 原来六格等权排开，扫一眼是一长串同类的字——而它们的**变化方向都不一样**：
+ * 期限只会往下走，驿数/旅币只会往上走，章节几乎不动。
+ * 一条竖线把章节隔开，扫视时它自然被跳过，直到玩家真的关心进度。
+ *
+ * 用 `::before` 而不是多包一层 div：顶栏的收缩行为（`.g-top-l` 的
+ * `flex-shrink: 0` 与「每一格不许折行」）是按**直接子元素**算的，
+ * 多一层会改变 min-content 的算法。判据 `verify_hud_next_split` 盯的
+ * 「下一处」那两格同理，不动结构最省事。
+ */
+.g-root .g-stat-chapter::before {
+  content: '';
+  display: inline-block;
+  width: 1px;
+  height: 0.95em;
+  margin-right: 1.1em;
+  vertical-align: -0.1em;
+  background: var(--line-soft);
+}
+
 .g-root .g-next {
   font-size: 0.94em;
   color: var(--ink);
@@ -901,7 +986,11 @@
      所以凡是动 `.g-top` 的高度，这里必须一起动。 */
   top: 3.3em;
   left: 0.9em;
-  padding: 0.35em 0.5em 0.4em;
+  /* 0.35/0.5/0.4 → 0.25/0.4/0.3：整块矮了一档。
+     碎片栏压在世界左上角最值钱的位置上（那里通常是山脊和天空），
+     而它整个游戏大部分时间显示的是「0/5 + 五个 0」——
+     一整块实色纸换来五个零，是这屏上最不划算的一笔开销。 */
+  padding: 0.25em 0.4em 0.3em;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius);
   /* **实色**（`--paper`），不是半透明的 `--paper-72`。
@@ -932,11 +1021,27 @@
   margin-top: 0.2em;
 }
 
+/**
+ * 一格碎片：**一行**，不是三行。
+ *
+ * 原来是「色条 / 名字 / 0 次 / 三个点」竖着摞四层，五格一排占掉约 100px，
+ * 压在世界左上角。而「0 次」和紧挨着它的三个点说的是**同一件事**——
+ * `sync()` 里两个数都来自 `getStationCount()`，永远相等。
+ *
+ * 所以现在横着排成 `● 云 0 ○○○`：色块收成一个点，
+ * 名字与次数并到一行，点跟在后面。
+ * 五格连起来是一条窄带，省下来的那块地方是**画面的**，不是 HUD 的。
+ *
+ * 「次数」一个字没删——它是玩家判断"要不要再跑一趟"的唯一依据
+ * （`verify` 盯的就是它不能退回 `--ink-faint`，见下面那条）。
+ */
 .g-root .g-frag {
   position: relative;
-  min-width: 3.1em;
-  padding: 0.25em 0.3em 0.3em;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 0.28em;
+  min-width: 0;
+  padding: 0.1em 0.3em;
   border: 1px solid transparent;
   border-radius: var(--radius);
   opacity: 0.5;
@@ -955,15 +1060,16 @@
 
 .g-root .g-frag-sw {
   display: block;
-  width: 100%;
-  height: 0.32em;
-  border-radius: 0.06em;
+  flex: 0 0 auto;
+  width: 0.45em;
+  height: 0.45em;
+  border-radius: 50%;
   background: var(--sw, var(--ink-faint));
 }
 
 .g-root .g-frag-n {
   display: block;
-  font-size: 1em;
+  font-size: 0.92em;
   line-height: 1.3;
   letter-spacing: 0.08em;
 }
@@ -979,17 +1085,18 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 三个小点 = 三次到访。收过的驿站顶栏那一句「还差 2 次」说的就是它们 */
+/* 三个小点 = 三次到访。收过的驿站顶栏那一句「还差 2 次」说的就是它们。
+   跟名字同一行，所以不再需要 `margin-top` 把它推下去。 */
 .g-root .g-pips {
   display: flex;
-  gap: 0.18em;
-  justify-content: center;
-  margin-top: 0.15em;
+  gap: 0.15em;
+  flex: 0 0 auto;
+  margin-left: 0.1em;
 }
 
 .g-root .g-pip {
-  width: 0.32em;
-  height: 0.32em;
+  width: 0.28em;
+  height: 0.28em;
   border-radius: 50%;
   border: 1px solid var(--line);
 }
@@ -1312,6 +1419,149 @@
   color: var(--ink-soft);
   margin-top: 0.2em;
 }
+
+/* =============================================================================
+   明信片预览（暂停里开）
+   -----------------------------------------------------------------------------
+   卡是主角，所以版式是「大画布 + 窄侧栏」：侧栏只放来历那一段和五件碎片，
+   宽度 11rem 定死——再宽就压卡片，再窄装不下"还差几次"那行小字。
+   ========================================================================== */
+
+/* 暂停的子页。两张 `.g-screen` 没有显式层级时靠 DOM append 顺序分先后——
+   宿主里谁先构造谁就在下面。写死在这里，构造顺序再换这一屏也不会钻到暂停底下。 */
+.g-root .g-pc {
+  z-index: 1;
+}
+
+.g-root .g-pc-tip {
+  font-size: 0.84em;
+  line-height: 1.85;
+  color: var(--accent);
+  border-top: 1px solid var(--line-soft);
+  padding-top: 0.6em;
+}
+
+.g-root .g-card-pc {
+  width: min(54rem, 100%);
+}
+
+.g-root .g-pc-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.7em;
+  margin-bottom: 0.9em;
+}
+
+.g-root .g-pc-head .g-h2 {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 1.16em;
+  letter-spacing: 0.09em;
+}
+
+.g-root .g-pc-count {
+  flex: 0 0 auto;
+  font-size: 0.84em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.g-root .g-pc-x {
+  flex: 0 0 auto;
+  margin-left: 0.2em;
+}
+
+.g-root .g-pc-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.g-root .g-pc-stage {
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+.g-root .g-pc-side {
+  flex: 0 1 11rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7em;
+}
+
+.g-root .g-pc-origin {
+  font-size: 0.83em;
+  line-height: 1.85;
+  color: var(--ink-soft);
+}
+
+.g-root .g-pc-frags {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35em;
+}
+
+.g-root .g-pc-frag {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 0.6em;
+  row-gap: 0.02em;
+  align-items: center;
+  text-align: left;
+  padding: 0.4em 0.6em;
+  line-height: 1.5;
+  font-size: 0.86em;
+}
+
+/* 色片是"这一件到了没有"的最短表达：没到过是灰掉的轮廓，到过才亮。
+   用透明度而不是换颜色——五种状态本来就要靠圈和文字区分，
+   再上第五种颜色会把这块地方变成调色板。 */
+.g-root .g-pc-frag-sw {
+  grid-row: 1 / span 2;
+  width: 0.62em;
+  height: 2.05em;
+  border-radius: 0.06em;
+  background: var(--sw, var(--ink-faint));
+  opacity: 0.28;
+  transition: opacity var(--fade) ease-out;
+}
+
+.g-root .g-pc-frag.is-got .g-pc-frag-sw {
+  opacity: 1;
+}
+
+.g-root .g-pc-frag-n {
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.g-root .g-pc-frag-s {
+  grid-column: 2;
+  font-size: 0.8em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.g-root .g-pc-frag.is-got .g-pc-frag-s {
+  color: var(--ink-soft);
+}
+
+.g-root .g-pc-frag.is-full .g-pc-frag-s {
+  color: var(--accent);
+}
+
+/* 圈住的那一件：从纸面抬起来一点，和卡上那道圈对应 */
+.g-root .g-pc-frag.is-focus {
+  background: var(--paper);
+  border-color: var(--ink-soft);
+  box-shadow: 0 0.18em 0.6em rgba(20, 17, 12, 0.16);
+}
+
 
 /* =============================================================================
    结算页

@@ -47,10 +47,13 @@ import { assertRide, assertDemoDrive } from './ride';
 import { assertSubmission } from './submission';
 import { GameStateManager } from '../game/state';
 import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
+import { exportFileName } from '../game/postcard/export';
+import { buildInputFromState, fragmentMapDot, layoutMap, type PostcardInput } from '../game/postcard';
+import { MAP_BAND_FRAC } from '../game/postcard/layout';
 import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
 import { splitNextTarget } from '../ui/hud';
 import { PRESETS, clampTier } from '../core/settings';
-import { DEFAULT_LANG, setLang, t } from '../i18n';
+import { DEFAULT_LANG, getLang, setLang, t } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
 import type { UIHooks } from '../ui';
@@ -483,14 +486,24 @@ check('verify_i18n', () => {
  *
  * 会红的做法（每一条都实测过）：
  *   · `lvbi_label` 的英文改回 `Lvbi %d`  → 红「旅币：HUD 写 Lvbi，引导页教 Coins」
- *   · `mood_label` 改回 `Composure`      → 红
+ *   · `mood_label` 改回 `Heart %d/%d`   → 红（与 GLOSSARY_PAIRS 里的 Composure 对不上）
  *   · `stations_seen` 改回 `Posts passed`→ 红
  *   · `fragments` 改回 `Shards %d/5`    → 红
  *   · 往 PAIRS 里加一个不存在的 key      → 红（而不是静默通过）
+ *
+ * ## 规范词改一个字，要同时改两处
+ *
+ * `GLOSSARY_PAIRS` 的 `en` 与下面的 `PINYIN` 是**一对**：前者是"应该叫什么"，
+ * 后者是"不该再出现什么"。只改前者会被后者当场否掉（2026-10-07 心神改
+ * Composure 时撞过一次），症状是"刚统一完就红了"，很像统一那步做错了。
  */
 const GLOSSARY_PAIRS: { term: string; label: string; zh: string; en: string }[] = [
   { term: 'glossary_lvbi', label: 'lvbi_label', zh: '旅币', en: 'Coins' },
-  { term: 'glossary_mood', label: 'mood_label', zh: '心神', en: 'Heart' },
+  // 心神：**原来是 Heart**。它是一个会被**消耗**的资源（收一块碎片掉一格），
+  // 叫 Heart 会让英文玩家本能地以为要"攒"；而商店里清心茶的描述
+  // （shops.json 的 desc_en）一直写的就是 Composure——两边本来就对不齐。
+  // 现在三处统一成 Composure，`verify_first_run` 另外守着"别改回去"。
+  { term: 'glossary_mood', label: 'mood_label', zh: '心神', en: 'Composure' },
   { term: 'glossary_station', label: 'stations_seen', zh: '驿', en: 'Stations' },
 ];
 
@@ -547,8 +560,14 @@ check('verify_i18n_glossary', () => {
   // 英文侧不许出现拼音直译。这三条是**具体值**判据，所以单列：
   // 上面的整词判据能抓住"教什么 HUD 写什么"对不上，抓不住
   // "两边一起换成了另一个更难懂的词"（比如两边都叫 Currency）。
+  //
+  // ⚠ 这张表是**当前不该出现的词**，不是**曾经出现过��词**。
+  // 它原本含 `Composure`（源项目的直译），而 2026-10-07 心神统一成
+  // Composure 之后必须摘掉——否则判据会开始拒绝**它自己的规范词**，
+  // 而症状是"刚统一完就红了"，读起来像是统一那一步做错了。
+  // 改规范词时这两处要一起改：GLOSSARY_PAIRS 的 `en`，和这里。
   asserts++;
-  const PINYIN = ['Lvbi', 'lvbi', 'Composure', 'Shards', 'Posts passed'];
+  const PINYIN = ['Lvbi', 'lvbi', 'Shards', 'Posts passed'];
   for (const p of GLOSSARY_PAIRS) {
     const bare = stripPrintf(I18N.en[p.label] ?? '');
     const hit = PINYIN.find((w) => bare.includes(w));
@@ -4808,6 +4827,101 @@ check('verify_demo_drive', () => {
   return { ok: r.ok, detail: r.detail, asserts: r.asserts };
 });
 
+// ---------------------------------------------------------------- 演示的 90 秒承诺
+/**
+ * **标题页上那句「演示 · 90 秒」，必须是代码里真会走到的一行。**
+ *
+ * ## 它守的是哪一族 bug
+ *
+ * `ECON.DEMO_BUDGET_SEC` 在 `economy.json` 里躺着，`raw.ts` 给它标了类型，
+ * 但**整个代码库里从来没被读过一次**——只在 `main.ts` 一条注释里出现过。
+ * `startDemo()` 只做解锁音频、放 BGM、对白自动推进，于是演示永远不会结束。
+ * 实测无头跑 309 秒，天数、驿站、铜钱从 +238s 起到 +309s 一个都没变过。
+ *
+ * 一个兑现不了的按钮比没有按钮更糟：它把"我不知道自己要等多久"
+ * 直接写在了界面上。
+ *
+ * ## 判据为什么是读源码
+ *
+ * 演示结束是一个 **UI 事件**（结算页弹出来），无头 Node 里既没有 DOM、
+ * 也没有 90 秒的耐心。所以判据只问结构上可查的事：那一行读取还在不在，
+ * 读到之后走到哪里去了。
+ *
+ * ## 会红的做法
+ *   · 删掉 `demoTick()` 里那句 `if (this.demoT >= ECON.DEMO_BUDGET_SEC)`      → 红（第 1、2 条）
+ *   · 把 `finishRun()` 换成只加秒表不收场                                        → 红（第 2 条）
+ *   · 删掉 `render()` 里那行 `this.demoTick(dt)`                               → 红（第 2 条）
+ *   · 从 i18n 里删掉 `demo_card_notice`                                          → 红（第 3 条）
+ *   · 把 `DEMO_END_AT_SEC` 调到 ≥ `DEMO_BUDGET_SEC`                             → 红（第 4 条）
+ */
+check('verify_demo_budget', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const read = (rel: string): string =>
+    readFileSync(join(process.cwd(), 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+  const main = read('main.ts');
+
+  // 1. 预算必须被真的读到。注释里提过不算——上面 read() 已经剥掉了注释。
+  asserts++;
+  if (!/ECON\.DEMO_BUDGET_SEC/.test(main)) {
+    probs.push('main.ts 从未读取 ECON.DEMO_BUDGET_SEC —— 标题页上的「演示 · 90 秒」没有人执行');
+  }
+
+  // 2. 读到了之后必须真的收场，而且秒表真的在每帧被喂。
+  //
+  //    拆成两半是因为它们各自能独立坏掉：秒表存在但没人喂（演示照旧无限长），
+  //    或者被喂了但到了点不收场（同上）。合在一起断言，红的时候分不清是哪一个。
+  asserts++;
+  const tickBody = (main.match(/demoTick\s*\([^)]*\)\s*:\s*void\s*\{([\s\S]*?)\n  \}/) || [, ''])[1];
+  if (!tickBody) {
+    probs.push('main.ts 里没有 demoTick(dt) —— 演示的秒表没人推进');
+  } else {
+    if (!/ECON\.DEMO_BUDGET_SEC/.test(tickBody)) {
+      probs.push('demoTick() 没拿 ECON.DEMO_BUDGET_SEC 当阈值 —— 收场的时机不在这个预算上');
+    }
+    if (!/finishRun\s*\(\s*\)/.test(tickBody)) {
+      probs.push('demoTick() 里没有 finishRun() —— 预算用掉了，演示却不会停');
+    }
+  }
+  if (!/this\.demoTick\s*\(\s*dt\s*\)/.test(main)) {
+    probs.push('没有地方调用 this.demoTick(dt) —— 秒表存在但没人喂它');
+  }
+
+  // 3. 收尾那句提示必须真的存在，不然玩家看到的是裸 key。
+  asserts++;
+  for (const lang of ['zh', 'en'] as const) {
+    const v = I18N[lang]?.['demo_card_notice'];
+    if (typeof v !== 'string' || v.length === 0) {
+      probs.push(`文案缺 demo_card_notice（${lang}）—— 演示收尾那句提示会显示成裸 key`);
+    }
+  }
+
+  // 4. 预算本身得像个 90 秒，而且小游戏跳过的时机必须落在收场之前。
+  //
+  //    第二条：`DEMO_END_AT_SEC` 是"演示里不玩小游戏"的开关。若它落在预算之后，
+  //    演示会先弹出结算页、跳过逻辑再也没机会执行——那句
+  //    "演示模式不玩小游戏"就成了只在非演示时才成立的废话。
+  asserts++;
+  if (!(ECON.DEMO_BUDGET_SEC > 0 && ECON.DEMO_BUDGET_SEC <= 120)) {
+    probs.push(`DEMO_BUDGET_SEC = ${ECON.DEMO_BUDGET_SEC} —— 跟按钮上写的「90 秒」对不上`);
+  }
+  if (ECON.DEMO_END_AT_SEC >= ECON.DEMO_BUDGET_SEC) {
+    probs.push(
+      `DEMO_END_AT_SEC(${ECON.DEMO_END_AT_SEC}) ≥ DEMO_BUDGET_SEC(${ECON.DEMO_BUDGET_SEC})`
+        + ' —— 小游戏的跳过时机落在演示结束之后，演示里根本没有跳过这一环',
+    );
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；')
+      : `演示预算 ${ECON.DEMO_BUDGET_SEC}s 被真读到、到点真的收场、提示文案在、跳过时机(${ECON.DEMO_END_AT_SEC}s)落在收场之前`,
+    asserts,
+  );
+});
+
 /**
  * ## 载具的标定必须**可重复**
  *
@@ -6938,6 +7052,229 @@ check('verify_ending', () => {
   );
 });
 
+// ---------------------------------------------------------------- 导出的文件名只有一个出处
+/**
+ * **两张 PNG 叫什么，只允许有一处说了算。**
+ *
+ * ## 它守的是哪一族 bug
+ *
+ * 原名是 `exportFileName()` 与 `main.ts` 里的三元表达式**各写一份**，
+ * 而且写的不一样：函数里是 `gift_188_front.png`（跟原作桌面版一致，
+ * 注释明确写了"免得玩家在两个平台之间对不上"），main.ts 里是 `gift188-front.png`。
+ * 函数从来没被调用过——界面上真正落下来的文件名一直是 main.ts 那份。
+ *
+ * 这不是"多一个函数"，是**一处文档在跟产物说谎**：代码读着像桌面版命名，
+ * 玩家拿到的文件不是。同一个仓库里两套互不相认的命名，谁改都不该被问。
+ *
+ * 同一屏上还有一件：`exportPostcard()` 一律画两张、只用一张。
+ * 玩家点的是「导出正面」一个按钮，代价却是两面各重画一遍 1920 宽的画布。
+ *
+ * ## 会红的做法
+ *   · main.ts 改回写死的 `'gift188-front.png'`                        → 红（第 2 条）
+ *   · 把 `exportFileName()` 的名字改成别的                            → 红（第 1 条）
+ *   · main.ts 改回 `exportBothSides(input)`                           → 红（第 3 条）
+ */
+check('verify_postcard_export', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const read = (rel: string): string =>
+    readFileSync(join(process.cwd(), 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+  const main = read('main.ts');
+
+  // 1. 函数自身的契约：两面不同名、都是 .png、且都叫得出自己那面。
+  //    名字本身钉死，因为它承诺跟桌面版同名——改名字会让跨平台的产物对不上。
+  asserts++;
+  const f = exportFileName('front');
+  const b = exportFileName('back');
+  if (f === b) probs.push(`两面导出名一样（${f}）—— 第二张会覆盖第一张`);
+  if (!/\.png$/.test(f) || !/\.png$/.test(b)) probs.push(`导出名不是 .png：${f} / ${b}`);
+  if (!f.includes('front') || !b.includes('back')) probs.push(`导出名没标出是哪一面：${f} / ${b}`);
+  if (f !== 'gift_188_front.png' || b !== 'gift_188_back.png') {
+    probs.push(`导出名与桌面版不一致（${f} / ${b}）—— 注释承诺跨平台同名，现在做不到`);
+  }
+
+  // 2. main.ts 必须走这个函数，不许再自己写一份。
+  asserts++;
+  if (!/exportFileName\s*\(\s*side\s*\)/.test(main)) {
+    probs.push('main.ts 没调用 exportFileName(side) —— 下载名仍然在别处各写一份');
+  }
+  const hardCoded = main.match(/[`'"]gift(?:188|_188)[-_](?:front|back)\.png[`'"]/g);
+  if (hardCoded && hardCoded.length) {
+    probs.push(`main.ts 里仍写死文件名（${[...new Set(hardCoded)].join('、')}）—— 两处命名必然再次漂开`);
+  }
+
+  // 3. 只画被请求的那一面。
+  asserts++;
+  if (!/exportPostcardPng\s*\(\s*input\s*,\s*side\s*\)/.test(main)) {
+    probs.push('main.ts 没有按 side 只导一面 —— 导出正面的代价是两面都重画');
+  }
+  if (/exportBothSides/.test(main)) {
+    probs.push('main.ts 仍在用 exportBothSides() —— 玩家点一个按钮，两面被画掉');
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；')
+      : `导出名只有一个出处（${f} / ${b}）· main.ts 不写死文件名 · 按 side 只画一面`,
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 明信片预览（中途）
+/**
+ * 三十天里玩家只有一条路能看见明信片：走完全程弹结算页。
+ * 于是「碎片」这个词在整个过程中一直没有形状——
+ * 直到最后一天那张卡第一次出现，他才知道自己在攒的到底是什么。
+ *
+ * 中途这一屏要成立，有四件各自能独立坏掉的事：
+ *
+ * 1. **圈必须落在卡上那颗点的正中间。** 判据不查「代码里有没有调
+ *    fragmentMapDot()」——注释里提过也算通过，那就白查了。
+ *    这里直接量五格各自的投影点，且用 `slotVisits` 全 0 的存档：
+ *    **一次都没到过**那一格是这一屏最容易没有落点的情形
+ *    （初旅的画区只有 4 格），全 0 量到的就是最坏情况。
+ *
+ * 2. 暂停面板上得有一个真的按钮。
+ * 3. UI 宿主要接得住：构造、入口、关、刷——四处各能独立漏掉。
+ * 4. 新写的这些 CSS 类必须都真有规则：缺一条不是难看，
+ *    是那几块塌成行内文本，五格碎片挤成一行，圈没有地方落。
+ *
+ * 把它退回「只有一块画布、右边没侧栏、暂停面板上没按钮」就能红。
+ */
+check('verify_postcard_preview', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const read = (rel: string): string =>
+    readFileSync(join(process.cwd(), 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+
+  // 1. 五格 × 圈的位置 = 卡上那颗点，且那颗点确实在地图方框里。
+  asserts++;
+  const W = 960;
+  const H = 540;
+  const empty: PostcardInput = {
+    slotVisits: [0, 0, 0, 0, 0],
+    kitTier: 0,
+    hasPaper: false,
+    hasInk: false,
+    hasSeal: false,
+    hasEnvelope: false,
+    ending: 'leave_door',
+    backText: '',
+    lang: 'zh',
+  };
+  // 方框用同一个 bandH 量：fragmentMapDot() 内部就是 `canvasH * MAP_BAND_FRAC`。
+  // 自己另取一个高度量框，等于拿两套投影互相比。
+  const rect = layoutMap(W, H * MAP_BAND_FRAC, false).rect;
+  const dots: [number, number][] = [];
+  for (let s = 0; s < 5; s++) {
+    const p = fragmentMapDot(empty, s, W, H);
+    if (!p) {
+      probs.push(`第 ${s + 1} 件碎片查不到地图上的点 —— 点了它，圈无处可落`);
+      continue;
+    }
+    dots.push(p);
+    const inside =
+      p[0] >= rect.x && p[0] <= rect.x + rect.w &&
+      p[1] >= rect.y && p[1] <= rect.y + rect.h;
+    if (!inside) {
+      probs.push(
+        `第 ${s + 1} 件碎片在 (${p[0].toFixed(0)}, ${p[1].toFixed(0)})，落在地图方框外`
+          + ` (${rect.x.toFixed(0)}, ${rect.y.toFixed(0)}, ${rect.w.toFixed(0)}×${rect.h.toFixed(0)})`
+          + ' —— 圈会钉到框外，而那颗点还在框里',
+      );
+    }
+  }
+  const distinct = new Set(dots.map(([a, b]) => `${Math.round(a)},${Math.round(b)}`)).size;
+  if (dots.length === 5 && distinct !== 5) {
+    probs.push(`五件碎片的投影点里只有 ${distinct} 个不同的 —— 点错了件会圈到别件的地方`);
+  }
+
+  // 2. 入口：暂停面板上得有一个真按钮。
+  asserts++;
+  const pause = read('ui/pausePanel.ts');
+  if (!/t\s*\(\s*['"]postcard_look['"]\s*\)/.test(pause)) {
+    probs.push('暂停面板上没有「看看明信片」这个按钮 —— 这一屏玩家永远发现不了');
+  }
+  if (!/onLookPostcard(\?\.)?\s*\(/.test(pause)) {
+    probs.push('暂停面板没有触发 onLookPostcard —— 按钮点了不会开这一屏');
+  }
+
+  // 3. 宿主四处接线，各自独立。
+  asserts++;
+  const ui = read('ui/index.ts');
+  if (!/new PostcardPanel\s*\(/.test(ui)) probs.push('UI 宿主没构造 PostcardPanel');
+  if (!/onLookPostcard\s*:\s*\(\s*\)\s*=>\s*this\.lookPostcard\s*\(\s*\)/.test(ui)) {
+    probs.push('UI 宿主没把暂停面板的入口接到 lookPostcard() —— 按钮点了没反应');
+  }
+  const hidePanels = (ui.match(/private hidePanels\s*\(\s*\)\s*:\s*void\s*\{([\s\S]*?)\n  \}/) || [, ''])[1];
+  if (!/this\.postcard\.hide\s*\(\s*\)/.test(hidePanels)) {
+    probs.push('hidePanels() 没关明信片预览 —— 回标题/引导时它会留在世界上面');
+  }
+  const sync = (ui.match(/syncFromState\s*\(\s*\)\s*:\s*void\s*\{([\s\S]*?)\n  \}/) || [, ''])[1];
+  if (!/this\.postcard\.sync\s*\(\s*\)/.test(sync)) {
+    probs.push('syncFromState() 不刷明信片预览 —— 路上收了一块碎片之后它显示的还是旧数');
+  }
+  const disp = (ui.match(/dispose\s*\(\s*\)\s*:\s*void\s*\{([\s\S]*?)\n  \}/) || [, ''])[1];
+  if (!/this\.postcard\.dispose\s*\(\s*\)/.test(disp)) {
+    probs.push('dispose() 不销毁明信片预览 —— 它的 Esc 捕获监听会一直挂着');
+  }
+  // `pause.show()` 只管把暂停亮起来，不负责收别人的屏。
+  // 漏掉这一行就是「Esc 之后两张卡片叠在一起」。
+  const ctor = (ui.match(/new PostcardPanel\s*\(\{([\s\S]*?)\}\s*\)/) || [, ''])[1];
+  if (!/this\.postcard\.hide\s*\(\s*\)/.test(ctor)) {
+    probs.push('关闭明信片预览时没有把它自己关掉 —— Esc 之后暂停面板和它叠在一起');
+  }
+
+  // 4. 点一格要同时动三处：卡上的圈、五格的状态、下面那句话。
+  //    漏一处就是「圈挪了但字没动」，读起来像界面卡了一下。
+  asserts++;
+  const panel = read('ui/postcardPanel.ts');
+  const focusBody = (panel.match(/private focusCell\s*\([^)]*\)\s*:\s*void\s*\{([\s\S]*?)\n  \}/) || [, ''])[1];
+  if (!focusBody) probs.push('postcardPanel.ts 里没有 focusCell() —— 点了碎片没有反应');
+  if (!/this\.paint\s*\(/.test(focusBody)) {
+    probs.push('focusCell() 不重画画布 —— 点了碎片，卡上那道圈不会挪');
+  }
+  if (!/this\.paintFrags\s*\(/.test(focusBody)) {
+    probs.push('focusCell() 不刷五格的状态 —— 圈挪了，选中态还停在原来那件');
+  }
+  if (!/paintTip\s*\(\s*\)/.test(focusBody)) {
+    probs.push('focusCell() 不刷那句话 —— 圈跟着动了，下面的字还停在原来那一件');
+  }
+
+  // 5. CSS 覆盖。
+  asserts++;
+  const css = read('ui/styles.css');
+  const cls = [...new Set(panel.match(/g-(?:pc|card-pc)[\w-]*/g) || [])];
+  const noRule = cls.filter((c) => !new RegExp(`\\.${c}(?!\\w)`).test(css));
+  if (cls.length === 0) probs.push('没从 postcardPanel.ts 里数到任何 g-pc* 类 —— 判据自己写空了');
+  if (noRule.length) {
+    probs.push(`styles.css 里缺这些类的规则：${noRule.join('、')} —— 那几块会塌成行内文本`);
+  }
+
+  // 6. 语言默认值。这一屏自己传 lang，但导出那条路不传——
+  //    写死 'zh' 的话，英文玩家导出的是中文卡。断言取相对值：
+  //    跟 getLang() 一致，而不是等于某个写死的字符串。
+  asserts++;
+  const langDefault = buildInputFromState({}).lang;
+  if (langDefault !== getLang()) {
+    probs.push(
+      `buildInputFromState() 不传 lang 时得到 '${langDefault}'，而当前界面语言是 '${getLang()}'`
+        + ' —— 不传 lang 的调用方（导出）会拿错语言',
+    );
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；')
+      : `五格（全未到访）的圈都落在地图方框里且互不重合 · 暂停面板有入口 · 宿主四处接住（关掉时自己先关） · 点一格同时动圈/状态/那句话 · ${cls.length} 个 CSS 类都有规则 · 语言默认值跟随界面`,
+    asserts,
+  );
+});
+
 // ---------------------------------------------------------------- 世界 HUD 可见性
 /**
  * 冷启动时 HUD 必须**真的**被藏起来。
@@ -7215,6 +7552,114 @@ check('verify_paper_backing', () => {
     probs.length
       ? probs.join('；')
       : '碎片栏实色 · 标题卡薄纱但 α≥0.9 · 顶栏渐隐落在固定高度的空区里 · 没有静默失效的逗号语法颜色',
+    asserts,
+  );
+});
+
+// ---------------------------------------------------------------- 档位说明不许说谎
+/**
+ * **面板上那一行说明，必须在描述玩家选中��一档。**
+ *
+ * ## 它守的是哪一族 bug
+ *
+ * 原来面板底下挂的是一句**静态**文案（`t('quality_hint')`），内容恒定在描述
+ * **低档**：关阴影、树收到 95m、灌木 40m。玩家点了"高"，摘要三行诚实地写着
+ * 2048px / 58m，紧跟着底下那句话仍然在说低档砍掉了什么——同一屏上两句互相
+ * 拆台，而且玩家没有任何办法把它改对，因为那句话不随任何东西变。
+ *
+ * 这不是"文案写得不好"，是**面板在对自己的设置撒谎**，而标题页是评委看的第一屏。
+ * 静态文案还有第二个代价：档位表一改，这句话就过期，而没有任何判据问过
+ * "这句话现在还对不对"。
+ *
+ * ## 判据为什么是读源码
+ *
+ * 无头环境没有样式表也点不了按钮，量不到渲染结果。所以判据只问一件
+ * 结构上可查的事：**那两个挂提示的位置，是不是从 `qualityHint(...)` 取的**。
+ * 取了之后文案跟不跟得上，是 `qualityHint` 自己的事（下面第 2 条查那个）。
+ *
+ * ## 会红的做法
+ *   · `titleScreen.ts` 改回 `note(t('quality_hint'), …)`   → 红
+ *   · `pausePanel.ts` 改回 `note(t('quality_hint'), …)`     → 红
+ *   · 从 supplement 里删掉 `quality_hint_high`              → 红（第 2 条）
+ */
+check('verify_quality_hint', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const read = (rel: string): string =>
+    readFileSync(join(process.cwd(), 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+
+  // 1. 两处提示都必须是 qualityHint(...) 的调用，不能是写死的 key。
+  for (const rel of ['ui/titleScreen.ts', 'ui/pausePanel.ts']) {
+    asserts++;
+    const src = read(rel);
+    // 剥掉 import 之后，剩下的 `quality_hint` 引用只可能来自 t('quality_hint')
+    const stillCallsStatic = /t\(\s*['"`]quality_hint['"`]\s*\)/.test(src);
+    if (stillCallsStatic) {
+      probs.push(`${rel} 仍然用写死的 t('quality_hint') —— 面板上那一行说明不随档位变，选了高档也在说低档`);
+    }
+    if (!/qualityHint\s*\(/.test(src)) {
+      probs.push(`${rel} 没有调用 qualityHint(...) —— 这一屏拿不到跟随档位的说明`);
+    }
+  }
+
+  // 2. 三档的文案必须都在，且**互不相同**。
+  //
+  //    "都在"是显然的，"互不相同"才是这一条真正的判据：
+  //    三条文案哪怕都存在，只要两条写得一样，选到那两档时面板上仍然是
+  //    一句描述别人的说明——而这正是原来的 bug 缩小一号的版本。
+  asserts++;
+  const HINTS = ['low', 'medium', 'high'] as const;
+  for (const lang of ['zh', 'en'] as const) {
+    const side = I18N[lang];
+    const seen: string[] = [];
+    for (const h of HINTS) {
+      const v = side[`quality_hint_${h}`];
+      if (typeof v !== 'string' || v.length === 0) {
+        probs.push(`文案缺 quality_hint_${h}（${lang}）—— 选到这一档时面板底下会空着`);
+        continue;
+      }
+      seen.push(v);
+    }
+    if (new Set(seen).size !== seen.length) {
+      probs.push(`${lang} 侧三档的说明有两条一模一样 —— 等于又变回一句恒定文案`);
+    }
+  }
+
+  // 3. 文案里写的半径必须等于 PRESETS 里的真值。
+  //
+  //    这条是给"文案过期"准备的：档位表改了而文案没改，页面不会红，
+  //    但玩家读到的是一句关于另一套数字的话。半径用 `(\d+)m` 抓出来比对。
+  asserts++;
+  const TIER_OF: Record<(typeof HINTS)[number], Tier> = {
+    low: TIER_LOW,
+    medium: TIER_MEDIUM,
+    high: TIER_HIGH,
+  };
+  for (const h of HINTS) {
+    for (const lang of ['zh', 'en'] as const) {
+      const v = I18N[lang][`quality_hint_${h}`];
+      if (typeof v !== 'string') continue;
+      const truth = PRESETS[TIER_OF[h]];
+      const nums = [...v.matchAll(/(\d+)\s*m\b/g)].map((m) => Number(m[1]));
+      // 地面细节是**关**的那一档没有"半径"可写（写出来等于凭空多了一个数），
+      // 所以只查它开着的那两档。
+      const want = [truth.treeRadius, truth.bushRadius];
+      if (truth.groundDetail !== 0) want.push(truth.groundDetailRadius);
+      for (const n of want) {
+        if (!nums.includes(n)) {
+          probs.push(`quality_hint_${h}（${lang}）没提到 ${n}m —— 文案已经和 PRESETS 对不上了`);
+        }
+      }
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '标题页与暂停面板的档位说明都跟随选中档 · 三档文案互不相同 · 文案里的半径等于 PRESETS 真值',
     asserts,
   );
 });
@@ -7770,6 +8215,125 @@ function ensureStubDom(): StubDom {
  * 而不是运行时数据，和 ride 那条一样该有自己的说明）。
  */
 check('verify_submission', () => assertSubmission());
+
+/**
+ * 第一次玩的人撞得到、而回归套件一条都问不到的那一族：
+ * **界面在"等"和"关不掉"这两件事上有没有出口。**
+ *
+ * ## 它守的是哪两个 bug
+ *
+ * **① 演示静默降级。** 自行车的 GLB 走启动屏之后的后台链，标题页不等它
+ * （这是对的：能不能玩 ≠ 画得全不全）。但演示的第一辆车**必须是**自行车——
+ * 模型没到时 `set('bike')` 被 `canEnter()` 挡掉，于是那 90 秒里出现的是一个
+ * 背包在跑的人，**而界面上没有一个字说明为什么**。
+ * 实测：每次开页都命中 20 秒硬超时，所以这不是边缘情况，是默认情况。
+ *
+ * 修法是把它从"静默"改成"看得见的等待"：按钮在到货前禁用 + 文案说在等什么。
+ * 判据问的就是这两件事——**没有它们，这条 bug 可以被任何人悄悄改回来**。
+ *
+ * **② 商店关不掉。** 商店复用 `checkin` 相位，而 `Escape` 分支只认
+ * `paused` / `roaming`。于是在铺子里按 Esc 什么都没发生，也没有提示。
+ * Esc 是"我卡住了"的第一反应键，它必须有出口。
+ *
+ * ## 为什么读源码而不是跑一遍
+ *
+ * ①要判断"按钮在模型到货前是不是禁用的"，得让浏览器真的卡住网络；
+ * ②要判断"Esc 在铺子里有没有被吃掉"，得先骑到一座有铺子的驿站。
+ * 两条都是**在真机上才会遇到、而截图看不出来**的——所以读源码，
+ * 并且用 `demo_loading` 这类**键名**当锚点，而不是某句具体的文案。
+ *
+ * ## 会红的做法
+ *
+ *   · titleScreen.ts 去掉 `setDisabled(this.demoBtn, true)`        → 红（①）
+ *   · main.ts 的 `Escape` 分支去掉 `if (this.ui.shopOpen)`          → 红（②）
+ *   · 删掉 `demo_loading` / `demo_loading_hint` 四个键里的任意一个   → 红（③）
+ *   · 把 `Composure` 改回 `Heart`（任何一处）                     → 红（④）
+ */
+check('verify_first_run', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const read = (rel: string): string =>
+    readFileSync(join(process.cwd(), 'src', rel), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '');
+
+  const title = read('ui/titleScreen.ts');
+  const main = read('main.ts');
+
+  // ① 演示按钮在模型到货前必须是**禁用**的。
+  asserts++;
+  if (!/setDisabled\s*\(\s*this\.demoBtn\s*,\s*true\s*\)/.test(title)) {
+    probs.push('titleScreen.ts 没有在构造时禁用演示按钮 —— 车没到也能点开，于是那 90 秒是一个人在跑');
+  }
+  asserts++;
+  if (!/setDemoReady\s*\(/.test(title)) {
+    probs.push('titleScreen.ts 没有 setDemoReady —— 宿主无法把"车到了"告诉标题页');
+  }
+  asserts++;
+  if (!/ui\.setDemoReady\s*\(/.test(main)) {
+    probs.push('main.ts 没有在车到货时调 ui.setDemoReady —— 按钮会一直停在"正在装车"');
+  }
+  // 车到货时还要**把人放上车**，否则"开启旅程"仍然开局走路。
+  asserts++;
+  if (!/onAssetLoaded/.test(main) || !/vehicle\.set\s*\(\s*'bike'\s*\)/.test(main)) {
+    probs.push("main.ts 没有在车到货时切自行车 —— 玩家开局仍然徒步");
+  }
+  // 自动切换必须让位于玩家的选择。
+  asserts++;
+  if (!/vehicleTouched/.test(main)) {
+    probs.push('main.ts 没有 vehicleTouched —— 玩家自己按过 E 之后游戏还会替他换车');
+  }
+
+  // ② Esc 必须能关掉铺子。
+  asserts++;
+  if (!/shopOpen/.test(main) || !/closeShop\s*\(\s*\)/.test(main)) {
+    probs.push("main.ts 的 Escape 分支没有先问 ui.shopOpen —— 在铺子里按 Esc 什么都不会发生");
+  }
+
+  // ③ 新文案两侧都要有（缺一条界面上就是 ⟨key⟩）。
+  asserts++;
+  for (const k of ['demo_loading', 'demo_loading_hint', 'fold_open', 'fold_close']) {
+    for (const lang of ['zh', 'en'] as const) {
+      if (typeof I18N[lang][k] !== 'string' || I18N[lang][k].length === 0) {
+        probs.push(`文案缺 ${k}（${lang}）`);
+      }
+    }
+  }
+  // 等待态必须有**自己的说法**，不能复用 `demo_hint`。
+  asserts++;
+  if (I18N.en.demo_loading === I18N.en.demo_start) {
+    probs.push('demo_loading 和 demo_start 是同一句 —— 按钮在等车时看不出在等什么');
+  }
+
+  // ④ 心神三处同名，且不再是 Heart。
+  //
+  //    `verify_i18n_glossary` 已经钉住"引导页教的词 == HUD 用的 label"，
+  //    这一条补的是另一半：**商店描述**（shops.json 的 desc_en）写的是 Composure，
+  //    而 HUD 当时写的是 Heart。判据只比前两处，比不到商品描述那条。
+  asserts++;
+  {
+    const g = I18N.en.glossary_mood;
+    const m = I18N.en.mood_label;
+    if (/heart/i.test(g) || /heart/i.test(m) || /heart/i.test(I18N.en.shop_mood_full)) {
+      probs.push('心神 的英文名里还有 Heart —— 它是会被消耗的资源，叫 Heart 读作"要攒"');
+    }
+    if (!m.startsWith(g)) {
+      probs.push(`引导页教的是「${g}」而 HUD 写的是「${m}」—— 同一个资源两个名字`);
+    }
+    const tea = read('data/generated/shops.json');
+    if (new RegExp(`Composure back by one`).test(tea) && !/Composure/.test(m)) {
+      probs.push('商店描述写 Composure 而 HUD 不写 —— 三处对不齐');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '演示等车有明示 · Esc 关得掉铺子 · 心神三处同名',
+    asserts,
+  );
+});
 
 export function runAll(): { name: string; ok: boolean; detail: string; asserts: number }[] {
   return results.map((r) => {

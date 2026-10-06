@@ -28,7 +28,15 @@
  */
 
 /** 补充资产的源目录（和 SRC_MODELS 一样是机器相关的硬编码，见各脚本） */
-export const SRC_EXTRA = 'D:/code/20260920';
+/**
+ * 补充资产的源目录。
+ *
+ * 同样在**仓库之外**、同样曾经写死成一条绝对路径。
+ * 现在可以用 `GIFT188_SRC_EXTRA` 覆盖（`compress-textures.mjs` 会读它）。
+ * 缺了会在压缩那一步逐条告警并跳过——这一族是可有可无的，
+ * 所以这里不退出，只提示；真正让管线停下来的是主模型目录。
+ */
+export const SRC_EXTRA = process.env.GIFT188_SRC_EXTRA ?? 'D:/code/20260920';
 /** 角色与滑板在另一个目录（`modelbone`），文件名也不同 */
 export const SRC_BONE = 'D:/code/20261001/modelbone';
 /**

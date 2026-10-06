@@ -17,8 +17,8 @@
  *   · `export.ts` —— PNG 导出 + 手写体加载
  */
 import { ROAD } from '../../data/raw';
+import { getLang } from '../../i18n';
 import { game } from '../state';
-import { exportPostcardPng } from './export';
 import { t } from './layout';
 import {
   computeTier,
@@ -80,6 +80,7 @@ export {
   backMessageBox,
   joysColumnRect,
   sealBroken,
+  fragmentMapDot,
 } from './render';
 export type { MapLayout, Rect } from './render';
 
@@ -141,7 +142,7 @@ export function buildInputFromState(overrides: BuildInputOverrides = {}): Postca
     hasEnvelope: game.hasItem('env'),
     ending: overrides.ending ?? endingFromGameState(),
     backText: overrides.backText ?? '',
-    lang: overrides.lang ?? 'zh',
+    lang: overrides.lang ?? getLang(),
     seenStations,
     seenCount: game.getSeenStationCount(),
   };
@@ -164,20 +165,6 @@ export function endingFromGameState(): EndingId {
 export function seededBackText(ending: EndingId, lang: Lang): string {
   const key = prefilledBackKey(ending);
   return key ? t(lang, key) : '';
-}
-
-/**
- * 一次把两张都导出来。原作是**两次 Blob 下载**（先正面，再背面），
- * 因为浏览器会把连续两次下载当弹窗拦掉。
- * 这里保持"分开拿"，由调用方决定怎么下载；不要图省事合成一张 1920×2160——
- * 玩家要的是能分别发出去的两张。
- */
-export async function exportBothSides(
-  input: PostcardInput,
-): Promise<{ front: Blob; back: Blob }> {
-  const front = await exportPostcardPng(input, 'front');
-  const back = await exportPostcardPng(input, 'back');
-  return { front, back };
 }
 
 /** 便捷：这张卡现在的四档评级（给 UI 角标 / 定妆照用）。 */

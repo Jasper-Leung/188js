@@ -207,3 +207,18 @@ export function tierSummary(tier: Tier): { renderScale: string; shadows: string;
     ground: p.groundDetail === 0 ? t('off') : `${p.groundDetailRadius}m`,
   };
 }
+
+/**
+ * 档位提示——**跟着当前选中的那一档走**。
+ *
+ * 原来这里是一句写死的 `t('quality_hint')`，内容恒定在描述**低档**
+ * （关阴影、树收到 95m）。玩家选了"高"，面板底下仍然在说低档砍掉了什么，
+ * 于是这一屏上出现一句自相矛盾的话。标题页是评委看的第一屏，
+ * 这句话错在那里，代价最大。
+ *
+ * 三条文案是分开写的而不是拼出来的：拼接要把"关"还是"开到 N"、
+ * 有没有半径这种分支写进代码，读起来比三句整话更难核对。
+ */
+export function qualityHint(tier: Tier): string {
+  return t(`quality_hint_${['low', 'medium', 'high'][tier] as 'low' | 'medium' | 'high'}`);
+}

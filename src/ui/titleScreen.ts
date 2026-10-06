@@ -17,23 +17,25 @@
  * 缺一不可：只有理由没有摘要，玩家不知道怎么改；只有摘要没有理由，
  * 玩家不知道自己为什么被当成低配。
  *
- * ## 档位说明为什么单独给一句 `quality_hint`
+ * ## 档位说明为什么单独给一句 `qualityHint()`
  *
  * 摘要说的是"这一档开什么"（分辨率 60% / 阴影 off / 地面细节 off），
- * 而 `quality_hint` 补的是摘要里**放不下**的那一刀：植被半径要**重新进
+ * 而档位提示补的是摘要里**放不下**的那一刀：植被半径要**重新进
  * 这一趟**才生效（`veg.invalidate()` 的行为）。不写这一句，玩家调完档
  * 看着画面没变，会以为设置没生效。
  *
- * 它曾经是一句谎话：源文案写"把草皮行道树收到 70m"，而草皮那一层
- * （交叉卡片 + alphaTest + 风摆）早已整层删除换成 `groundDetail`，
- * 70m 也和 `PRESETS` 里的 95m / 40m 都不对。现在由
- * `tools/i18n-supplement.json` 覆盖，改的是真值。
+ * 这句话曾经是两句谎话叠在一起。第一句：源文案写"把草皮行道树收到 70m"，
+ * 而草皮那一层（交叉卡片 + alphaTest + 风摆）早已整层删除换成
+ * `groundDetail`，70m 也和 `PRESETS` 里的 95m / 40m 都不对。
+ * 第二句更贵：它是**一句静态文案**，内容恒定在描述低档——
+ * 玩家选了"高"，这一屏底下仍然在说低档砍掉了什么。现在跟着 `this.picked`
+ * 走，见 `settings.ts` 的 `qualityHint()`。
  */
 import { t } from '../i18n';
-import { TIER_KEYS, tierSummary } from '../core/settings';
+import { TIER_KEYS, qualityHint, tierSummary } from '../core/settings';
 import type { Tier } from '../core/capability';
 import type { Capability } from '../core/capability';
-import { button, clear, el, note, row, rule, setFlag, setShown, setText } from './dom';
+import { button, clear, el, note, row, rule, setDisabled, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import type { UIHooks } from './index';
 
@@ -72,12 +74,48 @@ export class TitleScreen {
   private tierBtns: HTMLButtonElement[] = [];
   private summaryBox: HTMLDivElement;
   private reasonEl: HTMLDivElement;
+  private hintEl: HTMLDivElement;
   /** 「继续旅程 / 重新开始」那一排。没有存档时是 null。 */
   private saveRow: HTMLDivElement | null = null;
   // 这两个由 buildHelp() 在构造函数里建。写成 `!` 是准确的——
   // 构造函数第一屏就调了它，TS 只是看不穿跨方法的赋值。
   private helpBox!: HTMLDivElement;
   private helpBody!: HTMLPreElement;
+
+  /**
+   * 「演示」那颗按钮。**模型没到货之前它是禁用的。**
+   *
+   * ## 为什么演示要单独设一道门，而「开启旅程」不用
+   *
+   * 自行车的 GLB 走的是启动屏之后的后台流式链（`main.ts` 的 `assetChain`），
+   * 而标题页不等它——这是对的，"能不能玩"和"画得全不全"是两件事。
+   * 但演示不一样：**它是给评审看的 90 秒**，而演示的第一辆车**必须是自行车**
+   * （`mountDemoVehicle()`）。模型没到时 `set('bike')` 被 `canEnter()` 挡掉，
+   * 于是 90 秒里出现的是一个背包在跑的人，而且**界面上没有任何一个字说明为什么**。
+   *
+   * 对一个 3D 骑行游戏来说，那 90 秒就是它的第一句话。
+   * 所以这里宁可让按钮等，也不让它静默降级。
+   */
+  private demoBtn!: HTMLButtonElement;
+  private demoReady = false;
+  /** 「演示」下面那行小字。模型没到时它换成"正在等车"的说法。 */
+  private demoNote!: HTMLDivElement;
+
+  /**
+   * 画质组默认**折叠**。
+   *
+   * 折叠之前，那一屏从上到下是：标题 → 副标题 → 一句主张 → 两颗按钮 →
+   * 工具行 → 分隔线 → 三档画质 → 判定理由 → 档位说明。也就是说玩家的
+   * **第一眼落在 `Render scale 100% / Shadows 2048px / 130m` 上**——
+   * 一句他要读三遍也读不懂、而且读完不知道能干什么的话。
+   *
+   * 判定理由本身是有价值的（低配玩家需要知道画面为什么糊），所以它**没被删**，
+   * 只是收进折叠区，折叠时留一行摘要——玩家想看随时能展开。
+   */
+  private qualityBox!: HTMLDivElement;
+  private qualityToggle!: HTMLButtonElement;
+  private qualityBody!: HTMLDivElement;
+  private qualityOpen = false;
 
   constructor(o: TitleOpts) {
     this.hooks = o.hooks;
@@ -100,9 +138,15 @@ export class TitleScreen {
     // 放在第二颗——它不该和主行动同一个视觉权重。
     const acts = el('div', 'g-acts');
     acts.appendChild(button(t('start'), { cls: 'g-btn-major', onClick: () => this.hooks.onStart() }));
-    acts.appendChild(button(t('demo_start'), { cls: 'g-btn-major', onClick: () => this.hooks.onStartDemo() }));
+    this.demoBtn = button(t('demo_loading'), {
+      cls: 'g-btn-major',
+      onClick: () => this.hooks.onStartDemo(),
+    });
+    setDisabled(this.demoBtn, true);
+    acts.appendChild(this.demoBtn);
     card.appendChild(acts);
-    card.appendChild(note(t('demo_hint'), 'g-note-dim'));
+    this.demoNote = note(t('demo_loading_hint'), 'g-note-dim');
+    card.appendChild(this.demoNote);
 
     // ---- 有存档才出现的两颗 ----
     // 放在主按钮**下面**而不是并列：并列会让人以为「开启旅程」和「继续旅程」
@@ -129,9 +173,18 @@ export class TitleScreen {
 
     card.appendChild(rule());
 
-    // ---- 画质三档 ----
-    const qBox = el('div', 'g-group');
-    qBox.appendChild(el('div', 'g-group-h', t('quality')));
+    // ---- 画质三档（默认折叠，见 `qualityOpen` 的注释） ----
+    this.qualityBox = el('div', 'g-group g-group-fold');
+    this.qualityToggle = button('', {
+      cls: 'g-fold-h',
+      onClick: () => {
+        this.qualityOpen = !this.qualityOpen;
+        this.syncQualityFold();
+      },
+    });
+    this.qualityBox.appendChild(this.qualityToggle);
+    this.qualityBody = el('div', 'g-fold-b');
+    this.qualityBox.appendChild(this.qualityBody);
     const seg = el('div', 'g-seg');
     for (let i = 0; i < TIER_KEYS.length; i++) {
       const b = button(t(TIER_KEYS[i]), {
@@ -142,13 +195,13 @@ export class TitleScreen {
       this.tierBtns.push(b);
       seg.appendChild(b);
     }
-    qBox.appendChild(seg);
+    this.qualityBody.appendChild(seg);
     this.summaryBox = el('div', 'g-rows');
-    qBox.appendChild(this.summaryBox);
+    this.qualityBody.appendChild(this.summaryBox);
     this.reasonEl = note(this.reasonText(), 'g-note-why');
-    qBox.appendChild(this.reasonEl);
-    qBox.appendChild(note(t('quality_hint'), 'g-note-dim'));
-    card.appendChild(qBox);
+    this.qualityBody.appendChild(this.reasonEl);
+    this.qualityBody.appendChild((this.hintEl = note(qualityHint(this.picked), 'g-note-dim')));
+    card.appendChild(this.qualityBox);
 
     this.root.appendChild(card);
     this.root.appendChild(this.buildHelp());
@@ -234,6 +287,44 @@ export class TitleScreen {
     this.sync();
   }
 
+  // ---------------------------------------------------------------- 模型就绪
+
+  /**
+   * 自行车的 GLB 到货了没有。宿主从世界的 `loaded` 事件里问出来再喂进来。
+   *
+   * **幂等**，而且允许"先 true 后再 true"：模型链有可能重跑（换档、重试），
+   * 重复把按钮点亮不会出错，所以调用方不需要自己去重。
+   */
+  setDemoReady(ready: boolean): void {
+    if (this.demoReady === ready) return;
+    this.demoReady = ready;
+    this.syncDemo();
+  }
+
+  private syncDemo(): void {
+    setDisabled(this.demoBtn, !this.demoReady);
+    setFlag(this.demoBtn, 'is-waiting', !this.demoReady);
+    setText(this.demoBtn, this.demoReady ? t('demo_start') : t('demo_loading'));
+    setFlag(this.demoNote, 'is-waiting', !this.demoReady);
+    setText(this.demoNote, t(this.demoReady ? 'demo_hint' : 'demo_loading_hint'));
+  }
+
+  // ---------------------------------------------------------------- 画质折叠
+
+  private syncQualityFold(): void {
+    setFlag(this.qualityBox, 'is-open', this.qualityOpen);
+    setShown(this.qualityBody, this.qualityOpen);
+    // 折叠时不能只把内容藏起来就算完——玩家会以为这一档没有代价。
+    // 摘要行留在折叠线上，所以标题按钮自己就是那一行摘要。
+    setText(
+      this.qualityToggle,
+      this.qualityOpen
+        ? `${t('quality')} ${t('fold_close')}`
+        : `${t('quality')} · ${t(TIER_KEYS[this.picked])} ${t('fold_open')}`,
+    );
+    setFlag(this.qualityToggle, 'is-open', this.qualityOpen);
+  }
+
   // ---------------------------------------------------------------- 帮助
 
   private buildHelp(): HTMLDivElement {
@@ -285,6 +376,10 @@ export class TitleScreen {
     }
     this.paintSummary();
     setText(this.reasonEl, this.reasonText());
+    setText(this.hintEl, qualityHint(this.picked));
+    // 折叠线上那一行摘要跟着档位走，所以切语言/换档都要重画它。
+    this.syncQualityFold();
+    this.syncDemo();
     setText(this.helpBody, t('help_overlay'));
     if (this.saveRow) {
       const btns = this.saveRow.querySelectorAll<HTMLElement>('.g-btn, .g-btn-quiet');

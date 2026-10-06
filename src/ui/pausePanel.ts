@@ -11,7 +11,7 @@
  * ## 画质切换要立刻反映到画面上
  *
  * 点一档就调 `onQualityChange(tier)`，宿主立刻 `world.applyPreset()` +
- * `loop.setBaseScale()`。这里不写"下次生效"之类的软话——`quality_hint`
+ * `loop.setBaseScale()`。这里不写"下次生效"之类的软话——`qualityHint()`
  * 那一行讲的是**植被半径**要重新进这一趟才生效（`veg.invalidate()` 的
  * 行为），阴影和分辨率是当场就变的。两件事都写出来，玩家才知道
  * 「画面已经变了，但草还没回来」不是 bug。
@@ -25,7 +25,7 @@
  * 状态永远回读。
  */
 import { audio } from '../core/audio';
-import { TIER_KEYS, tierSummary } from '../core/settings';
+import { TIER_KEYS, qualityHint, tierSummary } from '../core/settings';
 import { t } from '../i18n';
 import { button, el, note, row, rule, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
@@ -50,6 +50,12 @@ export interface PauseOpts {
   /** 自适应当前是否开着、目标多少。由宿主持有（settings 里落盘的那份）。 */
   adaptiveOn: boolean;
   adaptiveTarget: number;
+  /**
+   * 打开明信片预览。**不走 hooks**：它只开一屏 UI，不改存档也不改相位
+   * （相位在整段时间里都还是 `paused`），而 hooks 是给宿主那些
+   * 「游戏状态机要动」的动词留的——见 UIHooks.onWorldEntered 的注释。
+   */
+  onLookPostcard?: () => void;
 }
 
 export class PausePanel {
@@ -65,12 +71,14 @@ export class PausePanel {
 
   private tierBtns: HTMLButtonElement[] = [];
   private summaryBox: HTMLDivElement;
+  private hintEl: HTMLDivElement;
   private adaptBtn: HTMLButtonElement;
   private adaptTargets: HTMLDivElement;
   private bgmBtn: HTMLButtonElement;
   private sfxBtn: HTMLButtonElement;
   private allBtn: HTMLButtonElement;
   private langBtn: HTMLButtonElement;
+  private pcBtn: HTMLButtonElement;
   private helpBox: HTMLDivElement;
   /** 由 buildHelp() 在构造函数里建；`!` 是准确的，TS 只是看不穿跨方法赋值。 */
   private helpBody!: HTMLPreElement;
@@ -120,7 +128,7 @@ export class PausePanel {
     card.appendChild(seg);
     this.summaryBox = el('div', 'g-rows');
     card.appendChild(this.summaryBox);
-    card.appendChild(note(t('quality_hint'), 'g-note-dim'));
+    card.appendChild((this.hintEl = note(qualityHint(this.tier), 'g-note-dim')));
 
     // ---- 自适应分辨率 ----
     const ad = el('div', 'g-group');
@@ -183,8 +191,15 @@ export class PausePanel {
     mu.appendChild(muSeg);
     card.appendChild(mu);
 
-    // ---- 语言 / 操作说明 ----
+    // ---- 明信片 / 语言 / 操作说明 ----
+    // 明信片放最左：暂停的那一秒是玩家唯一会停下来想"我到底在攒什么"的时刻，
+    // 而这一屏是三十天里唯一能回答那个问题的地方。
     const tools = el('div', 'g-tools');
+    this.pcBtn = button(t('postcard_look'), {
+      cls: 'g-btn-quiet',
+      onClick: () => o.onLookPostcard?.(),
+    });
+    tools.appendChild(this.pcBtn);
     this.langBtn = button(t('language'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onLangToggle() });
     tools.appendChild(this.langBtn);
     tools.appendChild(
@@ -223,6 +238,7 @@ export class PausePanel {
     add(t('hud_scale'), s.renderScale);
     add(t('tier_shadows'), s.shadows);
     add(t('tier_ground'), s.ground);
+    setText(this.hintEl, qualityHint(this.tier));
   }
 
   // ---------------------------------------------------------------- 触屏
@@ -355,6 +371,7 @@ export class PausePanel {
     setFlag(this.sfxBtn, 'is-on', !audio.sfxMuted);
     setText(this.sfxBtn, audio.sfxMuted ? t('off') : t('sfx_short'));
 
+    setText(this.pcBtn, t('postcard_look'));
     setText(this.langBtn, t('language'));
     setText(this.finishBtn, t('finish_run'));
     setText(this.finishHint, t('finish_run_hint'));

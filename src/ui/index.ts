@@ -48,6 +48,7 @@ import { Hud } from './hud';
 import { Dialogue } from './dialogue';
 import { ShopPanel } from './shopPanel';
 import { PausePanel } from './pausePanel';
+import { PostcardPanel } from './postcardPanel';
 import { SynthesisPanel } from './synthesisPanel';
 import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
@@ -238,6 +239,7 @@ export class UI {
   private dialogueIdle: Promise<void> = Promise.resolve();
   private shop: ShopPanel;
   private pause: PausePanel;
+  private postcard: PostcardPanel;
   private synthesis: SynthesisPanel;
   private endCard: EndCard;
   private touchCtl: TouchControls;
@@ -300,6 +302,19 @@ export class UI {
       tier: this.tier,
       adaptiveOn: this.adaptiveOn,
       adaptiveTarget: this.adaptiveTarget,
+      onLookPostcard: () => this.lookPostcard(),
+    });
+    // 必须在暂停面板之后构造：两者都是铺满全屏的 `.g-screen`，
+    // 同层叠放的先后由 `.g-root` 里的 append 顺序决定，构造早了就被压在下面。
+    this.postcard = new PostcardPanel({
+      parent: this.root,
+      onClose: () => {
+        // 先把这一页自己关掉：`pause.show()` 只管把暂停亮起来，
+        // 不负责收别人的屏。留着这一页的话两张卡片叠在一起——
+        // 而它本来就是「点卡外暗处」和「Esc」都要收掉的。
+        this.postcard.hide();
+        this.pause.show();
+      },
     });
     this.synthesis = new SynthesisPanel({
       parent: this.root,
@@ -479,6 +494,19 @@ export class UI {
   }
 
   /**
+   * 自行车的 GLB 到货了没有 → 标题页那颗「演示」按钮能不能按。
+   *
+   * 宿主（`main.ts` 的 `onAssetLoaded()`）从世界的 `loaded` 事件问出来再喂进来。
+   * **UI 不自己轮询**：模型的生死只有世界知道，而让面板去猜"大概加载完了吧"
+   * 就会在 20 秒硬超时之后点亮一颗永远按不动的按钮。
+   *
+   * 幂等，重复调用安全。
+   */
+  setDemoReady(ready: boolean): void {
+    this.title.setDemoReady(ready);
+  }
+
+  /**
    * 引导页。
    *
    * ⚠️ 这一页的出口**必须走 hook**（`UIHooks.onWorldEntered`），不能直接调
@@ -509,6 +537,7 @@ export class UI {
 
   private hidePanels(): void {
     this.pause.hide();
+    this.postcard.hide();
     this.synthesis.hide();
     this.endCard.hide();
     this.shop.close();
@@ -520,6 +549,22 @@ export class UI {
 
   hidePause(): void {
     this.pause.hide();
+    // 一起关：明信片是暂停的子页，留着它等于"暂停已经结束了但还挡着路"。
+    // 正常路径上不会走到这儿（Esc 在捕获阶段就被明信片自己拦住、退回暂停），
+    // 这一行是给"宿主绕过暂停面板直接把暂停收掉"那条路兜住的。
+    this.postcard.hide();
+  }
+
+  /**
+   * 暂停里的「看看明信片」。
+   *
+   * 先把暂停收起来：两张居中卡片叠在一起读作"有两个菜单"，
+   * 而这一屏要说的事只有一件——这趟攒到哪儿了。
+   * 相位不动，仍然是 `paused`，所以退出时回到的是暂停面板而不是路上。
+   */
+  lookPostcard(): void {
+    this.pause.hide();
+    this.postcard.show();
   }
 
   showSynthesis(mode: 'chapter' | 'maxed' | 'plain' = 'plain'): void {
@@ -694,6 +739,7 @@ export class UI {
     // 面板部分：只看开着的那一块
     if (isShown(this.shop.root)) this.shop.refresh();
     if (isShown(this.pause.root)) this.pause.sync();
+    if (isShown(this.postcard.root)) this.postcard.sync();
     if (isShown(this.synthesis.root)) this.synthesis.sync();
     if (isShown(this.endCard.root)) this.endCard.sync();
     if (isShown(this.title.root)) this.title.sync();
@@ -746,6 +792,18 @@ export class UI {
 
   // ---------------------------------------------------------------- 铺子
 
+  /**
+   * 铺子面板开着没有。
+   *
+   * 宿主要靠它决定 `Escape` 该做什么（见 `main.ts` 的 `Escape` 分支）：
+   * 商店**复用**了 `checkin` 相位，而 `Escape` 那条分支只认 `paused` /
+   * `roaming`——于是开店期间按 `Esc` 什么都没发生，玩家会以为游戏卡住了。
+   * `Esc` 是"我卡住了"的第一反应键，它必须有出口。
+   */
+  get shopOpen(): boolean {
+    return this.shop.isOpen;
+  }
+
   /** 打开/关闭铺子面板。铺名取 `world.nearby.shopName`。 */
   setShopOpen(open: boolean): void {
     if (!open) {
@@ -797,6 +855,7 @@ export class UI {
     this.hud.dispose();
     this.shop.dispose();
     this.pause.dispose();
+    this.postcard.dispose();
     this.synthesis.dispose();
     this.endCard.dispose();
     this.touchCtl.dispose();

@@ -932,6 +932,35 @@ function projectMap(l: MapLayout, wx: number, wz: number): Pt {
   ];
 }
 
+/**
+ * 某一格碎片所在驿站，落在**卡片地图**上的位置（画布像素坐标）。
+ *
+ * 中途预览要圈出"这一件在那儿"：圈的坐标必须和 `drawRouteMap()` 画那颗点
+ * 用的是同一套投影，否则圈会钉在地图外、而点还在框里。所以这两个数
+ * 只能从这个函数里出来——调用方拿到的是**已经投影过**的像素点。
+ *
+ * 为什么圈地图上的点、而不是五格画区里的那一格：
+ * 画区随评级增减（`VARIANT_LAYOUTS` 里初旅只有 4 格），
+ * **还没到过的那一件在卡上根本没有格子可圈**；
+ * 但 16 座驿站在地图上一直都在——到过没有，只是实心还是空心。
+ * 所以按地图圈，五种状态（没到 / 一到 / 两到 / 三到 / 五件齐）都有落点。
+ *
+ * @returns `null` 表示这一格查不到驿站（槽位下标越界），调用方不画圈。
+ */
+export function fragmentMapDot(
+  input: PostcardInput,
+  slot: number,
+  canvasW: number,
+  canvasH: number,
+): [number, number] | null {
+  const stIdx = ROAD.FRAGMENT_SLOT_STATION_IDX[slot];
+  if (stIdx == null) return null;
+  const st = STATIONS[stIdx];
+  if (!st) return null;
+  const l = layoutMap(canvasW, canvasH * MAP_BAND_FRAC, input.hasEnvelope);
+  return projectMap(l, st.x, st.z);
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // 确定性噪点
 // ══════════════════════════════════════════════════════════════════════

@@ -139,9 +139,28 @@ const JOBS = files.map((f) =>
         : { src: join(SRC_MODELS, f), name: f, ratio: 0.6, error: 0.0025 },
 );
 
+/**
+ * 源模型一个都没有 → **红灯**，不是"跳过"。
+ *
+ * 这里是 `exit(0)` 时最坏的一种空转：`.cache/tex/` 是上游
+ * `compress-textures.mjs` 的产物，而那个脚本的输入在**仓库之外**
+ * （Godot 源项目，不提交）。源不在时它现在会自己 `exit(1)`；
+ * 这一条是第二道防线——直接跑 `npm run assets:geo`、或者
+ * 缓存被人清空时，症状是同一个。
+ *
+ * 原来这里是 `exit(0)` + 「没有找到源模型，跳过」。于是：
+ * 命令成功、`public/models/` 一字节没动、终端上没有任何异常，
+ * 而下一个人（人或 AI）会以为"刚压过一遍"。
+ * **一个不做任何事的绿灯，比一个红灯贵得多。**
+ */
 if (JOBS.length === 0) {
-  console.log('[assets] 没有找到源模型，跳过');
-  process.exit(0);
+  console.error(
+    `[assets] ${SRC_MODELS} 里一个源模型都没有 —— 没有压过任何东西，退出。\n` +
+      `        上一步应该是：npm run assets:tex（它把贴图压进 ${SRC_MODELS}）。\n` +
+      `        源资产在仓库之外，用 GIFT188_SRC_MODELS / GIFT188_SRC_BIKE / GIFT188_SRC_EXTRA 指定。\n` +
+      `        注意 public/models/ 现在还是**上一次**的产物，看起来正常其实是没压。`,
+  );
+  process.exit(1);
 }
 
 let totalIn = 0;

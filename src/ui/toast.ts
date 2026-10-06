@@ -27,6 +27,28 @@ import { el } from './dom';
 const MAX_TOASTS = 3;
 /** 默认停留秒数。 */
 const DEFAULT_MS = 1800;
+/**
+ * 同一句话连发的最短间隔（秒）。
+ *
+ * 竹丛挨着竹丛的时候，每一片都各自合法地 cue 一次（`BambooBeats` 里是按丛去重的），
+ * 于是玩家会在十几秒里看到三条一模一样的「前面有竹」。第一条之后的那两条没有新信息——
+ * 真正的信号是 HUD 上那个收缩的圈，它不重复。
+ *
+ * 关掉这一层跑一遍演示就知道它挡的是什么：骑快了**三条会同时躺在屏上**，
+ * 三行一模一样的字摞在屏幕底部，把真正要读的那一条埋掉。这不是"多读了两遍"，
+ * 是"该读的没读到"。
+ *
+ * 3s 这个数两头都有约束：
+ *  · **下界 `> DEFAULT_MS/1000`**：重复的那条绝不能落在第一条还在屏上的时候，
+ *    否则两条一模一样的字会并排躺着。
+ *  · **上界「读完也忘掉了」**：演示里相邻两丛最近的一次相距约 2.7s。
+ *    2s 拦不住它——那两条只是擦着错开，本来就没叠。而 3s 之后仍然是每丛一次，
+ *    因为真正的新一丛是玩家主动骑过去的，间隔远大于 3s，误伤不了。
+ *
+ * 去重放在这一层而不是 `beatOn` 里：toast 是唯一知道「屏上现在有什么」的地方，
+ * 在这里拦，以后任何一条新加的提示都不会再犯同一个错。
+ */
+const REPEAT_GAP_SEC = 3.0;
 
 interface Item {
   node: HTMLDivElement;
@@ -36,6 +58,15 @@ interface Item {
 export class Toast {
   readonly root: HTMLDivElement;
   private items: Item[] = [];
+  /**
+   * `update(dt)` 攒出来的累计秒数。
+   *
+   * 不用 `Date.now()`：这一层刻意不碰 `setTimeout`（见文件头），
+   * 墙钟会让"玩家在暂停面板里待了多久"漏进提示的去重里。
+   */
+  private clock = 0;
+  private repeatText = '';
+  private repeatAt = 0;
 
   constructor(parent: HTMLElement) {
     this.root = el('div', 'g-toasts');
@@ -51,6 +82,10 @@ export class Toast {
    */
   show(text: string, ms = DEFAULT_MS): void {
     if (!text) return;
+    // 被压掉的那一条**不**刷新时间戳：锚点永远是最近一次真的上屏的那条。
+    if (text === this.repeatText && this.clock - this.repeatAt < REPEAT_GAP_SEC) return;
+    this.repeatText = text;
+    this.repeatAt = this.clock;
     const node = el('div', 'g-toast g-fade', text);
     this.root.appendChild(node);
     this.items.push({ node, life: ms / 1000 });
@@ -62,6 +97,9 @@ export class Toast {
   }
 
   update(dt: number): void {
+    // 时钟要在早退**之前**推进。反过来的话，提示全消掉之后时钟就冻住了，
+    // 下一次真的隔了很久才来的同一句话会被当成"刚刚说过"而压掉。
+    if (dt > 0) this.clock += dt;
     if (this.items.length === 0 || dt <= 0) return;
     for (let i = this.items.length - 1; i >= 0; i--) {
       const it = this.items[i];

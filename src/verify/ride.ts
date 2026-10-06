@@ -27,7 +27,8 @@ import { Stations } from '../world/stations';
 import { Ride } from '../world/ride';
 import { PRESETS } from '../core/settings';
 import { RIDE, WORLD, ROADMESH } from '../data/raw';
-import { canRide, demoAim, demoInput, unwrapArc } from '../game/phase';
+import { canRide, demoAim, demoInput, demoLookahead, unwrapArc, DEMO_CRUISE } from '../game/phase';
+import { MODE_TUNE } from '../world/vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength, nearestArcParam } from '../data/route';
 import { Object3D } from 'three';
 
@@ -434,6 +435,7 @@ function smoothstep01(a: number, b: number, x: number): number {
 export function assertDemoDrive(): { ok: boolean; detail: string; asserts: number } {
   const probs: string[] = [];
   let asserts = 0;
+  const FOOT_TOP = MODE_TUNE.foot.maxSpeed;
   const { ride } = build();
   ride.setCanMove(canRide({ phase: 'roaming', checkInPressed: false, narrativeBusy: false, checkInStage: 'none' }));
 
@@ -469,7 +471,7 @@ export function assertDemoDrive(): { ok: boolean; detail: string; asserts: numbe
   let worstSteer = 0;
   for (let i = 0; i < steps; i++) {
     const p = ride.pos;
-    const d = demoInput(demoAim(p.x, p.z, ride.headingValue, arc), ride.speedValue);
+    const d = demoInput(demoAim(p.x, p.z, ride.headingValue, arc), ride.speedValue, RIDE.MAX_SPEED);
     worstSteer = Math.max(worstSteer, Math.abs(d.steer));
     ride.fixedUpdate(1 / 60, d);
     const raw = nearestArcParam(ride.pos.x, ride.pos.z);
@@ -514,9 +516,85 @@ export function assertDemoDrive(): { ok: boolean; detail: string; asserts: numbe
   asserts++;
   if (worstSteer > 0.9) probs.push(`演示车峰值转向 ${worstSteer.toFixed(2)}，一直满舵在修方向`);
 
+  // ---- 3. 演示切不到自行车时的退路 ----
+  //
+  // 上面那一整轮是**按自行车**跑的（极速 15、巡航 11）。但 `mountDemoVehicle()`
+  // 用的是 `vehicle.set('bike')`，模型没加载好时它返回 false、演示仍然是徒步。
+  // 那一档原来会卡死：`DEMO_CRUISE` 恒为 11 而徒步极速只有 6，油门永久贴在 -1；
+  // `DEMO_LOOKAHEAD` 那张表又是 11 m/s 下量的，6 m/s 时预判时间翻倍。
+  // 实测无头跑 309 秒：+238s 之后里程、驿站数、天数全部零变化。
+  //
+  // 所以这里用**徒步的真实极速**再跑一轮同样的闭环。它不需要同样快，
+  // 但必须**一直在动、一直在路上**——"卡住"是这一族唯一的症状。
+  const footRun = (() => {
+    const r2 = build();
+    r2.ride.setCanMove(canRide({ phase: 'roaming', checkInPressed: false, narrativeBusy: false, checkInStage: 'none' }));
+    r2.ride.spawn(p0.x, p0.z, Math.atan2(-t0.x, -t0.z));
+    let a = nearestArcParam(r2.ride.pos.x, r2.ride.pos.z);
+    let adv = 0;
+    let off = 0;
+    let worst = 0;
+    let spd = 0;
+    const FOOT_MAX = MODE_TUNE.foot.maxSpeed;
+    for (let i = 0; i < steps; i++) {
+      const p = r2.ride.pos;
+      const v = r2.ride.speedValue;
+      const d = demoInput(demoAim(p.x, p.z, r2.ride.headingValue, a), v, FOOT_MAX);
+      r2.ride.fixedUpdate(1 / 60, d);
+      const raw = nearestArcParam(r2.ride.pos.x, r2.ride.pos.z);
+      let delta = raw - a;
+      if (delta > 0.5) delta -= 1;
+      if (delta < -0.5) delta += 1;
+      adv += delta;
+      a = unwrapArc(a, raw);
+      if (!r2.ride.onRoad()) off++;
+      worst = Math.max(worst, lateralOf(r2.ride.pos.x, r2.ride.pos.z));
+      spd += Math.abs(v);
+    }
+    return { gained: adv * TOTAL_ARCLENGTH, off, worst, avg: spd / steps };
+  })();
+
+  asserts++;
+  if (footRun.gained < seconds * FOOT_TOP * 0.5) {
+    probs.push(
+      `演示若仍是徒步，${seconds} 秒只走了 ${footRun.gained.toFixed(0)}m（徒步极速 ${FOOT_TOP}，巡航应为 ${(FOOT_TOP * 0.8).toFixed(1)}）——` +
+        '演示车在原地打转或卡住',
+    );
+  }
+  asserts++;
+  if (footRun.off > 0) probs.push(`演示若是徒步，${footRun.off}/${steps} 帧不在路面上`);
+  asserts++;
+  if (footRun.avg < FOOT_TOP * 0.6) {
+    probs.push(`演示若是徒步，平均只有 ${footRun.avg.toFixed(1)} m/s（极速 ${FOOT_TOP}）——油门在要一个够不到的速度`);
+  }
+
+  // ---- 4. 前视必须跟着车速缩放，而不是写死 12m ----
+  //
+  // 那张标定表是 11 m/s 下量的：12m ≈ 1.1 秒。前视的物理意义是**时间**，
+  // 写死距离等于假设车速恒定 —— 而演示在切不到自行车时跑 6 m/s。
+  // 这一条直接量"预判秒数"，它比"前视多少米"更接近它真正要守的东西。
+  asserts++;
+  {
+    const secondsAhead = (v: number): number => demoLookahead(v) / v;
+    const atCruise = secondsAhead(DEMO_CRUISE);
+    if (Math.abs(atCruise - 1.1) > 0.05) {
+      probs.push(`巡航 ${DEMO_CRUISE} m/s 时的前视是 ${demoLookahead(DEMO_CRUISE)}m（${atCruise.toFixed(2)} 秒），标定表那一档应当 ≈1.1 秒`);
+    }
+    const atFoot = secondsAhead(FOOT_TOP * 0.8);
+    if (Math.abs(atFoot - atCruise) > 0.2) {
+      probs.push(
+        `预判时间不随车速保持恒定：巡航 ${atCruise.toFixed(2)} 秒 vs 徒步 ${atFoot.toFixed(2)} 秒——` +
+          '前视写死了距离，车一慢就开始大幅摆头',
+      );
+    }
+    // 上限那一条：20m 是标定表里骑出路肩的档，不许越过。
+    if (demoLookahead(60) > 20) probs.push(`前视上限失守：60 m/s 时算出 ${demoLookahead(60).toFixed(1)}m`);
+    if (demoLookahead(0) < 0) probs.push('前视算出了负数');
+  }
+
   const detail = probs.length
     ? probs.join('；')
-    : `${seconds}s 走了 ${gained.toFixed(0)}m · 全程在路面上 · 最远横向 ${worstLateral.toFixed(2)}m / 半宽 ${ROADMESH.TOTAL_HALF_WIDTH}m · 均速 ${avg.toFixed(1)} m/s · 峰值转向 ${worstSteer.toFixed(2)}`;
+    : `${seconds}s 走了 ${gained.toFixed(0)}m · 全程在路面上 · 最远横向 ${worstLateral.toFixed(2)}m / 半宽 ${ROADMESH.TOTAL_HALF_WIDTH}m · 均速 ${avg.toFixed(1)} m/s · 峰值转向 ${worstSteer.toFixed(2)} · 徒步退路 ${footRun.gained.toFixed(0)}m 均速 ${footRun.avg.toFixed(1)} m/s 离路 ${footRun.off} 帧`;
   return { ok: probs.length === 0, detail, asserts };}
 
 /** 中心线在参数 `arc` 处的单位切向（指向参数增大的一侧）。 */

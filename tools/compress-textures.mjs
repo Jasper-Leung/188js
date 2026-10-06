@@ -30,8 +30,38 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const CACHE = join(ROOT, '.cache/tex');
 
-const SRC_MODELS = 'D:/code/20260926/no188/assets/models';
-const SRC_BIKE = 'D:/code/20260926/no188/assets/bike.glb';
+/**
+ * 源资产从哪来。
+ *
+ * ## 为什么改成环境变量
+ *
+ * 原来这里是三条写死的绝对路径（`D:/code/20260926/no188/…`），
+ * 指向**仓库之外**那台机器上的 Godot 源项目。后果有两层：
+ *
+ * 1. **干净克隆跑不了这条管线。** 换一台机器、或者过三个月再回来，
+ *    `D:/code/20260926` 不在了。
+ * 2. **更糟的是它不报错。** 原来 `existsSync(...) ? … : []` 这一支直接给了空数组，
+ *    于是 `npm run assets:all` 跑完**一行警告都不打**，
+ *    接着 `optimize-assets.mjs` 从空的 `.cache/tex/` 里找不到任何输入，
+ *    也照样"成功"退出。而 `public/models/` 里那 16.84MB 仍然是**上一次**的产物——
+ *    看起来一切正常，实际上整条资产管线已经空转。
+ *
+ * AGENTS.md 把 `npm run assets:all` 写在部署步骤里，README 的资产表也按
+ * "22.3MB → 5.0MB" 描述这条管线；一条在干净克隆上静默空转的管线，
+ * 等于那两个数字都失去了出处。
+ *
+ * 所以：**默认值保留**（本机还能用），但允许用环境变量指到别处，
+ * 并且源不在时**直接退出并说清楚缺哪个**。
+ *
+ * ```bash
+ * set GIFT188_SRC_MODELS=D:/work/no188/assets/models
+ * set GIFT188_SRC_BIKE=D:/work/no188/assets/bike.glb
+ * set GIFT188_SRC_EXTRA=D:/work/no188-extra
+ * npm run assets:all
+ * ```
+ */
+const SRC_MODELS = process.env.GIFT188_SRC_MODELS ?? 'D:/code/20260926/no188/assets/models';
+const SRC_BIKE = process.env.GIFT188_SRC_BIKE ?? 'D:/code/20260926/no188/assets/bike.glb';
 
 const MAX_TEX_HERO = 1024;
 const MAX_TEX_MASS = 768;
@@ -41,14 +71,36 @@ const MIN_BYTES = 24 * 1024;
 
 mkdirSync(CACHE, { recursive: true });
 
+/**
+ * 源不在就**停下**，而不是继续。
+ *
+ * 这是一个 `process.exit(1)`，不是警告：这条管线唯一的产物是
+ * `.cache/tex/`，而它只被下一步 `optimize-assets.mjs` 读。
+ * 源缺失时继续跑的唯一结果是"成功地什么都不做"——
+ * 退出码 0、`public/models/` 原封不动、下一个人以为刚压过。
+ * 宁可让 `npm run assets:all` 红灯：红灯说明"没压"，绿灯才说明"压过了"。
+ */
+if (!existsSync(SRC_MODELS)) {
+  console.error(
+    `[assets] 找不到源模型目录：${SRC_MODELS}\n` +
+      `        源资产在**仓库之外**（Godot 源项目），不会被提交。用环境变量指过去：\n` +
+      `          GIFT188_SRC_MODELS=<目录>   # 里面是一批 .glb\n` +
+      `          GIFT188_SRC_BIKE=<文件>     # 自行车单独一条\n` +
+      `          GIFT188_SRC_EXTRA=<目录>    # 松树 / 竹 / 现代建筑，见 tools/extra-models.mjs\n` +
+      `        停下是因为继续跑会"成功"地产出一个空缓存，\n` +
+      `        而 public/models/ 会保持上一次的旧体积——那正是它最难被发现的样子。`,
+  );
+  process.exit(1);
+}
+
 const MASS_MODELS = { has: isMassModel };
-const jobs = existsSync(SRC_MODELS)
-  ? readdirSync(SRC_MODELS)
-      .filter((f) => f.toLowerCase().endsWith('.glb'))
-      .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }))
-  : [];
+const jobs = readdirSync(SRC_MODELS)
+  .filter((f) => f.toLowerCase().endsWith('.glb'))
+  .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }));
 if (existsSync(SRC_BIKE)) {
   jobs.push({ src: SRC_BIKE, name: 'bike.glb', dst: 'bike.glb', maxTex: MAX_TEX_HERO });
+} else {
+  console.warn(`  ! 自行车源缺失，跳过：${SRC_BIKE}`);
 }
 // 外部补充资产（松树 / 竹 / 两栋现代建筑）。清单见 tools/extra-models.mjs 的文件头：
 // 松树是这一轮补上的关键——源项目那株行道树简化压不动，见那份文件的说明。

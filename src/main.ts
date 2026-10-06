@@ -41,11 +41,12 @@ import { installTouchDetection, touchEnabled, setTouchMode } from './core/touch'
 import { SceneDump } from './ui/sceneDump';
 import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
-import { buildInputFromState, endingFromGameState, exportBothSides, seededBackText, type EndingId } from './game/postcard';
+import { buildInputFromState, endingFromGameState, exportFileName, exportPostcardPng, seededBackText, type EndingId } from './game/postcard';
 
 import { canRide as canRideNow, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
 import type { BeatEvent } from './game/beat';
 import type { RideInput } from './world/ride';
+import { MODE_TUNE } from './world/vehicle';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
 const bootSub = document.getElementById('boot-sub') as HTMLElement;
@@ -205,28 +206,41 @@ async function main() {
   await nextFrame();
 
   // ---- 资产渐进加载：先能玩，再补好看 ----
-  // 顺序不是随便排的：自行车是玩家全程盯着的那一个，最先；
-  // 植被其次（没有它世界是空的但路能骑）；地标最后（按距离自己进）。
   //
   // **进度条跟这条链，但启动屏不等它。**
   // 原来 `bootDone()` 挂在链的末尾，于是任何一个 GLB 悬住（弱网、代理、
   // 服务端 200 但不发 body）都会让玩家盯着一根停在 62% 的进度条——
   // 而此时世界已经建好、路能骑、标题页能用，只差一辆自行车。
   // "能不能玩"和"画得全不全"是两件事，不该用后一件卡住前一件。
-  const assetChain = world
-    .loadBikeModel()
+  /**
+   * 三组资产**并行**跑，不再排队。
+   *
+   * ## 原来那条链为什么慢
+   *
+   * 它是 `bike → vegetation → (scenery + extras)` 的**串行**链，
+   * 而这三组的体量分别是 **2.79MB / ~2.1MB / ~7.2MB**。
+   * 串行意味着总时间 = 三者之和 ≈ 12MB 的传输时间，
+   * 而它们彼此之间**没有任何依赖**（植被不关心车模长什么样，反之亦然）。
+   *
+   * 实测症状：每次开页都命中 20 秒硬超时
+   * （`[gift188] model loading timed out (20000ms), continuing`），
+   * 于是路边一直没有树、角色一直没到、演示按钮一直点不亮。
+   *
+   * 改成并行之后总时间 = **max(三组)**，不是 sum。
+   * 20 秒的阈值没动——它本来就不是"够不够用"的旋钮，
+   * 它是"请求是不是真的挂住了"的信号（GLTFLoader 没有内建超时）。
+   */
+  const bikeChain = world.loadBikeModel().then(() => boot(0.78));
+  const restChain = Promise.all([
+    // 植被其次（没有它世界是空的但路能骑）
+    world.loadVegetationModels().then(() => boot(0.9)),
+    // 载具配件（滑板 + 角色）与区域散布都是**可选**的：
+    // 拉不到只是不能换滑板 / 少一片竹，不该拖住整条链。
+    world.loadSceneryModels(),
+    world.loadVehicleExtras(),
+  ]).then(() => boot(1));
+  const assetChain = Promise.all([bikeChain, restChain])
     .then(() => {
-      boot(0.78);
-      return world.loadVegetationModels();
-    })
-    .then(() => {
-      // 载具配件（滑板 + 角色）与区域散布都是**可选**的：
-      // 拉不到只是不能换滑板 / 少一片竹，不该拖住整条链。
-      boot(0.9);
-      return Promise.all([world.loadSceneryModels(), world.loadVehicleExtras()]);
-    })
-    .then(() => {
-      boot(1);
       audio.prefetchSfx();
     })
     .catch((e) => {
@@ -235,7 +249,7 @@ async function main() {
       boot(1);
     });
   // 硬超时：GLTFLoader 没有内建超时，悬住的请求会永远 pending。
-  // 20 秒足够 localhost 与正常宽带走完 4MB，也足够在慢网下给出"它不来了"的信号。
+  // 20 秒足够 localhost 与正常宽带走完这几组，也足够在慢网下给出"它不来了"的信号。
   void withTimeout(assetChain, 20_000, t('warn_model_timeout'));
 
   // **摩托车单独一条链**，不进上面的 `assetChain`。
@@ -507,6 +521,13 @@ class App {
   private demoActive = false;
   private demoT = 0;
   /**
+   * 玩家自己按过 `E` 没有。
+   *
+   * 它是「车到货时自动换成自行车」的唯一安全阀（`onAssetLoaded()`）：
+   * 玩家表达过偏好的话，游戏就不再替他换。
+   */
+  private vehicleTouched = false;
+  /**
    * 演示那辆车记住的弧长。-1 = 还没起步，第一帧直接采信 `nearestArcParam()`。
    *
    * 它必须自己记一份而不能每帧现取：8 字在中央穿过自己，
@@ -636,6 +657,16 @@ class App {
 
     // 世界事件
     this.world.on((e) => this.onWorldEvent(e));
+    // **补一次已经发生的事。**
+    //
+    // 资产链在 `new App()` 之前就起跑了（`main.ts` 启动那段），
+    // 而这一行才是第一次订阅——本地磁盘命中时自行车早加载完了，
+    // 那次 `loaded` 事件发生在**没有订阅者**的时候，直接丢了。
+    // 症状是标题页的「演示」按钮永远停在"正在装车"，而车明明就在那儿。
+    //
+    // 问的是 `canEnter('bike')` 而不是某个标志位：它读的是 `Vehicle.models`
+    // 里的实际模型引用，所以"到没到"只有一个来源。
+    if (this.world.ride.vehicle.canEnter('bike')) this.onAssetLoaded('bike');
     // 路边碑文：黑底文字卡，不是 toast。
     // 差别不是好不好看，是**toast 要求玩家注意到它，而字应该"顺路读到"**——
     // 玩家在过弯，不该为了一块石头停下来。
@@ -852,7 +883,17 @@ class App {
       switch (e.code) {
         case 'Escape':
           e.preventDefault();
-          if (this.phase === 'paused') this.resume();
+          // **先问面板，再问相位。**
+          //
+          // 商店复用 `checkin` 相位，而下面两条只认 `paused` / `roaming`，
+          // 于是开店期间按 `Esc` 过去什么都不会发生：玩家把商店关不掉，
+          // 也没有任何提示——`Esc` 明明是"我卡住了"的第一反应键。
+          //
+          // 顺序要紧：铺子开着的时候 `Esc` 应该是**退出一层**，
+          // 而不是顺手把整个游戏暂停掉、把铺子留在暂停面板底下。
+          if (this.ui.shopOpen) {
+            this.closeShop();
+          } else if (this.phase === 'paused') this.resume();
           else if (this.phase === 'roaming') this.pause();
           break;
         case 'Space':
@@ -900,7 +941,11 @@ class App {
         case 'KeyE':
           // 切载具。滑板模型没加载成功时不切，并说清为什么——
           // 按了键没反应而不解释，玩家会以为 E 坏了。
+          //
+          // `vehicleTouched` 在这里落下：玩家一旦自己选过，自行车到货时
+          // 就不再自动换给他了（见 `onAssetLoaded()`）。
           {
+            this.vehicleTouched = true;
             const v = this.world.ride.cycleVehicle();
             this.ui.showToast(
               v ? t('veh_switched', { mode: t(`veh_${v}`) }) : t('veh_locked'),
@@ -1137,6 +1182,68 @@ class App {
     // 演示里没有人按键，对白必须自己往前走
     this.ui.setDialogueAutoAdvance(2.4);
     this.enterWorld();
+    this.mountDemoVehicle();
+  }
+
+  /**
+   * 演示一开始就把车换成自行车。
+   *
+   * ## 这里曾经有一段"徒步会开坏演示"的警告，现在它过期了
+   *
+   * 原文说：演示驾驶控制器是**按自行车标定的**（`DEMO_CRUISE = 11`，
+   * 徒步极速只有 6），前视 12m 在徒步下变成整整 2 秒预判，纯追踪于是
+   * 大幅摆头、里程零增长。**那两条都已经不是问题了**：
+   *
+   * · `phase.ts` 的 `demoLookahead(speed)` 把前视按**预判时间**恒定缩放，
+   *   6 m/s 时自动收到约 6.5m，仍然是 1.1 秒；
+   * · `demoInput()` 的巡航取 `min(DEMO_CRUISE, maxSpeed * 0.8)`，
+   *   徒步时是 4.8 m/s，不会一直去要一个够不到的速度。
+   *
+   * 也就是说**兜底路径本身是好的**，车到没到都能把这一趟骑完。
+   *
+   * ## 剩下的那一条仍然要堵
+   *
+   * 兜底是好的，但它**静默**。对一个 3D 骑行游戏来说，90 秒里出现一个
+   * 背包在跑的人、而界面上没有一个字说明为什么，比开坏更伤。
+   * 所以真正的修复不在这个方法里，而在两处：
+   * 标题页在模型到货前**禁用**演示按钮（`titleScreen.ts` 的 `demoReady`），
+   * 以及车一��货就自动切上去（`onAssetLoaded()`）。
+   *
+   * 保留这一行是因为它是兜底的兜底：万一玩家在模型到货前用别的方式
+   * （`?autostart`、控制台）进了演示，这里至少还能把车换上。
+   *
+   * 为什么是自行车而不是摩托车：摩托极速 24，比 `DEMO_CRUISE` 高一倍的档，
+   * 收油曲线会长期贴在负油门上；而自行车极速 15，11 落在中间偏下，
+   * 正是那张前视表量出来时的速度。
+   */
+  private mountDemoVehicle(): void {
+    this.world.ride.vehicle.set('bike');
+  }
+
+  /**
+   * 演示的时间推进 —— 不只是加一个秒表，**90 秒到了就要真的收场**。
+   *
+   * ## 原来这句是一个空承诺
+   *
+   * 标题页上写着「演示 · 90 秒」，而 `DEMO_BUDGET_SEC` 在整个代码库里
+   * **从来没被读过一次**（只在 `ECON` 的类型声明和一条注释里出现）。
+   * 实测无头跑 309 秒，演示仍在继续：天数、驿站、铜钱从 +238s 起到 +309s
+   * 一个都没变过。评审等来的不是收尾，是一片不会停的天空。
+   *
+   * 一个兑现不了的按钮比没有按钮更糟——它把"我不知道自己要等多久"
+   * 写在了界面上。所以现在预算用掉，`demo_card_notice` 也终于有个落点。
+   *
+   * 为什么调 `finishRun()` 而不是自己拼一个收尾：结算页要展示明信片，
+   * 而明信片正是演示想让人看到的东西。演示的价值是**让人看到走完全程
+   * 是什么样**，直接跳到结算页比在路边停下来更符合那个目的。
+   */
+  private demoTick(dt: number): void {
+    this.demoT += dt;
+    if (this.demoT >= ECON.DEMO_BUDGET_SEC) {
+      this.demoT = ECON.DEMO_BUDGET_SEC;
+      this.ui.showToast(t('demo_card_notice'), 3200);
+      this.finishRun();
+    }
   }
 
   private finishRun() {
@@ -1479,10 +1586,10 @@ class App {
         ending,
         backText: this.backText || seededBackText(ending, getLang()),
       });
-      const { front, back } = await exportBothSides(input);
-      const blob = side === 'front' ? front : back;
-      const name = side === 'front' ? 'gift188-front.png' : 'gift188-back.png';
-      await saveBlob(blob, name);
+      // 只画被请求的那一面：原来一律 `exportBothSides()` 把两面都画掉，
+      // 而玩家点的是「导出正面」或「导出背面」一个按钮。
+      const blob = await exportPostcardPng(input, side);
+      await saveBlob(blob, exportFileName(side));
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return; // 玩家自己取消
       console.warn('[gift188]', t('warn_postcard_export'), e);
@@ -1568,10 +1675,45 @@ class App {
       // 表里真正写着的是 `dusk_began`：「天要暗了。灯亮起来，路还是那条路。」
       this.ui.showToast(t('dusk_began'), 3200);
     } else if (e.type === 'loaded') {
-      // 资产到位不打扰玩家：它自己会出现在画面上
-      void e.what;
+      // 资产到位不打扰玩家：它自己会出现在画面上。
+      // **除了自行车**——它是这一档唯一的例外，理由见 `onAssetLoaded()`。
+      this.onAssetLoaded(e.what);
     } else if (e.type === 'stationPassed') {
       void e.index;
+    }
+  }
+
+  /**
+   * 自行车到位。
+   *
+   * ## 它做两件事，都是「不让玩家看见一次降级」
+   *
+   * **① 点亮标题页的演示按钮。**
+   * 演示是给评审看的 90 秒，而它第一辆车必须是自行车（`mountDemoVehicle()`）。
+   * 模型没到时 `set('bike')` 被 `canEnter()` 挡掉，于是那 90 秒里出现的是
+   * 一个背包在跑的人——对一个 3D 骑行游戏来说，那就是它的第一句话。
+   * 所以按钮在到货前是禁用的（文案 `demo_loading`），而不是按下去再看运气。
+   *
+   * **② 玩家还没自己选过载具的话，直接把人放上自行车。**
+   * 这是 P1-6 那条「开局不要走路」的落点。做成**到货才切**而不是「一进世界就切」，
+   * 是因为进世界那一刻车多半还没到，那时候 `set('bike')` 同样会被挡掉，
+   * 于是又回到徒步——这正是原来的问题。
+   *
+   * `vehicleTouched` 是这里唯一的安全阀：玩家自己按过 `E` 之后再自动换车，
+   * 读起来就是"游戏不听我的"。**只在玩家没表达过偏好时才替他决定。**
+   *
+   * ## 为什么模型没到也不重试
+   *
+   * `assetChain` 外面套着 20 秒硬超时（`main.ts` 启动那段），超时后那条链
+   * 就不再推进了。与其在这里轮询一个可能永远不会来的事件，不如让标题页
+   * 一直显示"正在装车"——那是一个**诚实**的状态，而一个 20 秒后突然能按的
+   * 按钮读起来像坏了。
+   */
+  private onAssetLoaded(what: string): void {
+    if (what !== 'bike') return;
+    this.ui.setDemoReady(true);
+    if (!this.vehicleTouched && this.world.ride.vehicle.id === 'foot') {
+      this.world.ride.vehicle.set('bike');
     }
   }
 
@@ -1646,7 +1788,14 @@ class App {
     const p = ride.pos;
     const raw = nearestArcParam(p.x, p.z);
     this.demoArc = unwrapArc(this.demoArc < 0 ? raw : this.demoArc, raw);
-    return demoInput(demoAim(p.x, p.z, ride.headingValue, this.demoArc), ride.speedValue);
+    const v = ride.speedValue;
+    // 极速与车速都取当前载具的：演示若切不到自行车（模型没加载好），
+    // 这两个数会让控制器自动退回到徒步也能骑的档，而不是一路要 11 m/s。
+    return demoInput(
+      demoAim(p.x, p.z, ride.headingValue, this.demoArc, undefined, v),
+      v,
+      MODE_TUNE[ride.vehicleKind].maxSpeed,
+    );
   }
 
   /**
@@ -1723,7 +1872,7 @@ class App {
     this.ui.update(dt);
     this.dump?.update(dt);
     this.debug?.update(dt);
-    if (this.demoActive) this.demoT += dt;
+    if (this.demoActive) this.demoTick(dt);
     this.syncPerf();
   }
 
