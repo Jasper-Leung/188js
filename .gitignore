@@ -52,3 +52,6 @@ Thumbs.db:ehl
 $RECYCLE.BIN/
 # ±¾»ú AI ¹¤¾ßµÄÈ¨ÏŞÇåµ¥£ºÀïÃæÊÇ¾ø¶ÔÂ·¾¶Óë±¾µØ¶Ë¿Ú£¬»»Ì¨»úÆ÷¾ÍÃ»ÓÃÁË¡£
 .claude/
+
+# Cloudflare Workers æœ¬åœ°çŠ¶æ€ï¼ˆwrangler dev çš„ä¸´æ—¶ç›®å½•ä¸ stateï¼Œä¸è¿›ç‰ˆæœ¬åº“ï¼‰
+.wrangler/

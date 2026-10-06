@@ -266,6 +266,46 @@ tools/       gd-parse extract-data compress-textures optimize-assets
 
 ---
 
+## 部署
+
+这是个**纯静态**的构建：没有服务端代码、没有 API、没有 Worker 逻辑。
+`dist/` 就是全部。
+
+### Cloudflare（当前用的）
+
+```bash
+npm run deploy:dry    # 先干跑一遍：读产物、查配置，不上线
+npm run deploy        # npm run build && wrangler deploy
+npm run preview:cf    # 在 workerd 里试跑已构建的产物
+```
+
+`wrangler.jsonc` 里**没有 `main`**——所以它不是 Worker，是纯静态资源托管，
+没有一个请求会进到 workerd 执行。给 21MB 的 `.glb` / `.ogg` 加一层 isolate
+只会凭空多一跳。
+
+`assets.directory` 那一行是必须的，它才是真正告诉 wrangler「上传什么」；
+只写 `not_found_handling` 的话，症状是 **deploy 成功、拿到域名、点进去 404**。
+
+`vite.config.ts` 里的 `plugins: []` 同样是必须的——`wrangler deploy` 会来改这个
+文件，找不到 `plugins` 数组就直接报错退出。它**一直是空的**：官方模板会往这里
+塞 `@cloudflare/vite-plugin`，那是为了让 `vite dev` 能把请求送进 workerd 预览
+Worker；本项目没有请求会进 Worker，所以插件在这里没用，却会让 `vite dev`
+整个跑在 workerd 上，three.js 的 HMR 变慢、WebGL 上下文能不能在 isolate 里
+正常拿成了日常开发的赌注。要在 workerd 里试跑用 `preview:cf`。
+
+### GitHub Pages
+
+`.github/workflows/pages.yml` 在每次推 main 时自动构建部署。**两套部署会同时存在**，
+改完记得确认自己改的是哪一个。
+
+### 两条都必须成立的假设
+
+- `vite.config.ts` 的 `base: './'` —— 换成非 `'./'` 而不同步改 CI，
+  症状很安静：本地一切正常，线上白屏 404。
+- `dist/.nojekyll` —— Pages 需要它才不会把下划线开头的目录当 Jekyll 处理。
+
+---
+
 ## 实机验证结果
 
 在 **AMD Radeon RX 5500 XT / 32GB / 8 核** 上跑生产构建（`vite preview`）：

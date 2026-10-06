@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gift-no188",
+  "compatibility_date": "2026-10-01",
+
+  // 这个 Worker **没有 `main`**，所以它不是 Worker——是纯静态资源托管。
+  // 没有一个请求会进到 workerd 里执行，全部由 Cloudflare 边缘直接返回。
+  // 本项目 100% 是客户端的（`src/` 里没有服务端代码），所以这是对的选择：
+  // 给 21MB 的 .glb / .ogg 加一层 isolate 只会凭空多一跳。
+  //
+  // 另一个等价选择是 Cloudflare Pages（`wrangler pages deploy dist`），
+  // 连 vite.config.ts 都不用碰。见 README「部署」一节。
+
+  "assets": {
+    // ⚠️ 这一行是 scaffold 漏掉的，而它才是真正告诉 wrangler「上传什么」的那句。
+    // 只写 `not_found_handling` 是不够的——那说的是**找不到文件时怎么办**，
+    // 不是**去哪儿找文件**。症状很安静：deploy 成功、拿到一个域名、点进去 404。
+    "directory": "./dist",
+
+    // 路由表的兜底。游戏本身没有前端路由（`src/` 里没有 pushState/hashchange），
+    // 所以这条实际上用不上；留着是因为改版名时手滑进一个子路径不至于白屏。
+    "not_found_handling": "single-page-application"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}
