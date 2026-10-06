@@ -44,6 +44,7 @@ import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
 import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSeam } from '../world/pose';
 import { assertRide, assertDemoDrive } from './ride';
+import { assertSubmission } from './submission';
 import { GameStateManager } from '../game/state';
 import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
 import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
@@ -7696,6 +7697,16 @@ function ensureStubDom(): StubDom {
 }
 
 // ---------------------------------------------------------------- 跑
+// ------------------------------------------------------- 参赛提交页
+/**
+ * 提交页是唯一直接给评委看的东西，而它的失效全是静默的：
+ * 链接打错、媒体没跟仓库走、页面混进一句游戏里其实没有的卖点。
+ *
+ * 判据写在 `src/verify/submission.ts`（单独一个文件是因为它读的是**源码目录**
+ * 而不是运行时数据，和 ride 那条一样该有自己的说明）。
+ */
+check('verify_submission', () => assertSubmission());
+
 export function runAll(): { name: string; ok: boolean; detail: string; asserts: number }[] {
   return results.map((r) => {
     try {

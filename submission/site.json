@@ -1,0 +1,67 @@
+{
+  "_why": [
+    "这个仓库本身就是《188号礼物》的官网 + 参赛提交页。",
+    "页面里每个外链都标了 data-cfg=\"键名\"，tools/build-submission.mjs 构建时按本文件覆写，",
+    "verify_submission 断言两者一致。改链接只改这里一处，别去改 HTML。",
+    "",
+    "★ 链接值留空 = **占位**：构建时会把那个链接摘掉、渲染成一个虚线的「待填」标记，",
+    "  不会在页面上留一个点不开的死链。填上 https://… 即刻生效。",
+    "  `npm run submission:links` 每次都会把还欠着的地址列出来。"
+  ],
+  "todoText": "待填 / TBD",
+
+  "projectTitle": "Gift No.188",
+  "projectTitleZh": "188号礼物",
+  "byline": "独立开发者 · One-person team",
+
+  "repoUrl": "https://github.com/Jasper-Leung/188js",
+  "devlogUrl": "https://github.com/Jasper-Leung/188js/blob/main/promo/devlog.md",
+  "commitsUrl": "https://github.com/Jasper-Leung/188js/commits/main",
+
+  "_demoUrl": [
+    "在线 Demo 的正式地址还没定（历史上仓库里留过三套部署痕迹，见表单 §0.4）。",
+    "现在 demoHidden = true：整块「在线 Demo」卡片、抬头的试玩按钮、页脚那条链接都收起来，",
+    "页面上不留一个点不开的按钮。地址定下来之后：",
+    "  1) 把 demoHidden 改成 false",
+    "  2) 把 demoUrl 填成整条 https://…",
+    "  3) 跑一次 npm run build",
+    "顺带一提：dist/ 的根目录就是游戏本体，所以本站自己也是 Demo 的载体之一 —— 部署到哪儿，哪儿就能直接玩。"
+  ],
+  "demoUrl": "",
+  "demoHidden": true,
+
+  "_sourceZipUrl": [
+    "源码 zip（GitHub 对 main 分支的归档）。和 releaseUrl 指向的桌面版安装包是两回事。"
+  ],
+  "sourceZipUrl": "https://github.com/Jasper-Leung/188js/archive/refs/heads/main.zip",
+
+  "_releaseUrl": [
+    "桌面版安装包：Windows / macOS / Linux 三个平台，由 .github/workflows/release.yml",
+    "在 tag 上构建（产物是 Tauri 的 nsis / dmg / deb / AppImage）。",
+    "这里填 releases/latest 而不是具体某个文件：那个地址永远指向最新一版，",
+    "而文件名里带版本号与架构，填死了下次发版就过期。"
+  ],
+  "releaseUrl": "https://github.com/Jasper-Leung/188js/releases/latest",
+
+  "_media": [
+    "相对路径，页面在 dist/submission/ 下，所以就是 submission/media/ 里的文件名。",
+    "想让视频走外链（不进仓库、不进产物）就把 videoSrc 填成完整 https URL，",
+    "构建脚本会照抄，不会再去找本地文件；此时 poster 仍建议留在本地。",
+    "不想把片子拷进 dist 时：npm run build -- --no-media（页面会退化成一句说明）。",
+    "",
+    "media/demo.mp4 是母版 promo/footage/07-walkthrough-vo.mp4（334MB / 1080p60）压出来的网页版：",
+    "  ffmpeg -i promo/footage/07-walkthrough-vo.mp4 -vf scale=1280:-2,fps=30 \\",
+    "    -c:v libx264 -preset slow -crf 31 -pix_fmt yuv420p -profile:v high -level 4.0 \\",
+    "    -c:a aac -b:a 128k -ar 48000 -ac 2 -movflags +faststart submission/media/demo.mp4",
+    "CRF 27 是 41MB、31 是 23MB、540p 的 28 也还是 23MB —— 同一个体积下 720p 比 540p 清楚，",
+    "所以选 31。faststart 不能省：母版的 moov 在文件尾，不加它观众得点一下才出画面。",
+    "体积是构建时量的（写进 videoSize），片长写在下面（没装 ffprobe，脚本不去猜）。"
+  ],
+  "videoSrc": "media/demo.mp4",
+  "videoPoster": "media/poster.jpg",
+  "videoTitle": "演示录屏 · Demo screen recording",
+  "videoDuration": "3:52",
+
+  "runCommand": "npm ci && npm run build && npm run preview",
+  "packageCommand": "npm run package:web"
+}

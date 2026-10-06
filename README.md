@@ -37,31 +37,32 @@ npm run build            # 产物在 dist/
 
 ---
 
-## 参赛提交页
+## 官网
 
-赛事表单要的三个字段——**演示录屏视频 / 在线 DEMO 链接 / 下载链接**——
-收在一个页面里，评委点开就能拿齐：
+这个仓库同时是《188号礼物》的**官网**。`npm run build` 产出两样东西：
 
-**<https://jasper-leung.github.io/no188-gift-web/submission/>**
+- `dist/` 根 —— 游戏本体（部署到哪，哪儿就能直接玩）
+- `dist/submission/` —— 站点的介绍页：录屏、下载入口、以及在线 Demo
 
-| 字段 | 那一页上是什么 |
+本页源码在 [`submission/`](submission/README.md)。链接与开关的**唯一来源**是
+`submission/site.json`：构建时烘进 HTML，`verify_submission` 守着它们——
+
+| 区块 | 状态 |
 |:---|:---|
-| 演示录屏视频 | 内嵌播放（3:52 英配解说 walkthrough），另有直链 mp4 可下 |
-| 在线 DEMO 链接 | 一个按钮就打开，免登录、免安装 |
-| 下载链接 | 源码 zip + 本地运行三步命令（可一键复制） |
+| 演示录屏视频 | ✅ `media/demo.mp4`（334 MB 母版压到 23.3 MB 的网页版，内嵌播放 + 直链下载） |
+| 在线 Demo | ⏸ 暂时收起（`demoHidden: true`）——地址定下来改一个键就会回来 |
+| 下载 | ✅ 桌面版安装包（Windows / macOS / Linux）· 源码 zip · 本地运行三步命令 |
 
-页面源码在 [`submission/`](submission/README.md)。链接的**唯一来源**是
-`submission/site.json`：`npm run build` 把它烘进 `dist/submission/`，
-而 `verify_submission` 守着这一页——三件东西都在、链接与配置一致、
-页面上写的体积等于文件真实体积、不许出现游戏里其实没有的卖点。
+页面上任何一个链接都没有死链：地址留空会显示成虚线的「待填」，还没开放的整块收起，
+两者都不会给访客留一个点了没反应的按钮。
 
 ```bash
-npm run submission:links   # 打印现在对外宣称的几个地址（改完链接先跑这个）
-npm run package:web        # 打一个可分发 zip，给「下载链接」那一栏用
+npm run submission:links   # 打印现在对外宣称的几个地址 + 还欠着的地址
+npm run package:web        # 打一个可离线分发的网页包（release/）
 ```
 
 游戏本身仍在 `dist/` 根目录，位置一个字没动（`base: './'` 决定了它只能在根，
-详见 `vite.config.ts` 的注释）；提交页走的是不经打包的路子，换个主机也能直接用。
+详见 `vite.config.ts` 的注释）；这一页走的是不经打包的路子，换个主机也能直接用。
 
 ---
 

@@ -1,0 +1,670 @@
+/* =============================================================================
+ * 参赛提交页 · 样式
+ * =============================================================================
+ * 为什么单独一份 CSS，而不是并进 `src/index.css`：
+ *   这一页是**给评委看的静态页**，不进 Vite 打包（`base: './'` 决定了游戏产物
+ *   只能在 dist 根下，见 vite.config.ts 的注释），也不共用游戏的 i18n。
+ *   它由 tools/build-submission.mjs 原样拷进 dist/submission/。
+ *
+ * 配色取自游戏自己的 UI 变量（src/index.css 的 :root）：纸、墨、朱印三色。
+ * 字体也直接借用游戏那份子集化的 `ui.woff2`（dist/fonts/ui.woff2 已经有了，
+ * 不额外占体积），排印和游戏里是同一套。
+ * ============================================================================= */
+
+@font-face {
+  font-family: '188UI';
+  src: url('../fonts/ui.woff2') format('woff2');
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --paper: #e8e0cd;
+  --paper-warm: #efe8d8;
+  --paper-deep: #ddd2ba;
+  --ink: #2a2622;
+  --ink-soft: #5c5347;
+  --ink-dim: #8a8071;
+  --seal: #b4552f;
+  --seal-deep: #8f3f20;
+  --rule: rgba(42, 38, 34, 0.16);
+  --rule-strong: rgba(42, 38, 34, 0.34);
+  --shadow: 0 1px 2px rgba(42, 38, 34, 0.06), 0 12px 28px -18px rgba(42, 38, 34, 0.45);
+
+  --measure: 68ch;
+  --pad: clamp(1.25rem, 4vw, 3rem);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/**
+ * `hidden` 必须赢过任何 display 规则。
+ *
+ * UA 样式表里的 `[hidden] { display: none }` 只是**作者样式优先级之下**的一条，
+ * 而这一页给 `.btn` 写了 `display: inline-block`——于是「已经打上 hidden 的
+ * 在线试玩按钮」照样显示。症状和「构建没生效」一模一样：按钮该藏却还在。
+ * 这条是所有用 hidden 做条件显示的页面的标准写法。
+ */
+[hidden] {
+  display: none !important;
+}
+
+html {
+  scroll-behavior: smooth;
+  /* 锚点跳转时给固定表头留位置 */
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: '188UI', 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', Georgia, serif;
+  font-size: clamp(15px, 0.55vw + 13.6px, 17px);
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------------------------------------------------------------- 语言切换
+ * 双语是**两套都写死在 DOM 里**的，不是 JS 填的：JS 关掉、或脚本还没跑到，
+ * 页面照样是完整的一页，而不是一片空白。切换只改 <html data-lang>，
+ * CSS 决定露哪一套 —— 藏起来的那套 display:none，读屏也不会念两遍。
+ * 默认中文：评委与赛事表单都是中文环境。
+ */
+[data-lang='zh'] .en {
+  display: none;
+}
+[data-lang='en'] .zh {
+  display: none;
+}
+
+img,
+video {
+  max-width: 100%;
+  display: block;
+}
+
+a {
+  color: var(--seal-deep);
+  text-decoration-color: rgba(180, 85, 47, 0.4);
+  text-underline-offset: 0.22em;
+}
+a:hover {
+  text-decoration-color: currentColor;
+}
+
+:focus-visible {
+  outline: 2px solid var(--seal);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 0.6rem 1rem;
+  z-index: 20;
+}
+.skip-link:focus {
+  left: 0;
+}
+
+/* ---------------------------------------------------------------- 抬头 */
+.hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* 主视觉是游戏自己的标题美术（八字山路），不是另找的图——页面和产品是同一件东西 */
+.hero-art {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+}
+.hero-art img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 42%;
+}
+/* 纸色压一层，保证正文对比度；不用纯黑，因为那张图本身就是水墨淡彩 */
+.hero-art::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(105deg, rgba(232, 224, 205, 0.97) 0%, rgba(232, 224, 205, 0.9) 42%, rgba(232, 224, 205, 0.42) 100%),
+    linear-gradient(0deg, rgba(232, 224, 205, 0.9) 0%, rgba(232, 224, 205, 0) 45%);
+}
+
+.hero-body {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: clamp(3rem, 9vw, 7rem) var(--pad) clamp(2.5rem, 6vw, 4.5rem);
+}
+
+.kicker {
+  margin: 0 0 1.25rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+}
+
+.hero-title {
+  margin: 0;
+  line-height: 1.05;
+  font-weight: 400;
+}
+.hero-title .latin {
+  display: block;
+  font-size: clamp(2.6rem, 8.5vw, 5.5rem);
+  letter-spacing: 0.02em;
+}
+.hero-title-zh {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: clamp(1rem, 2.4vw, 1.5rem);
+  color: var(--seal);
+  letter-spacing: 0.3em;
+}
+
+.hero-line {
+  max-width: var(--measure);
+  margin: 1.5rem 0 0;
+  font-size: clamp(1.02rem, 1.6vw, 1.25rem);
+  color: var(--ink-soft);
+}
+
+.hero-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 2.25rem;
+  margin: 2rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.hero-facts li {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.4;
+}
+.hero-facts b {
+  font-size: 1.35rem;
+  font-weight: 400;
+  color: var(--ink);
+}
+.hero-facts span {
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+.hero-cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 2.25rem 0 0;
+}
+
+.hero-tools {
+  margin: 1.75rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+.lang-toggle {
+  margin-top: 1.5rem;
+  padding: 0.35rem 0.9rem;
+  font: inherit;
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.lang-toggle:hover {
+  color: var(--ink);
+  border-color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------- 版面 */
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 0 var(--pad);
+}
+
+.section {
+  padding: clamp(2.5rem, 6vw, 4.5rem) 0;
+  border-bottom: 1px solid var(--rule);
+}
+.section:last-of-type {
+  border-bottom: 0;
+}
+
+.section-title {
+  margin: 0 0 0.75rem;
+  font-size: clamp(1.35rem, 3vw, 1.9rem);
+  font-weight: 400;
+  letter-spacing: 0.04em;
+}
+.section-title::before {
+  content: '';
+  display: inline-block;
+  width: 1.6rem;
+  height: 2px;
+  margin-right: 0.7rem;
+  vertical-align: 0.35em;
+  background: var(--seal);
+}
+
+.lede {
+  max-width: var(--measure);
+  margin: 0 0 2.25rem;
+  color: var(--ink-soft);
+}
+
+.prose {
+  max-width: var(--measure);
+}
+.prose p {
+  margin: 0 0 1.1rem;
+}
+.prose b {
+  font-weight: 400;
+  color: var(--seal-deep);
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+.card {
+  margin: 0 0 2rem;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  background: var(--paper-warm);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: var(--shadow);
+}
+
+.card-head {
+  display: flex;
+  gap: 1rem;
+  align-items: baseline;
+  margin: 0 0 1.25rem;
+}
+.card-head .num {
+  font-size: 1.5rem;
+  color: var(--seal-soft);
+  line-height: 1;
+}
+.card-head h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  font-weight: 400;
+}
+.card-sub {
+  margin: 0.15rem 0 0;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+/* 录屏。16:9 + 背景铺黑：视频没加载出来时也是一块干净的画面，不是白洞 */
+.video-frame {
+  margin: 0 0 1rem;
+  aspect-ratio: 16 / 9;
+  background: #10131a;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.video-frame video {
+  width: 100%;
+  height: 100%;
+}
+
+.card-meta {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--ink-dim);
+}
+
+/* 素材没跟这次构建走时的替身（见 HTML 里的注释）。
+   `data-missing` 是 tools/build-submission.mjs 挂在 <html> 上的。 */
+.media-note {
+  display: none;
+  margin: 0 0 1rem;
+  padding: 0.9rem 1rem;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  background: rgba(42, 38, 34, 0.05);
+  border: 1px dashed var(--rule-strong);
+  border-radius: 2px;
+}
+[data-missing~='video'] .video-frame,
+[data-missing~='video'] .alt-links {
+  display: none;
+}
+[data-missing~='video'] .media-note {
+  display: block;
+}
+
+.notes {
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+.notes li {
+  position: relative;
+  padding-left: 1.15rem;
+  margin: 0 0 0.55rem;
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+}
+/* 朱点。不是圆点列表符：朱印是这个作品的颜色，列表符也用它 */
+.notes li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.72em;
+  width: 5px;
+  height: 5px;
+  background: var(--seal);
+  transform: rotate(45deg);
+}
+
+.alt-links {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+.btn {
+  display: inline-block;
+  padding: 0.6rem 1.2rem;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--ink);
+  text-decoration: none;
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.btn:hover {
+  border-color: var(--ink);
+  background: rgba(42, 38, 34, 0.05);
+}
+
+.btn-primary {
+  color: var(--paper-warm);
+  background: var(--seal);
+  border-color: var(--seal);
+}
+.btn-primary:hover {
+  color: #fff;
+  background: var(--seal-deep);
+  border-color: var(--seal-deep);
+}
+
+.btn-big {
+  padding: 0.9rem 2.1rem;
+  font-size: 1.1rem;
+}
+
+.btn-small {
+  padding: 0.35rem 0.85rem;
+  font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------- 待填
+ * `site.json` 里留空的链接（正式地址还没定）在产物里会被摘掉 href，
+ * 换成这个标记。这里画成虚线块 + 一个「待填」角标：
+ *
+ * 为什么不给它一个 href：页面是给别人看的，一个点了没反应的按钮
+ * 比一句「这个还没定」糟糕得多。摘掉 href 之后它在 HTML 层面
+ * 本来就不是链接——不可聚焦、不会被读屏念成链接。
+ */
+[data-todo] {
+  cursor: default;
+  border-style: dashed;
+  border-color: var(--seal-soft);
+  color: var(--ink-dim);
+  background: transparent;
+  opacity: 1;
+}
+[data-todo]:hover {
+  border-color: var(--seal-soft);
+  background: transparent;
+}
+
+code[data-todo] {
+  color: var(--ink-dim);
+  border-style: dashed;
+}
+
+[data-todo]::after {
+  content: '待填';
+  margin-left: 0.5em;
+  padding: 0.05em 0.45em;
+  font-size: 0.7em;
+  letter-spacing: 0.06em;
+  color: var(--seal-deep);
+  border: 1px solid var(--seal-soft);
+  border-radius: 2px;
+  vertical-align: 0.12em;
+}
+/* 角标跟着语言走：中文页写「待填」，英文页写 TBD */
+[data-lang='en'] [data-todo]::after {
+  content: 'TBD';
+}
+/* 正文里的 <code data-todo> 本身就有那句字，别再挂一个角标 */
+code[data-todo]::after {
+  content: none;
+}
+
+.cta-big {
+  margin: 0 0 1rem;
+}
+
+/* ---------------------------------------------------------------- 链接行 */
+.url-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+.url-row code {
+  flex: 1 1 18rem;
+  padding: 0.5rem 0.7rem;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+  word-break: break-all;
+  background: rgba(42, 38, 34, 0.05);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+}
+
+.copy {
+  padding: 0.5rem 0.9rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid var(--rule-strong);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.copy:hover {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.copy[data-done='1'] {
+  color: var(--seal-deep);
+  border-color: var(--seal);
+}
+
+/* ---------------------------------------------------------------- 下载清单 */
+.dl {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: dl;
+}
+.dl-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem 0.9rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--rule);
+}
+.dl-row:first-child {
+  border-top: 0;
+}
+.dl-row[hidden] {
+  display: none;
+}
+
+.dl-label {
+  flex: 1 1 14rem;
+  font-size: 0.98rem;
+}
+.dl-hint {
+  flex: 1 1 100%;
+  font-size: 0.8rem;
+  color: var(--ink-dim);
+}
+.dl-hint code,
+.notes code {
+  padding: 0.05em 0.3em;
+  font-family: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.9em;
+  background: rgba(42, 38, 34, 0.06);
+  border-radius: 2px;
+}
+
+.url-row-wide {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 三栏 */
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: 1.75rem 2.25rem;
+}
+.col h4 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 400;
+  color: var(--seal-deep);
+}
+
+/* ---------------------------------------------------------------- 数字表 */
+.facts {
+  width: 100%;
+  margin: 2rem 0 0.75rem;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+.facts caption {
+  padding-bottom: 0.5rem;
+  color: var(--ink-dim);
+  font-size: 0.82rem;
+  text-align: left;
+}
+.facts th,
+.facts td {
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+  font-weight: 400;
+}
+.facts th {
+  width: 40%;
+  color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------- 页脚 */
+.foot {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 2.5rem var(--pad) 3.5rem;
+  border-top: 1px solid var(--rule);
+}
+.foot-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  margin: 0 0 1rem;
+}
+.foot-note {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink-dim);
+}
+
+/* ---------------------------------------------------------------- 窄屏 */
+@media (max-width: 640px) {
+  body {
+    line-height: 1.65;
+  }
+  .hero-facts {
+    gap: 0.75rem 1.5rem;
+  }
+  .facts th {
+    width: 50%;
+  }
+}
+
+/* ---------------------------------------------------------------- 打印
+ * 评委有可能把这一页打出来。打印时把 URL 印在链接后面，
+ * 否则纸上的「在线 Demo」是个点不了的东西。
+ */
+@media print {
+  .hero-art,
+  .lang-toggle,
+  .skip-link,
+  .copy,
+  video {
+    display: none;
+  }
+  body {
+    background: #fff;
+    font-size: 11pt;
+  }
+  .card {
+    box-shadow: none;
+    break-inside: avoid;
+  }
+  a[href^='http']::after {
+    content: ' (' attr(href) ')';
+    font-size: 0.85em;
+    color: #555;
+    word-break: break-all;
+  }
+}
+
+/* 动效只做在该做的地方，且听系统的 */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .btn {
+    transition: none;
+  }
+}

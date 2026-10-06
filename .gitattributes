@@ -22,6 +22,9 @@
 *.jpeg  binary
 *.png   binary
 *.webp  binary
+# 提交页的演示录屏（submission/media/demo.mp4）。同一件事：它也是压缩文件，
+# 而 `text=auto` 的自动探测在 mp4 上会误判成文本，一次误判就是几十 MB 的假 diff。
+*.mp4   binary
 
 # 锁文件不参与任何合并，行尾差异也毫无意义
 package-lock.json -diff
