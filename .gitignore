@@ -14,6 +14,11 @@
 node_modules/
 dist/
 
+# `npm run package:web` 打出来的可分发 zip（release/gift-no188-web-*.zip）。
+# 它是 dist 的再包装，属于产物；发布走 GitHub Release，地址填进
+# `submission/site.json` 的 releaseUrl。参见 submission/README.md。
+release/
+
 # 资产管线的中间产物。
 # `.cache/tex/` 是 `tools/compress-textures.mjs` 的输出，
 # 用来喂 `tools/optimize-assets.mjs` 生成 `public/models/*.glb`。
@@ -50,8 +55,13 @@ desktop.ini
 # Windows
 Thumbs.db:ehl
 $RECYCLE.BIN/
-# ���� AI ���ߵ�Ȩ���嵥�������Ǿ���·���뱾�ض˿ڣ���̨������û���ˡ�
+# ���� AI ���ߵ�Ȩ���嵥�������Ǿ���·���뱾�ض˿ڣ���̨������û���ˡ�
 .claude/
 
 # Cloudflare Workers 本地状态（wrangler dev 的临时目录与 state，不进版本库）
 .wrangler/
+
+# Tauri 的 Rust 构建产物（GB 级，绝不能进版本库）
+src-tauri/target/
+# Tauri 自动生成的能力 schema
+src-tauri/gen/schemas/

@@ -1,0 +1,24 @@
+[package]
+name = "gift188"
+version = "1.0.0"
+description = "188号礼物 — three.js 版"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+# 单 exe 场景下值得多花编译时间：
+# - lto + codegen-units=1：跨 crate 内联，体积和速度都受益
+# - opt-level="s"：偏体积（这个游戏 21MB 资源，exe 本身越小越好带）
+# - strip=true：去掉符号表
+# - panic="abort"：省掉展开表，几百 KB
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

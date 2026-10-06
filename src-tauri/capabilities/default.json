@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "本游戏是纯本地的：只加载随包发来的 dist/，不联网、不调任何 Tauri API。默认能力集已经够用，且刻意不放宽——以后真要加原生能力（写文件、截屏、系统通知）时在这里显式开，而不是预先留一堆口子。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
