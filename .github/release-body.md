@@ -1,37 +1,40 @@
-这一版把整个游戏打进了安装包：**装完断网也能玩**。不联网、不上传任何东西、没有账号。
+This build ships the whole game inside the installer: **it plays with the
+network unplugged**. No connection, nothing uploaded, no account.
 
-## 装哪个
+## Which one to take
 
-| 你的系统 | 下哪个（认后缀就行，版本号会变） | 怎么装 |
+| Your system | Download this (match the suffix — the version number changes) | How to install |
 |:---|:---|:---|
-| **Windows** 10 / 11（64 位） | 带 `x64-setup.exe` 的那个，约 19MB | 双击，一路下一步。**不需要管理员** |
-| **macOS**（Apple Silicon 和 Intel 都行） | 带 `universal.dmg` 的那个 | 打开 dmg，把 app 拖进「应用程序」 |
-| **Ubuntu / Debian / Mint 系** | 带 `.deb` 的那个 | `sudo apt install ./188号礼物__VERSION___amd64.deb` |
-| **其它 Linux**（Fedora / Arch / …） | 带 `.AppImage` 的那个 | `chmod +x` 之后双击 |
+| **Windows** 10 / 11 (64-bit) | the one ending in `_x64-setup.exe`, about 42 MB | double-click, next-next-finish. **No administrator needed** |
+| **macOS** (both Apple Silicon and Intel) | the one ending in `_universal.dmg` | open the dmg and drag the app into Applications |
+| **Ubuntu / Debian / Mint family** | the one ending in `_amd64.deb` | `sudo apt install ./<the-file-you-just-downloaded>.deb` |
+| **Other Linux** (Fedora / Arch / …) | the one ending in `_amd64.AppImage` | `chmod +x`, then double-click |
 
-macOS 那个是**通用二进制**，M 系列芯片和 Intel 的 Mac 用的是同一个文件，不用挑。
+The macOS build is a **universal binary**, so M-series and Intel Macs use the
+same file — there is nothing to pick between.
 
-## 第一次打开被拦下来，是正常的
+## Getting blocked on first launch is normal
 
-两个包都**没有代码签名**（签名证书要花钱，这里没有），所以系统会先拦一下：
+Neither package is **code-signed** (signing certificates cost money, and there
+aren't any here), so the system will stop and ask first:
 
-- **macOS**：右键点 app → 打开 → 弹窗里再点「打开」。
-  或者在终端里一次解决：
+- **macOS**: right-click the app → Open → click "Open" again in the dialog.
+  Or do it once, for good, from a terminal:
   `xattr -dr com.apple.quarantine "/Applications/188号礼物.app"`
-- **Windows**：「Windows 已保护你的电脑」→「更多信息」→「仍要运行」。
+- **Windows**: "Windows protected your PC" → "More info" → "Run anyway".
 
-装完之后正常双击就有声音了。
+After that it launches normally, with sound.
 
-## 不想装？
+## Rather not install anything?
 
-浏览器直接玩：<https://jasper-leung.github.io/no188-gift-web/>
+Play it in the browser: <https://jasper-leung.github.io/no188-gift-web/>
 
-## 别的
+## Notes
 
-- 想自己看代码：<https://github.com/Jasper-Leung/188js>
-- 想自己打包（Windows）：`npm install && npm run desktop:build`，
-  产物在 `src-tauri/target/release/bundle/`。
-- 哪台机器上装不动或者跑不起来，开个 issue 说一声：
-  <https://github.com/Jasper-Leung/188js/issues>
+- Source code: <https://github.com/Jasper-Leung/188js>
+- Build it yourself (Windows): `npm install && npm run desktop:build`,
+  artifacts land in `src-tauri/target/release/bundle/`.
+- If it won't install or won't run on your machine, please open an issue and say
+  so: <https://github.com/Jasper-Leung/188js/issues>
 
-—— 一个人做的礼物，谢谢你愿意打开它。
+— Made as a gift by one person. Thank you for opening it.

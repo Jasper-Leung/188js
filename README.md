@@ -1,494 +1,608 @@
-# 188号礼物 · three.js 版
+# Gift No.188 · three.js edition
 
-把 Godot 4.6 的《188号礼物》移植到 Web。玩法、数值、文案 1:1 保持，
-表现层与工程结构重做，并把**低配兼容**当成一等设计目标。
+> **English** · [简体中文](README.zh-CN.md)
 
-## 下载
+The web edition of *Gift No.188*, originally written in Godot 4.6. Gameplay,
+numbers and text are carried over 1:1; the presentation layer and the project
+structure were rebuilt, with **low-end compatibility** treated as a first-class
+design goal.
 
-不想装环境的话，直接拿装好的版本，Windows / macOS / Linux 都有：
+## From Godot to three.js
+
+Started from zero during the jam. **The first version was written in Godot 4.6**,
+running locally and leaning on the engine's own import pipeline to compress
+assets. It was then rewritten for the web in three.js — presentation layer and
+project structure rebuilt from scratch, with gameplay, numbers and text carried
+over 1:1.
+
+**The three.js version is what was submitted**, and it is what you can download
+below. The reason is practical: the web build asks nothing of the machine (no
+engine to install, no administrator rights), and "low-end compatibility" is only
+achievable when you control the internal render resolution yourself — Godot has
+no controllable internal render resolution, so scaling there is actually slower.
+
+Both versions were written from zero during the jam. The three.js build is not a
+conversion of the Godot one; it is a second implementation of the same game.
+
+## Download
+
+If you would rather not set anything up, grab a built version — Windows, macOS
+and Linux are all covered:
 **[Releases](https://github.com/Jasper-Leung/188js/releases)**
-（浏览器直接玩：<https://jasper-leung.github.io/no188-gift-web/>）
+(or play in the browser: <https://jasper-leung.github.io/no188-gift-web/>)
 
-| 你的系统 | 认哪个后缀 | 怎么装 |
+| Your system | Which one to take | How to install |
 |:---|:---|:---|
-| Windows 10 / 11（64 位） | `x64-setup.exe`，约 19MB | 双击，一路下一步，**不需要管理员** |
-| macOS（Apple Silicon + Intel 通用） | `universal.dmg` | 拖进「应用程序」 |
-| Ubuntu / Debian / Mint 系 | `.deb` | `sudo apt install ./<包名>.deb` |
-| 其它 Linux | `.AppImage` | `chmod +x` 之后双击 |
+| Windows 10 / 11 (64-bit) | the `x64-setup.exe` one, ~42 MB | double-click, next-next-finish, **no administrator needed** |
+| macOS (universal: Apple Silicon + Intel) | the `universal.dmg` one | drag into Applications |
+| Ubuntu / Debian / Mint family | the `.deb` one | `sudo apt install ./<package>.deb` |
+| Other Linux | the `.AppImage` one | `chmod +x`, then double-click |
 
-**包没有签名**，第一次打开被系统拦一下是正常的：macOS 右键 → 打开，
-Windows 点「更多信息 → 仍要运行」。自己打包见[部署](#部署)一节。
+**The packages are unsigned**, so the system blocking you on first launch is
+expected: on macOS right-click → Open, on Windows click "More info" → "Run
+anyway". Building it yourself is covered in [Deployment](#deployment).
 
-## 开发
+## Development
 
 ```bash
 npm install
-npm run data:extract     # 从 Godot 源项目机械提取数据表（已提交产物，可跳过）
-npm run assets:all       # 字体子集化 + GLB 压缩
+npm run data:extract     # mechanically extract data tables from the Godot source project (output is committed, so skippable)
+npm run assets:all       # font subsetting + GLB compression
 npm run dev              # http://127.0.0.1:5180
-npm run verify           # 无头回归
-npm run build            # 产物在 dist/
+npm run verify           # headless regression suite
+npm run build            # output lands in dist/
 ```
 
-调试入口：`?caps` 只跑能力探测不建世界；`?tier=0|1|2` 强制档位；
-`?touch=1` / `?touch=0` 强制挂 / 不挂触屏控件。
-`window.gift188` 是只读状态出口（车在哪、离路多远、draw call 数）。
-`F8` 开性能面板：帧率 / 绘制调用 / 三角面 / 渲染分辨率 / **车速 / 是否在路上** / 画质档。
+Debug entry points: `?caps` runs capability detection only and skips world
+building; `?tier=0|1|2` forces a quality tier; `?touch=1` / `?touch=0` forces
+touch controls on / off.
+`window.gift188` is a read-only state export (where you are, distance off-road,
+draw call count).
+**F8** opens the performance panel: fps / draw calls / triangles / render
+resolution / **speed / on-road or not** / quality tier.
 
 ---
 
-## 官网
+## The website
 
-这个仓库同时是《188号礼物》的**官网**。`npm run build` 产出两样东西：
+This repository is also the game's **website**. `npm run build` produces two
+things:
 
-- `dist/` 根 —— 游戏本体（部署到哪，哪儿就能直接玩）
-- `dist/submission/` —— 站点的介绍页：录屏、下载入口、以及在线 Demo
+- the root of `dist/` — the game itself (wherever you deploy it, it plays)
+- `dist/submission/` — the landing page: screencast, download entry points, and
+  a live demo
 
-本页源码在 [`submission/`](submission/README.md)。链接与开关的**唯一来源**是
-`submission/site.json`：构建时烘进 HTML，`verify_submission` 守着它们——
+The source of that page lives in [`submission/`](submission/README.md). The
+single source of truth for its links and switches is `submission/site.json`,
+baked into the HTML at build time and guarded by `verify_submission` —
 
-| 区块 | 状态 |
+| Section | Status |
 |:---|:---|
-| 演示录屏视频 | ✅ `media/demo.mp4`（334 MB 母版压到 23.3 MB 的网页版，内嵌播放 + 直链下载） |
-| 在线 Demo | ⏸ 暂时收起（`demoHidden: true`）——地址定下来改一个键就会回来 |
-| 下载 | ✅ 桌面版安装包（Windows / macOS / Linux）· 源码 zip · 本地运行三步命令 |
+| Demo screencast | ✅ `media/demo.mp4` (a 334 MB master compressed to a 23.3 MB web copy, embedded playback + direct download) |
+| Live demo | ⏸ hidden for now (`demoHidden: true`) — it comes back by flipping one key once the URL is settled |
+| Download | ✅ desktop installers (Windows / macOS / Linux) · source zip · three commands to run it locally |
 
-页面上任何一个链接都没有死链：地址留空会显示成虚线的「待填」，还没开放的整块收起，
-两者都不会给访客留一个点了没反应的按钮。
+Not a single link on the page is dead: an empty address renders as a dashed
+"coming soon" placeholder, and a section that isn't open yet collapses entirely
+— so a visitor never gets a button that does nothing when clicked.
 
 ```bash
-npm run submission:links   # 打印现在对外宣称的几个地址 + 还欠着的地址
-npm run package:web        # 打一个可离线分发的网页包（release/）
+npm run submission:links   # prints the addresses currently advertised, and the ones still owed
+npm run package:web        # builds an offline-distributable web package (release/)
 ```
 
-游戏本身仍在 `dist/` 根目录，位置一个字没动（`base: './'` 决定了它只能在根，
-详见 `vite.config.ts` 的注释）；这一页走的是不经打包的路子，换个主机也能直接用。
+The game itself still lives at the root of `dist/`, unmoved (which is what
+`base: './'` forces — see the comment in `vite.config.ts`); that page takes the
+un-bundled route instead, so it works on any host.
 
 ---
 
-## 这是个什么游戏
+## What kind of game this is
 
-一段有氛围的骑行旅程。骑一条自行构造的 8 字环线，对五座驿站各拜访三次，
-把十五个片刻合成一张可以写字、可以导出 PNG 的明信片。
+A ride with a mood. Cycle a hand-constructed figure-eight loop, visit five
+waystations three times each, and combine fifteen fragments into a postcard you
+can write on and export as a PNG.
 
-没有战斗，没有会结束这一趟的失败画面。跑完约 20–30 分钟。
+No combat, no failure screen that ends your run. A full playthrough takes about
+20–30 minutes.
 
 | | |
 |:---|:---|
-| 路线 | 8 字 lemniscate，实测 **1228.8 m**，闭合环，中心线 961 点 |
-| 驿站 | 16 座（5 座碎片站 + 11 座只路过） |
-| 打卡 | 每座碎片驿站去 **3 次** 才算刷满，共 15 局 |
-| 乐事 | 云 / 茶 / 琴 / 竹 / 禽 五个小游戏，按 `(碎片槽位 + 第几次到访) % 5` 轮换 |
-| 经济 | 旅币。三间铺子，10 件商品，一套"必须做减法"的预算 |
-| 心神 | 1~5。只降不锁，下限 1。有上行口（茶铺的清心茶） |
-| 收尾 | 明信片四档：初旅 / 探索者 / 朝圣者 / 大师；终局二选一 |
+| Route | figure-eight lemniscate, measured **1228.8 m**, closed loop, centreline 961 points |
+| Waystations | 16 (5 fragment stations + 11 you only pass) |
+| Check-ins | **3 visits** to each fragment station to fill it, 15 sessions in all |
+| Delights | five minigames — cloud, tea, qin, bamboo, bird — rotating on `(fragment slot + visit index) % 5` |
+| Economy | travel coins. Three shops, ten goods, and one budget that *requires* subtraction |
+| Spirits | 1–5. Falls but never locks; floor of 1. There is a way back up (the tea shop's clearing tea) |
+| Ending | four postcard ranks — first journey / explorer / pilgrim / master; a final two-way choice |
 
 ---
 
-## 移植的三条原则
+## Three rules for the port
 
-### 一、数据不手抄
+### One: never retype data
 
-源项目有 11k 行 GDScript、几百条文案、上百个数值。**手抄一次就是一个 typo**，
-而 typo 在这类数据里几乎不可见——驿站名错一个字、碎片颜色偏一个通道，
-玩起来"就是有点怪"，回归还是绿的。
+The source project has 11k lines of GDScript, hundreds of strings and dozens of
+numbers. **Typing any of it once is a typo**, and a typo in data like this is
+almost invisible — a station name off by one character, a fragment colour off by
+one channel. It plays as "something feels slightly off", and the regression
+suite stays green.
 
-所以写了 `tools/gd-parse.mjs`：一个只认 GDScript 字面量的解析器，
-把 `road_data.gd` / `shop_data.gd` / `Localization.gd` / `TerrainBuilder.gd` 等
-十余个文件的数据表原样搬成 JSON（`src/data/generated/`），一个字符都不改。
-遇到函数调用或表达式就报错退出——宁可失败也不能猜。
+So there is `tools/gd-parse.mjs`: a parser that only understands GDScript
+literals, and moves the data tables out of `road_data.gd` / `shop_data.gd` /
+`Localization.gd` / `TerrainBuilder.gd` and a dozen other files verbatim into
+JSON (`src/data/generated/`) — not one character changed. The moment it meets a
+function call or an expression it errors out and exits: failing is fine, guessing
+is not.
 
-搬完之后中文模型文件名（`station_亭灯.glb`）也完整保留，
-文案表 234 条 key 中英两侧集合严格一致。
+After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
+and both sides of the 234-key string table match exactly.
 
-### 二、几何逐点对译
+### Two: translate geometry point by point
 
-地形高程、路面网格、驿站落位全部逐行对译，源项目注释里那些"为什么是这个值"
-的判据一并带过来。三条硬不变量由 `npm run verify` 守着：
+Terrain elevation, road mesh and station placement are translated line by line,
+and the "why is this value this value" reasoning from the source comments comes
+across with them. Ten hard invariants are guarded by `npm run verify`:
 
 ```
-verify_8_shape     961 点 / 1228.8m / 4 处穿越中线 / 两环镜像对称
-verify_stations    16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 全部落在路肩外且够得着
-verify_economy     全清 799 / 全购 1010 / 缺口 211 / 纯骑行 424
-verify_water       3 只碗 / 水位 -3.4 恒低于自然地形下限 / 岸线离路 ≥ 16m
-verify_mini_game   15 局每件 3 次 / 首次到访 = 自己那件 / 相邻两次不撞
-verify_quality     三档单调 / 雾远 ≥ 植被半径 / 低档关阴影关草皮
-verify_mood        遮罩 0→0.34 永不满屏 / 有上行口 / 视野有下限
-verify_checkin     "已收过"与"不用再去"是两件事
-verify_i18n        234 条中英一致 / 文案里不许出现里程 / 驿数不带分母
-verify_terrain     800m / 128 格 / 6.25m 一格
+verify_8_shape     961 points / 1228.8 m / 4 crossings of the midline / both loops mirror-symmetric
+verify_stations    16 stations / 5 fragments / slots cloud-tea-qin-bamboo-bird / all outside the shoulder and all reachable
+verify_economy     all-clear 799 / all-buy 1010 / shortfall 211 / riding only 424
+verify_water       3 bowls / water level -3.4 always below the terrain floor / shoreline ≥ 16 m from the road
+verify_mini_game   15 sessions × 3 tries each / first visit = your own item / never two of the same in a row
+verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / low tier kills shadows and grass
+verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
+verify_checkin     "already collected" and "nothing more to do here" are two different things
+verify_i18n        234 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_terrain     800 m / 128 cells / 6.25 m per cell
 ```
 
-**这套回归在移植过程中真的抓到过一个 bug**：`hash2d` 里漏了源项目的一层
-`fmod(..., 1.0)`，噪声范围变成 `[-0.98, 2.96]`、均值 +0.99，于是地形高程
-整体上移、`clamp` 的**上限**吃掉 79% 的采样点。而点数、总长、范围
-这些断言**全绿**——世界只是变成了一片没有山谷的高原。这就是为什么要有它。
+**This suite caught a real bug during the port**: `hash2d` was missing one of
+the source project's `fmod(..., 1.0)` layers, so the noise range became
+`[-0.98, 2.96]` with a mean of +0.99 — which lifted the whole terrain and let
+the **upper** clamp swallow 79% of samples. And the point count, total length and
+range assertions were **all green**. The world had simply become a plateau with
+no valleys in it. That is exactly why the suite exists.
 
-### 三、不确定的判据要改成稳健的
+### Three: turn non-robust criteria into robust ones
 
-源项目的 `verify_8_shape` 数"中心线 x 坐标的符号变化"，得到 4。移植后同样的
-判据得到 3。查下去发现：8 字在参数 0 与 0.5 两次**正好**经过中心，
-那两点的 x 精确等于中线，而判据把"正好在中线上"的点跳过了。
-源项目自己的采样点不落在中线上，所以它数到 4。
+The source project's `verify_8_shape` counts "sign changes of the centreline's
+x coordinate" and gets 4. The same criterion on the port gets 3. Digging in: the
+figure-eight passes exactly through the centre at parameters 0 and 0.5, so those
+two points have an x exactly equal to the midline — and the criterion *skips*
+points that sit exactly on it. The source project's own sample points don't land
+on the midline, which is why it counts 4.
 
-也就是说**那个 4 是采样的巧合，不是形状的性质**。改成"末尾接回开头再数一次"
-之后同样得 4，而且对重采样免疫。原注释里记着一条方法论，
-这里正好又用上一次：
+In other words **that 4 was a coincidence of sampling, not a property of the
+shape**. Counting once more with the tail joined back to the head gives 4 as
+well, and is immune to resampling. The source comments carry a piece of
+methodology that turns out to apply here again:
 
-> 一条回归自己抛异常时，退出码是 0，一行断言都没打过的回归看着像跑通了。
-> 所以判据不信退出码，只信「有没有 FAIL」加「有没有打出断言」两件事。
+> When a regression suite throws an exception, the exit code is 0 — and a
+> regression that never printed a single assertion looks like it passed. So the
+> judge does not trust exit codes. It trusts exactly two things: was there a
+> `[FAIL]`, and did anything get asserted at all.
 
-`tools/verify-all.mjs` 把 `asserts === 0` 单独标成 `NO-ASSERT`，
-不计入通过。
+`tools/verify-all.mjs` flags `asserts === 0` separately as `NO-ASSERT` and does
+not count it as a pass.
 
 ---
 
-## 低配兼容：这一版真正做了什么
+## Low-end compatibility: what this edition actually did
 
-原作的画质只有三档，切的是**阴影与植被半径**。那是当时的正确选择——
-Godot 没有可控的内部渲染分辨率，缩放反而更慢。
-到 Web 上这个前提不成立了，所以这一版把**渲染分辨率**提为一等旋钮，
-并按"这台机器真正缺什么"重新排了每档的取舍。
+The original game had three quality tiers, and they only switched **shadows and
+vegetation radius**. That was the right call at the time — Godot has no
+controllable internal render resolution, so upscaling there is only slower. On
+the web that premise no longer holds, so this edition promotes **render
+resolution** to a first-class knob and re-sorts every tier's trade-offs around
+"what does this machine actually lack".
 
-### 各档切什么
+### What each tier switches
 
-| | 低 | 中 | 高 |
+| | Low | Medium | High |
 |:---|:---|:---|:---|
-| **内部渲染分辨率** | **0.60×** | 0.85× | 1.0× |
-| 阴影 | 关 | 1024 / 55m | 2048 / 130m |
-| 草皮 | **关** | 105m · 70% | 190m · 100% |
-| 行道树 | 52m · 35% | 92m · 75% | 160m · 100% |
-| 雾远 | 130m | 260m | 400m |
-| 地标加载距离 | 130m | 220m | 320m |
-| 环境声层数 | 1（风） | 2 | 3 |
-| 色调映射 | 关 | ACES | ACES |
-| 地标远景 | 剪影替身 | 真模型 | 真模型 |
+| **Internal render resolution** | **0.60×** | 0.85× | 1.0× |
+| Shadows | off | 1024 / 55 m | 2048 / 130 m |
+| Grass | **off** | 105 m · 70% | 190 m · 100% |
+| Street trees | 52 m · 35% | 92 m · 75% | 160 m · 100% |
+| Fog distance | 130 m | 260 m | 400 m |
+| Landmark load distance | 130 m | 220 m | 320 m |
+| Ambient audio layers | 1 (wind) | 2 | 3 |
+| Tone mapping | off | ACES | ACES |
+| Distant landmarks | silhouette stand-in | real model | real model |
 
-低档的**两刀**是这么想的：
+The low tier's **two cuts** are reasoned like this:
 
-- **渲染分辨率 0.6×** 是这一档的核心。核显的瓶颈几乎永远是填充率，
-  0.6² = 36% 的像素，帧率直接翻接近三倍，而雾把放大后的那点糊盖住了。
-- **草皮整个关掉**，把这份预算**挪给分辨率**。草皮是这一族里最贵的一项
-  （铺满屏幕的半透明卡片是填充率杀手），但把它减半换来的只是
-  "草还是那片草，只是稀了一点"。砍掉它、换成全画面 36% 的像素，
-  换来的是**整个游戏**都更顺。
+- **0.6× render resolution** is the core of this tier. The bottleneck on
+  integrated graphics is almost always fill rate; 0.6² = 36% of the pixels
+  roughly triples the frame rate, and the fog hides what the upscale blurs.
+- **Grass is turned off entirely**, and that budget is **moved into
+  resolution**. Grass is the most expensive item in this family (full-screen
+  translucent cards are a fill-rate killer), but halving it only buys you "the
+  grass is still grass, just thinner". Cutting it for 36% of the pixels across
+  the whole screen makes **the entire game** smoother instead.
 
-### 别的几件
+### A few other things
 
-- **零贴图**。路面、地形、草皮、水面的质感全部在着色器里算。
-  对弱 GPU 来说这不是省内存，是省**采样**——一片草皮铺满屏幕时，
-  每多采一次图就是一次全屏纹理带宽，而核显的纹理单元往往正是瓶颈。
-- **不做后处理**。心神遮罩用 DOM 覆盖层做，GPU 开销为 0。
-  这是"换一个更便宜的实现去做同一件事"的典型。
-- **植被按块流式**。中心线每 12m 一块，每块有自己的包围球，
-  three 的视锥剔除才真正有效（一个铺满全图的 InstancedMesh 包围球覆盖整个
-  世界，一个三角面都剔不掉）。草皮例外：它太密太小，改成**单 draw call
-  动态打包**可见实例。
-- **地标按距离渐进加载**，每 0.4 秒最多进一座。16 座 GLB 一次涌进来
-  会在弱机上造成一次明显的长卡顿，而玩家根本看不出"这一瞬间多了一座亭子"。
-- **切后台就停**。`visibilitychange` 时停掉整个 rAF。合盖再打开时 dt
-  可能是十几秒，而 dt 稍不钳制，车会一帧之内瞬移过整张地图。
-- **定步长物理**（1/60）+ dt 钳制 0.1s + 最多追 5 步。
-  25 帧的机器上变步长积分会让车在同一个弯里走出不同的轨迹，而没有任何异常。
-- **自适应分辨率**（默认关）。只动内部采样，不动任何画面元素——
-  没有 LOD 跳变、没有特效消失、文字不变形。带滞回和冷却，**只降不升**，
-  避免画面"呼吸"。面板上标着它开着。
+- **Zero textures.** The road, terrain, grass and water all get their surface
+  from shaders. On a weak GPU that isn't about saving memory, it's about saving
+  **samples** — when a grass layer covers the screen, every extra texture fetch
+  is a full screen of texture bandwidth, and integrated GPUs are often bound
+  exactly there.
+- **No post-processing.** The spirits mask is a DOM overlay, so it costs zero
+  GPU time. A textbook case of "do the same thing more cheaply".
+- **Vegetation streams by chunk.** One chunk every 12 m along the centreline,
+  each with its own bounding sphere, so three's frustum culling actually bites
+  (an InstancedMesh covering the whole map has a bounding sphere covering the
+  whole map and culls not a single triangle). Grass is the exception: it is too
+  dense and too small, so it becomes **one draw call of dynamically packed
+  visible instances** instead.
+- **Landmarks load progressively by distance**, at most one entering every 0.4 s.
+  Sixteen GLBs arriving at once causes a visible hitch on a weak machine, and
+  the player cannot tell that "for an instant there was one more pavilion".
+- **Stopping in the background.** The whole rAF loop halts on
+  `visibilitychange`. When you close the lid and come back, dt can be ten-odd
+  seconds, and without clamping it the vehicle teleports across the entire map
+  in one frame.
+- **Fixed-step physics** (1/60) + dt clamped at 0.1 s + at most 5 catch-up steps.
+  On a 25 fps machine, variable-step integration makes the vehicle trace a
+  different line through the same corner, with no error of any kind.
+- **Adaptive resolution** (off by default). It only touches internal sampling,
+  never any on-screen element — no LOD popping, no effects vanishing, no text
+  distorting. It has hysteresis and a cooldown, and only ever goes **down, never
+  up**, so the picture never "breathes". The panel says when it's on.
 
-### 能力探测
+### Capability detection
 
-开局按 `WEBGL_debug_renderer_info` 读显卡型号、加上 `deviceMemory` 与
-`hardwareConcurrency`，给一个诚实的默认档，并在设置面板上把**判定理由**
-原样写给玩家看（"独显：AMD Radeon RX 5500 XT"）。
+At startup it reads the GPU name via `WEBGL_debug_renderer_info`, adds
+`deviceMemory` and `hardwareConcurrency`, picks an honest default tier, and
+writes the **reason for its decision** back to the player in the settings panel
+("Discrete GPU: AMD Radeon RX 5500 XT").
 
-**探测只决定开局默认档，之后永不自动改档。** 原作把"自动降档"明确列为
-故意不做，理由在这儿同样成立：玩家没改任何设置却看到画面在脚下变了，
-这比卡顿更让人不信任。
+**Detection only sets the starting tier; it never changes tier afterwards.** The
+original game explicitly listed "auto-downgrade" as deliberately not done, and
+the same reasoning holds here: a picture changing under the player's feet without
+them having touched anything is more unsettling than a stutter.
 
-### 触屏操作
+### Touch controls
 
-左下摇杆、右下打卡、右上暂停/静音。摇杆也接方向键，外接键盘/辅助技术都能用。
+Joystick bottom-left, check-in bottom-right, pause/mute top-right. The joystick
+also accepts the arrow keys, so external keyboards and assistive tech work too.
 
-**判定用四个信号取或**，而不是只看 `pointer: coarse`：
+**Detection ORs four signals** rather than trusting `pointer: coarse` alone:
 
-| 信号 | 抓的是什么 |
+| Signal | What it catches |
 |:---|:---|
-| `pointer: coarse` | 真的没有精细指针 |
-| `navigator.maxTouchPoints > 0` | 有触点就认为用户可能用手指 |
-| 视口短边 < 900px | 手机 / 小平板横屏 |
-| **发生过一次 `touchstart`** | 手指真的按过屏 |
+| `pointer: coarse` | genuinely has no fine pointer |
+| `navigator.maxTouchPoints > 0` | has touch points, so assume the user may be using a finger |
+| viewport short edge < 900px | phone / small tablet in landscape |
+| **a `touchstart` has happened** | a finger has actually touched the screen |
 
-第四条是关键补充：它在混合设备上最准（Windows 触屏本、安卓桌面模式、
-平板旋转），而且不会误伤纯桌面——纯桌面前 30 秒没人碰屏，控件不挂，
-不会占掉左下角的点击区。
+The fourth is the useful addition: it is the most accurate on hybrid devices
+(Windows touch laptops, Android desktop mode, rotated tablets), and it can't hurt
+a pure desktop — nobody touches the screen in the first 30 seconds, so the
+controls don't mount and don't eat the bottom-left click area.
 
-自动判定总有判错的时候，而"摇杆在哪儿"这种问题**没有提示就是没有答案**。
-所以**暂停面板里有一个三态开关**（自动 / 开 / 关），并且默认存在，
-下面还写着当前是因为什么信号挂上的。探测只给默认值，不替玩家做决定——
-和画质档的处理是同一条原则。
+Automatic detection gets it wrong sometimes, and questions like "where is the
+joystick" have **no answer without a hint**. So there is a **tri-state switch**
+in the pause menu (auto / on / off), it exists by default, and underneath it says
+which signal caused it to mount. Detection only supplies the default; it doesn't
+decide for the player — the same principle as the quality tier.
 
-摇杆只在世界里出现，标题页和引导页不挂：那里摆一个活的摇杆是有害的，
-玩家会在上面推两下、发现没反应，然后得出"这游戏在手机上玩不了"的结论。
-**控件不出现，就不会被误试。**
+The joystick only exists inside the world, not on the title or onboarding pages:
+putting a live joystick there is actively harmful, because the player will push
+it twice, get no response, and conclude "this game can't be played on a phone".
+**Controls that don't appear can't be mis-tried.**
 
-`verify_touch` 守着摇杆的符号约定（往上推必须是 `moveY = -1`）——
-这类 bug 搞反了不报任何错，摇杆照样能拖、界面一切正常，只是方向反，
-而桌面上没有摇杆，所以它必然漏过所有桌面测试。
+`verify_touch` guards the joystick's sign convention (pushing up must be
+`moveY = -1`) — that class of bug raises no error at all. The joystick still
+drags, the UI looks fine, it's just mirrored, and since there is no joystick on
+desktop it necessarily slips through every desktop test.
 
-### 下载管理器（IDM 之类）弹框
+### Download managers (IDM and friends)
 
-**症状**：装了 IDM 的机器上，每加载一条资源就弹一次下载框。
+**Symptom**: on machines with IDM installed, a download dialog pops up for every
+single asset as it loads.
 
-资源本身**都不是导航下载**（`fetch` / XHR 拿的），但有两类东西会被抢：
+None of the assets are actually navigation downloads (they're fetched via
+`fetch` / XHR), but two things get hijacked anyway:
 
-1. **媒体元素**。`HTMLAudioElement` 是一条浏览器认为"该由下载器接管"的
-   通道，而 IDM 的默认过滤规则里含音频。已经把整个音频层换成
-   `fetch` + `decodeAudioData` + `AudioBufferSourceNode`——**不经过媒体元素**，
-   那条路就断了。顺带好处：循环无缝（原来为了盖接缝要播两份错开半个周期）、
-   解码一次常驻、音量能用 `setTargetAtTime` 平滑。
-2. **`<a download>`**。明信片导出用的是它，而它是浏览器**明确表示
-   "这是一次下载"**的动作。现在优先走 `showSaveFilePicker`——
-   那是文件选择器（用户在选地方存文件，不是被下文件），下载管理器不会碰；
-   用户取消不算失败。
+1. **Media elements.** `HTMLAudioElement` is a channel browsers consider
+   "should be handed to a downloader", and IDM's default filter list includes
+   audio. The whole audio layer has been replaced with `fetch` +
+   `decodeAudioData` + `AudioBufferSourceNode` — **never touching a media
+   element**, which closes that route. Two side benefits: seamless looping
+   (previously the seam was covered by playing two copies offset by half a
+   period), decoded once and kept resident, and volume that can be smoothed with
+   `setTargetAtTime`.
+2. **`<a download>`.** The postcard export uses it, and it is something the
+   browser **explicitly marks as a download**. It now prefers
+   `showSaveFilePicker` — that's a file picker (the user is choosing where to
+   save, not being handed a file), so download managers leave it alone; and
+   cancelling is not treated as a failure.
 
-另外加了两道协议层的保险：`X-Content-Type-Options: nosniff`（禁止 MIME 嗅探）
-和 `Content-Disposition: inline`（dev 与 preview 都带）。
+Two protocol-level safeguards were added as well: `X-Content-Type-Options:
+nosniff` (no MIME sniffing) and `Content-Disposition: inline` (on both dev and
+preview).
 
-**如果还弹**：那是 IDM 自己的设置，项目这边已经没什么可做的了。
-IDM → 选项 → 下载 → 站点排除列表，把 `localhost` / `127.0.0.1` 加进去；
-或者在 IDM 的「浏览器集成」里关掉这一项。
+**If it still pops**: that's IDM's own settings and there is nothing left to do
+in the project. Add `localhost` / `127.0.0.1` to IDM → Options → Downloads →
+site exclusion list, or turn off its browser integration.
 
 ---
 
-## 资产
+## Assets
 
-| | 源 | 产出 | 手段 |
+| | Source | Output | How |
 |:---|:---|:---|:---|
-| 3D 模型 | 22.3 MB | **5.0 MB** | 贴图降到 768/1024 + JPEG q76；顶点焊接；按误差阈值简化；Meshopt 压缩 |
-| 贴图 | 3.9 MB | 1.3 MB | 同上 |
-| 字体 | 24.4 MB | **181 KB**（首屏） | 子集化到游戏里真正出现过的 880 个字符 + WOFF2 |
-| 字体（手写） | 24.4 MB | 404 KB（懒加载） | 常用 3500 汉字，只在打开明信片背面时加载 |
-| 音频 | 2.2 MB | 2.2 MB | 原样（已是 ogg，再压会伤环境声质感） |
+| 3D models | 22.3 MB | **5.0 MB** | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression |
+| Textures | 3.9 MB | 1.3 MB | as above |
+| Font | 24.4 MB | **181 KB** (first screen) | subset to the 880 characters that actually appear in the game + WOFF2 |
+| Font (handwritten) | 24.4 MB | 404 KB (lazy) | the ~3500 most common Chinese characters, loaded only when the back of the postcard is opened |
+| Audio | 2.2 MB | 2.2 MB | as-is (already ogg; recompressing hurts the ambience) |
 
-**Meshopt 而不是 Draco**：解码器 20KB vs 250KB，首次解码没有卡顿。
-低配机上"解码卡一下"的代价比多 2MB 流量更难受。
+**Meshopt rather than Draco**: a 20 KB decoder versus 250 KB, with no hitch on
+first decode. On a low-end machine "the decode stutters for a moment" costs more
+than 2 MB of extra transfer.
 
-贴图压缩与几何压缩**跑在两个进程里**，这不是洁癖：
-libvips 在初始化时按 CPU 数开线程池，而 gltf-transform 与 meshoptimizer（WASM）
-被 import 时也会吃掉一批线程。同进程里只要 import 了它们，
-每张图都会在写文件那一步炸 `colourspace: parameter space not set`——
-而**完全相同的字节**从磁盘读就正常。排查方向一旦偏到"这张图有问题"上
-就会一直绕圈。
+Texture compression and geometry compression **run in two processes**, and that
+isn't fastidiousness: libvips opens a thread pool sized to the CPU count at
+init, and importing gltf-transform and meshoptimizer (WASM) takes a batch of
+threads too. If they're in the same process, every image blows up at the
+write-out step with `colourspace: parameter space not set` — while **byte-for-
+byte identical** files read from disk behave fine. Once the investigation
+drifts toward "this particular image is bad", it goes round in circles forever.
 
-首屏必下 ≈ 5.5 MB（JS 约 0.5MB + 自行车 0.3MB + 地形路面即时生成 +
-UI 字体 0.18MB + 音频预热），其余按距离进场。
+First-screen payload ≈ 5.5 MB (JS ~0.5 MB + bicycle 0.3 MB + terrain and road
+generated on the fly + UI font 0.18 MB + audio warming up); the rest arrives by
+distance.
 
 ---
 
-## 目录
+## Layout
 
 ```
 src/
-  core/      loop(定步长+自适应) capability(探测) settings(三档) renderer perf
-             audio(三总线+分站变奏) math noise(地形噪声)
-  data/      raw(类型化 JSON) route(8字几何+驿站落位) generated/
-  world/     terrain road water vegetation stations sky ride world(编排)
-  shaders/   world.ts  (onBeforeCompile 注入的 GLSL)
-  game/      state(进度/经济/心神) minigameHost minigames/(五件乐事) postcard/
+  core/      loop(fixed step + adaptive) capability(detection) settings(tiers) renderer perf
+             audio(three buses + per-station variation) math noise(terrain noise)
+  data/      raw(typed JSON) route(figure-eight geometry + station placement) generated/
+  world/     terrain road water vegetation stations sky ride world(orchestration)
+  shaders/   world.ts  (GLSL injected via onBeforeCompile)
+  game/      state(progress/economy/spirits) minigameHost minigames/(the five delights) postcard/
   ui/        titleScreen onboarding hud minimap dialogue shopPanel pausePanel
              synthesisPanel endCard touchControls toast moodMask perfPanel
   i18n/      index.ts
-  verify/    entry.ts(回归) probe.ts(几何探针) spawn.ts(出生点探针)
+  verify/    entry.ts(regression) probe.ts(geometry probe) spawn.ts(spawn-point probe)
 tools/       gd-parse extract-data compress-textures optimize-assets
              subset-font verify-all probe glb-image
 ```
 
-`src/verify/probe.ts` 与 `spawn.ts` 是给回归抓到的偏差做定位用的。
-它们的存在是被三次真实故障逼出来的，每次的读法都不一样：
+`src/verify/probe.ts` and `spawn.ts` exist to localise the deviations the
+regression suite catches. They are the result of three real failures, each of
+which read differently:
 
-| 故障 | 读代码会得到 | 量出来才看到 |
+| Failure | What reading the code tells you | What you only see by measuring |
 |:---|:---|:---|
-| 噪声漏了 `fmod` | 一个完全正常的 `hash2d` | 地形高程均值 +6.3，clamp 上限吃掉 79% 采样点 |
-| 路面绕序判据反了 | 一个正确的 `if (crossY > 0)` | 整条路背向剔除，地面上什么都不剩 |
-| 植被株距用了块长 | 一份合理的密度表 | 每 6 米一棵树，相机埋在树冠里 |
+| Noise missing `fmod` | a perfectly normal `hash2d` | terrain elevation mean +6.3, the upper clamp eating 79% of samples |
+| Road winding-order criterion inverted | a correct `if (crossY > 0)` | the entire road back-face culled, nothing left on the ground |
+| Vegetation spacing used the chunk length | a perfectly reasonable density table | one tree every 6 metres, camera buried in canopy |
 
 ---
 
-## 部署
+## Deployment
 
-这是个**纯静态**的构建：没有服务端代码、没有 API、没有 Worker 逻辑。
-`dist/` 就是全部。
+This is a **pure static** build: no server code, no API, no Worker logic.
+`dist/` is the whole thing.
 
-### Cloudflare（当前用的）
+### Cloudflare (currently in use)
 
 ```bash
-npm run deploy:dry    # 先干跑一遍：读产物、查配置，不上线
+npm run deploy:dry    # dry run first: reads the artifact, checks config, deploys nothing
 npm run deploy        # npm run build && wrangler deploy
-npm run preview:cf    # 在 workerd 里试跑已构建的产物
+npm run preview:cf    # run the built artifact inside workerd
 ```
 
-`wrangler.jsonc` 里**没有 `main`**——所以它不是 Worker，是纯静态资源托管，
-没有一个请求会进到 workerd 执行。给 21MB 的 `.glb` / `.ogg` 加一层 isolate
-只会凭空多一跳。
+There is **no `main` in `wrangler.jsonc`** — so this isn't a Worker, it's pure
+static asset hosting, and not one request ever enters workerd. Wrapping 21 MB of
+`.glb` / `.ogg` in an isolate would only add a hop for nothing.
 
-`assets.directory` 那一行是必须的，它才是真正告诉 wrangler「上传什么」；
-只写 `not_found_handling` 的话，症状是 **deploy 成功、拿到域名、点进去 404**。
+The `assets.directory` line is mandatory — that's what actually tells wrangler
+what to upload. Without it, write only `not_found_handling` and the symptom is
+**deploy succeeds, you get a domain, and it 404s**.
 
-`vite.config.ts` 里的 `plugins: []` 同样是必须的——`wrangler deploy` 会来改这个
-文件，找不到 `plugins` 数组就直接报错退出。它**一直是空的**：官方模板会往这里
-塞 `@cloudflare/vite-plugin`，那是为了让 `vite dev` 能把请求送进 workerd 预览
-Worker；本项目没有请求会进 Worker，所以插件在这里没用，却会让 `vite dev`
-整个跑在 workerd 上，three.js 的 HMR 变慢、WebGL 上下文能不能在 isolate 里
-正常拿成了日常开发的赌注。要在 workerd 里试跑用 `preview:cf`。
+The `plugins: []` in `vite.config.ts` is equally mandatory — `wrangler deploy`
+comes to edit that file and errors out if it can't find a `plugins` array. It
+**has always been empty**: the official scaffold wants to put
+`@cloudflare/vite-plugin` there, which exists so `vite dev` can route requests
+into a workerd preview Worker. No request in this project enters a Worker, so the
+plugin is useless here, and it would put the whole `vite dev` inside workerd,
+making three.js HMR slow and turning "can I get a WebGL context inside an
+isolate at all" into a daily gamble. Use `preview:cf` to try things in workerd.
 
 ### GitHub Pages
 
-`.github/workflows/pages.yml` 在每次推 main 时自动构建部署。**两套部署会同时存在**，
-改完记得确认自己改的是哪一个。
+`.github/workflows/pages.yml` builds and deploys on every push to main. **Two
+deployments exist at once** — remember which one you're changing.
 
-### 桌面端 Release（跨平台发版）
+### Desktop releases (cross-platform)
 
-Tauri 依赖各平台原生的 webkit 和工具链，**交叉编译是走不通的**——本机编出来
-的包到别的系统上跑不起来。所以 macOS / Windows / Linux 三份产物是三台
-runner 各编各的，由 [`.github/workflows/release.yml`](.github/workflows/release.yml) 负责：
+Tauri depends on each platform's native webkit and toolchain, and
+**cross-compilation does not work** — a package built on your machine won't run
+elsewhere. So the macOS / Windows / Linux artifacts are three runners each
+building their own, driven by
+[`.github/workflows/release.yml`](.github/workflows/release.yml):
 
 ```bash
-# 1. 改 src-tauri/tauri.conf.json 里的 version
-# 2. 打同名 tag
+# 1. change the version in src-tauri/tauri.conf.json
+# 2. tag the same version
 git tag v1.0.0
-# 3. 推 tag，流水线自己跑完并发版
+# 3. push the tag; the pipeline runs to completion and publishes
 git push origin v1.0.0
 ```
 
-| 平台 | 产物 | 说明 |
+| Platform | Artifact | Notes |
 |:---|:---|:---|
-| macOS | `.dmg` | **universal**：M 芯片和 Intel 共用一个文件，下载的人不用先判断自己是哪种 Mac |
-| Windows | `-setup.exe` | NSIS，`installMode: currentUser`，免管理员 |
-| Linux | `.deb` + `.AppImage` | 前者给 Ubuntu/Debian 系，后者给其它发行版 |
+| macOS | `.dmg` | **universal**: one file for both M-series and Intel, so the downloader doesn't have to work out which kind of Mac they have |
+| Windows | `-setup.exe` | NSIS, `installMode: currentUser`, no administrator needed |
+| Linux | `.deb` + `.AppImage` | the former for Ubuntu/Debian family, the latter for everything else |
 
-三件容易踩的事，都是改这个流水线时踩出来的：
+Three easy traps, all of them learned while editing this pipeline:
 
-- **版本号只认 `tauri.conf.json`**，tag 只是标签。产物名用的是前者，
-  所以 tag 和 `version` 对不上时，CI 会直接失败——否则页面上写着 v1.2.0、
-  点进去包里其实是 1.0.0，这种错三个 job 全绿也看不出来。
-- **Release 先建草稿、产物传齐了才 publish**。中途失败时页面上看不到这个版本，
-  而不是看到一个缺了两个平台的版本。重跑同一次流水线会复用那个草稿。
-- **每个平台的 `--bundles` 是逐个平台写的**，因为它按当前系统校验取值
-  （在 Windows 上写 `--bundles deb` 会直接报 `invalid value`）。
-  想加 `msi` / `rpm` 就改矩阵里那一行，不用动别处。
+- **The version number comes only from `tauri.conf.json`**; the tag is just a
+  label. Artifact names use the former, so CI fails outright when the tag and
+  `version` disagree — otherwise the page says v1.2.0 and the package inside is
+  really 1.0.0, a mistake that all three jobs report as green.
+- **The release is created as a draft and only published once every artifact is
+  uploaded.** A failure halfway through means the version simply doesn't appear,
+  rather than appearing with two platforms missing. Re-running the pipeline
+  picks up that same draft.
+- **`--bundles` is written per platform**, because it's validated against the
+  current OS (writing `--bundles deb` on Windows fails outright with `invalid
+  value`). To add `msi` / `rpm`, edit that one matrix row and nothing else.
 
-`npm run verify` 也在发版流水线上当门：桌面端把整个 `dist/` 打进二进制，
-一条跑不过的断言会变成**所有平台**的安装包里都有的 bug。
+`npm run verify` also acts as the release gate: the desktop build embeds the
+entire `dist/` into the binary, so a failing assertion would become a bug present
+in **every platform's installer**.
 
-本机（Windows）想自己出包：`npm run desktop:build`，
-产物在 `src-tauri/target/release/bundle/`。
+Building locally (Windows): `npm run desktop:build`, artifacts land in
+`src-tauri/target/release/bundle/`.
 
-### 两条都必须成立的假设
+### Two assumptions that must both hold
 
-- `vite.config.ts` 的 `base: './'` —— 换成非 `'./'` 而不同步改 CI，
-  症状很安静：本地一切正常，线上白屏 404。
-- `dist/.nojekyll` —— Pages 需要它才不会把下划线开头的目录当 Jekyll 处理。
+- `vite.config.ts`'s `base: './'` — change it to anything else without changing
+  CI in step, and the symptom is quiet: everything works locally, and production
+  is a white screen and a 404.
+- `dist/.nojekyll` — Pages needs it or it treats underscore-prefixed
+  directories as Jekyll.
 
 ---
 
-## 实机验证结果
+## Measured results
 
-在 **AMD Radeon RX 5500 XT / 32GB / 8 核** 上跑生产构建（`vite preview`）：
+Run against a production build (`vite preview`) on an **AMD Radeon RX 5500 XT /
+32 GB / 8 cores**:
 
-| 测项 | 结果 |
+| Measurement | Result |
 |:---|:---|
-| 建世界（碗选址 + 路面索引 + 植被布置 + 天穹） | **77–111 ms** |
-| 到标题页可交互 | 200–350 ms（含 HTTP 缓存） |
-| JS 包 | 820 KB raw / **229 KB gzip** |
+| World build (bowl placement + road indexing + vegetation placement + sky) | **77–111 ms** |
+| Time to an interactive title screen | 200–350 ms (with HTTP cache) |
+| JS bundle | 820 KB raw / **229 KB gzip** |
 | CSS | 18.7 KB raw / 4 KB gzip |
-| 产物合计 | **8.6 MB**（其中音频 2.2MB 是后台拉，不在首屏路径上） |
-| 出生点离中心线 | 16 座驿站全部 **0.000 m** |
-| `nearestArcParam` 往返误差 | **0.00000** |
+| Total artifact | **8.6 MB** (of which 2.2 MB audio loads in the background, not on the first-screen path) |
+| Spawn point to centreline | all 16 stations **0.000 m** |
+| `nearestArcParam` round-trip error | **0.00000** |
 
-能力探测在这台机器上给出：`独显：AMD Radeon RX 5500 XT` → 高档，
-判定理由原样显示在标题页上。
+Capability detection on this machine reports `Discrete GPU: AMD Radeon RX 5500
+XT` → high tier, with the reason displayed verbatim on the title screen.
 
-### 关键路径是被一次实测改出来的
+### The critical path was rewritten by a measurement
 
-第一版把 17 个音频文件（含 `bgm.ogg` **1667 KB**）在 t=0 一起并发拉下来，
-和关键路径上的 `bike.glb`（299 KB，但那是玩家第一眼要看的东西）抢同一条带宽。
-网络时间线显示 `bike.glb` 耗时 3.4 秒，而它其实只有 134 ms 的量。
+The first version pulled all 17 audio files (including `bgm.ogg` at **1667 KB**)
+concurrently at t=0, competing for the same bandwidth as `bike.glb` (299 KB, but
+that's the first thing the player looks at). The network timeline showed
+`bike.glb` taking 3.4 s when it should have taken about 134 ms.
 
-更根本的是：**浏览器不允许在用户手势之前出声**，所以启动时拉这些
-一个字节都用不上。改成世界可交互之后后台串行预热之后，首屏一个音频字节都不下。
+More fundamentally: **browsers won't make a sound before a user gesture**, so at
+startup not one of those bytes was usable. After switching to a serial background
+warm-up once the world is interactive, the first screen downloads zero audio
+bytes.
 
-### 实机走查抓到的四个真 bug
+### Four real bugs found by playing it on real hardware
 
-1. **路面三角形绕序反了**。`n.y = abz*acx - abx*acz > 0` 本身**就是**朝上的，
-   我却在这个条件下翻转，于是整条路面背向剔除。症状极安静：地形、车、
-   小地图、驿站全部正常，只有"路不见了"——看起来像资产没加载。
-2. **植被密度是源项目的四倍**。源项目 `TreeScatter.SPACING = 25m`（约 25 米一株），
-   我按每 12 米一块撒 2 株，等于每 6 米一株。改成按弧长间隔放置、
-   再分桶到块里做剔除。
-3. **最后一个植被块的参数越过 1.0**，索引越界读到 `undefined`。
-   `103 × 12 / 1228.82 = 1.006`。栈顶在植被模块里，真正的原因却是**块的数量**——
-   这种"错在别处、报在这里"最耗时间。
-4. **演示模式卡在第一句对白**。对白靠玩家按键推进，而演示里没有人按键。
-   加了对白自动推进；同时演示会跳过小游戏（3.5 秒自动离场）与铺子。
-
----
-
-## 与原作的差异
-
-**刻意做的**
-
-- 渲染分辨率成为一等画质旋钮（Web 上才有的手段）
-- 心神遮罩从后处理 pass 改为 DOM 覆盖层
-- UI 从 `_draw()` 手绘改为 DOM + CSS：在弱机上由浏览器合成，GPU 开销为 0，
-  而且文字永远清晰。**副作用是原作那个"取消按钮键盘点不到"的坑自动消失了**
-- 补齐 21 条 Web 版新文案（`tools/i18n-supplement.json`，只增不改）
-- 字体子集化、模型压缩（原作依赖 Godot 的导入流程）
-
-**没有做的**（原作自己列的缺口，这里仍然缺）
-
-- **茶没有真失手**。它是唯一一件不会失败的小游戏，注释里原作者自己写了
-  "要不要给它加一道真的失手，留给打磨轮次"。这一版尊重原作，没有替它做主。
-- **路边彩蛋只做了碑**：四处 `stele_*_line` 会在 11m 内触发。
-  原作计划的是一整套路边小事件。
-- **没有成体系的美术设定板**。配色与版式散在各个模块的常量里。
-- 禽类小游戏的描边在观察阶段偏粗（`sc≈2.57` 时描边被乘了两次）。
-  移植时**原样照抄并标了 ⚠**——修它等于改观感，不该由移植来做这个决定。
-
-**这一版补上的**（原作没有的）
-
-- **分站音乐变奏**。用滤波 + 微调速给五座碎片驿站做出五种"乐事"音色
-  （云亮、茶暖、琴收、竹脆、禽最亮），不新增任何音频素材。
-  刻意只改音色不改旋律：`playbackRate` 偏移上限 0.4%，再大就明显走调，
-  而那会让一首本该平静的曲子变得不安。
-- **28 条 Web 版新文案**（`tools/i18n-supplement.json`，只增不改，
-  两侧 key 集合严格一致）。主要是原作用 `_draw()` 画出来、
-  从来没进过文案表的面板文字。
-
-**尚未验证的**
-
-- **交叉口与程序化建筑的新观感**。数值上已有回归兜底（交叉口共面偏差 0.3cm、
-  路口前后 48m 内 0/97 个采样点离路、7 座程序化地标半宽全部 ≤ 8m），
-  但"看起来对不对"回归答不了，需要在你的机器上看一眼。
-- 明信片 PNG 的实际体积与字形。导出路径依赖 `document.fonts.load` 等待手写体，
-  逻辑上正确，但需要一个真实浏览器点一次导出才能确认。
-- 触屏控件。代码在（四信号判定 + 暂停面板三态开关），但没有在真机上试过。
+1. **Road triangles wound the wrong way.** `n.y = abz*acx - abx*acz > 0` *is*
+   already the up-facing case, and I flipped on that condition anyway, so the
+   entire road was back-face culled. The symptom is extremely quiet: terrain,
+   vehicle, minimap and stations are all fine, only "the road is gone" — which
+   looks exactly like assets failing to load.
+2. **Vegetation density was four times the source project's.** The source has
+   `TreeScatter.SPACING = 25m` (roughly one tree every 25 metres); I was
+   scattering two trees every 12 m of chunk, i.e. one every 6 m. Changed to
+   spacing by arc length, then bucketed into chunks for culling.
+3. **The last vegetation chunk's parameter ran past 1.0**, so the index went out
+   of bounds and read `undefined`. `103 × 12 / 1228.82 = 1.006`. The top of the
+   stack was in the vegetation module; the actual cause was the **number of
+   chunks** — that class of "the error is over there but reported here" costs
+   the most time.
+4. **Demo mode got stuck on the first line of dialogue.** Dialogue advances on a
+   keypress, and in the demo nobody presses anything. Added automatic dialogue
+   advance; the demo also skips minigames (auto-exits after 3.5 s) and shops.
 
 ---
 
-## 调试系统
+## Differences from the original
 
-三层，分工不重叠。**都是输出文本**——因为它们的主要消费者是需要看着描述干活的人，
-包括 AI 助手；人能看图，但读不到图。
+**Deliberate**
 
-| 层 | 入口 | 回答什么 | 谁在用 |
+- Render resolution promoted to a first-class quality knob (only possible on the
+  web)
+- The spirits mask changed from a post-processing pass to a DOM overlay
+- UI changed from hand-drawn `_draw()` calls to DOM + CSS: composited by the
+  browser so it costs zero GPU time, and text is always crisp. **As a
+  side-effect the original's "cancel button is not keyboard-reachable" bug
+  disappears on its own**
+- 21 new strings for the web edition (`tools/i18n-supplement.json`, additions
+  only)
+- Font subsetting and model compression (the original relied on Godot's import
+  pipeline)
+
+**Not done** (gaps the original listed itself; still gaps here)
+
+- **The tea has no genuine failure state.** It's the one minigame that cannot be
+  lost, and the original author wrote in the comments "whether to give it a real
+  way to fail — leave that to the polish round". This edition respects that and
+  doesn't decide it on the author's behalf.
+- **Only the steles of the roadside easter eggs**: four `stele_*_line` triggers
+  fire within 11 m. The original planned a whole set of roadside events.
+- **No coherent art direction board.** Colour and layout are scattered as
+  constants across modules.
+- The bird minigame's outline is a little heavy in the observation phase (at
+  `sc≈2.57` the outline gets multiplied twice). **Copied verbatim during the port
+  and marked ⚠** — fixing it changes the look, and that isn't the porter's call.
+
+**Added by this edition** (not in the original)
+
+- **Per-station musical variation.** Filtering plus slight playback-rate detuning
+  gives the five fragment stations five "delight" timbres (cloud bright, tea
+  warm, qin restrained, bamboo crisp, bird brightest), with no new audio assets.
+  Deliberately timbre-only, never melody: `playbackRate` offsets are capped at
+  0.4%, past which it's audibly out of tune, and that would turn a piece that is
+  supposed to be calm into something uneasy.
+- **28 new strings** for the web edition (`tools/i18n-supplement.json`,
+  additions only, with strictly matching key sets on both sides). Mostly panel
+  text the original drew with `_draw()` and never put into the string table.
+
+**Unverified**
+
+- **How the crossings and the procedural buildings actually look.** The numbers
+  are already guarded by regression (crossing coplanar deviation 0.3 cm, 0/97
+  sample points off-road within 48 m of either crossing, all 7 procedural
+  landmarks half-width ≤ 8 m), but regression cannot answer "does it look
+  right" — that needs a look on your machine.
+- The actual size and glyphs of the postcard PNG. The export path waits on
+  `document.fonts.load` for the handwritten font; it's logically correct, but it
+  needs one real browser clicking export to confirm.
+- Touch controls. The code is there (four-signal detection + tri-state switch in
+  the pause menu) but it has never been tried on a real device.
+
+---
+
+## Debug system
+
+Three layers with non-overlapping jobs. **All of them output text** — because
+their main consumer is a person who needs to read a description while working,
+and an AI assistant; people can look at images, they can't read them.
+
+| Layer | Entry point | What it answers | Used by |
 |---|---|---|---|
-| **场景探针** | `?debug`（F10）/ 控制台 `gift188.probe()` | 我在哪、镜头什么状态、这里是什么地方 | 人 + AI |
-| **驿站体检** | `?buildings` / F10 后按 `B` / `gift188.buildings()` | 16 座建筑是否正常 | 人 + AI + 回归 |
-| **场景自检** | `?dump=1`（F9） | 场景里有哪些 three 渲染对象 | 人（查渲染层） |
+| **Scene probe** | `?debug` (F10) / console `gift188.probe()` | where am I, what state is the camera in, what is this place | human + AI |
+| **Station health check** | `?buildings` / press `B` after F10 / `gift188.buildings()` | are all 16 buildings fine | human + AI + regression |
+| **Scene self-check** | `?dump=1` (F9) | which three render objects exist in the scene | human (the render layer) |
 
-后两层的失败模式不同，所以都要：`dump` 抓「多出来的东西」，
-`probe` 抓「该在那里的东西不在了」。
+The last two have different failure modes, so both exist: `dump` catches "extra
+things that shouldn't be there", `probe` catches "things that should be there and
+aren't".
 
-### 探针输出什么
+### What the probe prints
 
 ```
 === 场景探针 ===
@@ -509,285 +623,350 @@ git push origin v1.0.0
   植被 本帧可见：块=29 树=14 灌木=30 草=164 draw=56
 ```
 
-**每个位置给两套坐标**是刻意的：世界坐标 `(x, z)` 对算法友好（`getHeightAt`
-要的就是它），对人不友好——`(0, 43)` 是自交点、`(-164, -137)` 在哪没人说得清。
-所以每个位置都同时给**弧长百分比 + 米数 + 最近的驿站**。
+**Every position gets two sets of coordinates**, on purpose: world coordinates
+`(x, z)` are good for algorithms (`getHeightAt` wants exactly that) and bad for
+people — `(0, 43)` is the self-intersection and nobody can say where `(-164,
+-137)` is. So every position also reports **percentage along the arc + metres +
+the nearest station**.
 
-**关于「光圈」**：游戏相机没有物理光圈。three 的 `PerspectiveCamera` 是针孔模型，
-没有焦距、没有光圈叶片、没有景深。能对应上的只有**视场角、近/远裁剪面、画幅比例**
-这三个决定「镜头看得见什么」的量，所以探针报这三个，而不是编一个 `f/2.8` 出来。
-竖直与水平视场**都报**：玩家感受到的是后者，而它完全由画幅比例决定——
-9:19.5 竖屏与 16:9 横屏用同一个竖直视场角时，水平视野差 3 倍。
+**On "aperture"**: the game camera has no physical aperture. three's
+`PerspectiveCamera` is a pinhole model — no focal length, no iris blades, no
+depth of field. The only things that correspond are **field of view, near/far
+clip planes and aspect ratio**, the three quantities that decide "what the camera
+can see", so the probe reports those three instead of inventing an `f/2.8`.
+Vertical *and* horizontal FOV are both reported: what the player experiences is
+the latter, and it is entirely determined by the aspect ratio — a 9:19.5 portrait
+screen and a 16:9 landscape screen sharing a vertical FOV differ by 3× in
+horizontal view.
 
-### 驿站体检
+### The station health check
 
-`?buildings` 给出 16 座的完整表（站名 / 碎片 / 模型来源 / 世界坐标 / 离中心线 /
-尺寸 / 底离地 / 离沥青 / 是否加载），末尾是体检结论。
+`?buildings` prints the full table for all 16 stations (name / fragment / model
+source / world position / distance from centreline / size / ground clearance /
+distance from asphalt / loaded), ending in a verdict.
 
-**这套判据与无头回归跑的是同一个函数**（`auditBuildings`），
-所以面板上写的「正常/不正常」和 `npm run verify` 的结果永远一致。
-判据各自对应一种「看起来不对」的具体读法：
+**This panel runs the same function as the headless regression suite**
+(`auditBuildings`), so what the panel calls "fine / not fine" and what
+`npm run verify` reports can never disagree. Each criterion maps to one concrete
+way "this looks wrong" gets read:
 
-| 判据 | 对应哪种读法 |
+| Criterion | Which reading it corresponds to |
 |---|---|
-| 未加载（且已在加载半径内） | 那个位置空着，路边少一座房子 |
-| **位置记录与实际位置差 > 0.5m** | 打卡点与模型不在一处——玩家在空地上打卡，而所有位置读数都正常 |
-| 建筑边缘离沥青 < 0m | 房子压在路上肩上 |
-| 地基四角高差 > 3m | 一头悬空一头埋土（骑行视角看不出来，侧面才看得出） |
-| 底离地 > +1.5m / < −1.5m | 悬空 / 埋土 |
-| 高度 < 2m 或 > 40m | 模型没出来 / 缩放错了 |
+| Not loaded (and within the load radius) | there's a gap there; the roadside is missing a building |
+| **Recorded position differs from actual position by > 0.5 m** | the check-in point and the model aren't in the same place — the player checks in on empty ground while every position readout looks fine |
+| Building edge closer to the asphalt than 0 m | the building is sitting on the road shoulder |
+| Foundation corner height difference > 3 m | floating at one end, buried at the other (invisible from a riding camera, obvious from the side) |
+| Ground clearance > +1.5 m / < −1.5 m | floating / buried |
+| Height < 2 m or > 40 m | the model didn't come out / the scale is wrong |
 
-**为什么不拿「半宽 ≤ `STATION_FOOT_HALF`」当判据**：半宽是从世界 AABB 量出来的，
-而矩形绕 Y 转过之后 AABB 必然变大（15.4m 的驿楼转 30°，AABB 就到 17.2m）——
-那个数里混着「朝向」。真正要守的是**建筑边缘离沥青还有多远**。
+**Why "half-width ≤ `STATION_FOOT_HALF`" is not a criterion**: half-width is
+measured from the world AABB, and a rectangle rotated about Y necessarily grows
+its AABB (a 15.4 m waystation rotated 30° has an AABB of 17.2 m) — orientation is
+mixed into that number. What actually needs guarding is **how far the building's
+edge still is from the asphalt**.
 
-### 证明这套判据会红
+### Proving the criteria can go red
 
 ```
 node tools/verify-buildings-red.mjs
 ```
 
-故意制造 7 种真实故障（整体抬高、只改位置记录、推进沥青、埋进地下、
-底下堆台子、站到未加载的模型旁、基线），逐个确认体检能指出来。
-**7/7 符合预期。**
+It deliberately introduces seven real failures (raise everything, change only
+the recorded position, push the asphalt out, bury it underground, put a plinth
+underneath, stand next to an unloaded model, plus a baseline) and confirms one by
+one that the health check catches them. **7/7 as expected.**
 
-源项目搬来的一条方法论：
-> 每加一条新断言，都要先证明它会红 —— 故意弄坏、看它红、撤掉。
+A piece of methodology carried over from the source project:
+> Every new assertion must first be proven able to go red — break it on purpose,
+> watch it go red, then revert.
 
-第一版跑出来是 **5/7**——两条判据抓不住对应故障，
-而那两条暴露的是真问题：`worldPos` 与物体实际位置是两份真相，
-原先只查了后者。修完才补上「位置记录与实际位置」这条不变量。
+The first run gave **5/7**: two criteria couldn't catch their failure, and those
+two exposed a real problem — `worldPos` and the object's actual position are two
+sources of truth, and only the latter was being checked. Only after fixing that
+was the "recorded position vs actual position" invariant added.
 
-### 排障入口一览
+### Troubleshooting entry points at a glance
 
-| 入口 | 作用 |
+| Entry point | What it does |
 |---|---|
-| `?debug` | 建场景探针面板，F10 开关，`P` 探针 / `B` 驿站表 |
-| `?probe` | 直接显示探针并把结果打到 console |
-| `?buildings` | 直接显示 16 座驿站体检表 |
-| `?x=12&z=-34` | 探一个指定坐标（对方发来带坐标的链接，接手的人看到的现场与对方完全一致） |
-| `?dump=1` | three 渲染对象自检，F9 开关 |
-| `?arc= &yaw=` | 把车停在中心线某处并指定朝向 |
-| `?caps` | 只跑能力探测，不建世界 |
-| `?tier=0\|1\|2` | 强制档位 |
-| `?touch=1\|0` | 强制挂/不挂触屏控件 |
-| **F8** | 性能面板（帧率/绘制/三角面/渲染分辨率/车速/是否在路上/阶段/画质档） |
-| **F9 / F10 / P / B** | 场景自检 / 探针 / 切探针 / 切驿站表 |
-| 控制台 | `gift188.probe()`、`gift188.probe(x, z)`、`gift188.buildings()`、`gift188` |
+| `?debug` | opens the scene probe panel, toggled with F10; `P` probe / `B` station table |
+| `?probe` | shows the probe immediately and logs the result to the console |
+| `?buildings` | shows the 16-station health table immediately |
+| `?x=12&z=-34` | probe a specific coordinate (so a link with coordinates in it puts the next person in exactly the same scene) |
+| `?dump=1` | three render object self-check, toggled with F9 |
+| `?arc= &yaw=` | park the vehicle at a point on the centreline with a given heading |
+| `?caps` | run capability detection only, don't build the world |
+| `?tier=0\|1\|2` | force a quality tier |
+| `?touch=1\|0` | force touch controls on/off |
+| **F8** | performance panel (fps/draws/triangles/render resolution/speed/on-road/phase/quality tier) |
+| **F9 / F10 / P / B** | scene self-check / probe / toggle probe / toggle station table |
+| Console | `gift188.probe()`, `gift188.probe(x, z)`, `gift188.buildings()`, `gift188` |
 
 ---
 
-## 观感修正（第二轮）
+## Look-and-feel corrections (round two)
 
-用户实机反馈驱动的一轮，四条都改在**判据**上而不是观感上。
+Driven by playtesting feedback on real hardware. All four changed **criteria**,
+not vibes.
 
-### 1. 驿楼头上那根"奇怪的柱子"
+### 1. The "strange pillar" on top of the waystation
 
-程序化驿楼里有一根正脊横条（15.4m × 0.3m × 0.5m，放在 `roofY + 2.46`）。
-它在几何上是错的：起翘屋顶的脊是一条**线**，而横条是一条**保持脊高走完全宽的直棱**。
-屋面从脊往两侧按 `(1−t)^1.7` 陡降，于是横条两头各悬出约 2.5m ——
-画面上就是一根浮在屋顶上方的黑杠。**已删**。
-庑殿顶的脊本来就是一个点，加脊线只会更像盒子。
+The procedural waystation has a ridge bar (15.4 m × 0.3 m × 0.5 m, placed at
+`roofY + 2.46`). It is geometrically wrong: the ridge of an upturned roof is a
+**line**, while a bar is a straight prism that holds the ridge height across the
+full width. The roof falls away from the ridge toward both sides by `(1−t)^1.7`,
+so the bar overhangs about 2.5 m at each end — on screen, a black bar floating
+above the roof. **Deleted.**
+For a hip roof the ridge is a single point anyway; adding a ridge line only makes
+it look more like a box.
 
-### 2. 神苑没有屋顶
+### 2. The shrine had no roof
 
-7 类地标里 `shrine` 是唯一没调 `upturnedRoof` 的。
-体检报告里"最高的那批顶点"其实是四根石灯柱的柱头（4.50~4.70，跨 **0.2m**），
-屏幕上读作"这站没有屋顶"。**已在祭坛后沿补一座带起翘顶的碑龛**
-（放后沿而不是正中：正中是祭台，塞一座 2.4m 宽的龛会把祭台堵死）。
+Of the seven landmark types, `shrine` is the only one that doesn't call
+`upturnedRoof`. The "tallest vertices" in the health report were actually the
+capitals of four stone lantern posts (4.50–4.70, spanning **0.2 m**), which read
+on screen as "this station has no roof". **A shrine niche with a proper upturned
+roof has been added behind the altar** (placed at the rear rather than dead
+centre: the centre is the altar, and a 2.4 m-wide niche there would block it).
 
-廊的屋顶也一起修了：原来只抬升 1.5m、罩在 3.1m 高的柱子上，
-整座 4.96m 高，侧面看就是"一条贴着梁的平板"。抬到 2.4m，
-同时把台基从 15.0 缩到 13.0，换来两端各 1.4m 的出檐。
+The corridor's roof was fixed at the same time: it used to rise only 1.5 m and
+cover 3.1 m columns, making the whole thing 4.96 m tall — from the side, "a flat
+slab glued to a beam". Raised to 2.4 m, with the plinth narrowed from 15.0 to
+13.0, buying 1.4 m of eave at each end.
 
-**新判据**（`verify_stations`，+2 条）：
-- 每类必须有**真屋顶**：`roofVerts ≥ 12` 且**屋顶带厚度 ≥ 0.8m**。
-  厚度这一条是关键——它把"真屋顶"与"一排柱头"分开，后者只有 0.2m。
-- 每座站的世界包围盒 **Y 跨度必须等于**它那一类本地几何的 Y 跨度。
-  站会绕 Y 转向公路，而绕 Y 的刚体变换**不改变 Y 跨度**，
-  所以一旦对不上就是模型被额外平移/缩放，或 attach 时出了问题。
-  这一条专治"屋顶位置不对"。
+**New criteria** (`verify_stations`, +2):
+- Every type must have a **real roof**: `roofVerts ≥ 12` **and** a roof band
+  with thickness ≥ 0.8 m. The thickness part is the key — it's what separates a
+  real roof from a row of post capitals, which is only 0.2 m.
+- Each station's world bounding box **Y span must equal** the Y span of that
+  type's native geometry. Stations rotate about Y to face the road, and a rigid
+  rotation about Y **does not change Y span**, so any mismatch means the model was
+  additionally translated or scaled, or something went wrong on attach. This one
+  exists specifically to catch "the roof is in the wrong place".
 
-新增 `node tools/arch-roofs.mjs`：逐类打印檐底/脊高、屋顶尺寸、屋顶带厚度。
+New `node tools/arch-roofs.mjs`: prints eave/ridge heights, roof dimensions and
+roof band thickness per type.
 
-### 3. 草皮移除
+### 3. Grass cards removed
 
-草皮（交叉卡片 + alphaTest + 风摆 + 剔除半径，约 200 行）**整层删掉**。
+The grass layer (crossed cards + alphaTest + wind sway + cull radius, about 200
+lines) was **deleted outright**.
 
-**理由是它读不成草。** 近处是几片立着的绿色矩形，远处因为叶片只有 12cm 宽、
-在一个像素里混成一块更绿的方块——两种距离下都不像草。
-而草这个信号的**唯一价值就在于"像草"**，读不出来就该拿掉。
-留着它代价还不止画面：铺满屏幕的半透明卡片是填充率杀手。
+**The reason is that it doesn't read as grass.** Up close it's a few upright
+green rectangles; at distance, because the blades are only 12 cm wide and mix
+into a slightly greener square inside one pixel — and at neither distance does
+that look like grass. But "looks like grass" is the *entire* value of the grass
+signal, so if it can't be read, it should go. Keeping it also costs more than
+looks: full-screen translucent cards are a fill-rate killer.
 
-草的质感搬进**地形着色器**：草丛斑块 + 沿固定角度拉长的方向性短纹 + 逆光草尖。
-同样的信息量，**0 个额外三角形、0 次 alphaTest、0 个 draw call**，
-而且近处不会变成纸片——这才是零贴图路线上该有的做法。
+The grassy quality moved into the **terrain shader**: patches of turf +
+directional short streaks stretched along a fixed angle + backlit grass tips.
+The same amount of information with **0 extra triangles, 0 alpha tests, 0 draw
+calls** — and it doesn't turn into paper up close, which is what the zero-texture
+route actually calls for.
 
-画质档的 `grassEnabled / grassRadius / grassDensity` 三个旋钮一起删掉，
-换成 `groundDetail: 0|1|2` + `groundDetailRadius`（低档 0，中档 34m，高档 58m）。
+The quality tiers' `grassEnabled / grassRadius / grassDensity` knobs were
+removed together and replaced with `groundDetail: 0|1|2` + `groundDetailRadius`
+(low 0, medium 34 m, high 58 m).
 
-### 4. 真实感
+### 4. Believability
 
-**"像照片"和"像游戏"的差别主要在四个地方**，都在已有代码上改，没加几何、没加 draw call：
+**The difference between "looks like a photo" and "looks like a game" is mostly in
+four places**, all changed in existing code, with no added geometry and no added
+draw calls:
 
-| 改什么 | 原来 | 现在 | 为什么 |
+| What changed | Before | Now | Why |
 |---|---|---|---|
-| 草地去饱和 | — | 往亮度方向拉 28%，再乘 (1.04, 1.00, 0.93) 提暖 | 真实照片里的草饱和度远低于直觉；屏幕上那种"鲜绿"是渲染里把色相拉到 120° 饱和度拉满的结果，一眼就假 |
-| 辅助色降饱和 | `(0.24,0.39,0.16)` / `(0.47,0.545,0.245)` | `(0.20,0.28,0.135)` / `(0.44,0.47,0.255)` | 同上。`BASE_COLOR` 是源项目数据，一个数不改 |
-| 大尺度色块对比 | 0.75 | 0.45 | 0.75 叠上去读成地面上一摊摊深色水渍 |
-| 程序化云带 | 无 | 视线投到 y=1 平面取 uv + 两层 fbm + 云底/云顶分色 | 没有云的天空是**渐变**，而渐变读作"渲染"。真实照片几乎总有云，哪怕只是地平线上的一条积云边 |
-| 大气透视 | 只有线性 fog | 额外叠一层**距离平方**的雾并偏向天色 | 现实的空气散射跟距离不是线性的，而且**远山不只变糊还变蓝**。一条线性雾做不出这个，所以远山永远是"同样清晰的绿" |
+| Grass desaturation | — | pulled 28% toward brightness, then multiplied by (1.04, 1.00, 0.93) to warm it | grass in a real photograph is far less saturated than intuition suggests; that "vivid green" on screen is what you get when rendering pulls the hue to 120° and saturates it fully, and it reads as fake at a glance |
+| Accent desaturation | `(0.24,0.39,0.16)` / `(0.47,0.545,0.245)` | `(0.20,0.28,0.135)` / `(0.44,0.47,0.255)` | as above. `BASE_COLOR` is source project data and not one number was changed |
+| Large-scale colour block contrast | 0.75 | 0.45 | 0.75 read as patches of dark water stains on the ground |
+| Procedural cloud band | none | project the view ray onto the y=1 plane for uv + two layers of fbm + separate colours for cloud base and top | a sky without clouds is a **gradient**, and a gradient reads as "rendering". A real photograph almost always has clouds, even if it's just a cumulus edge on the horizon |
+| Atmospheric perspective | linear fog only | an extra **squared-distance** fog layer tinted towards the sky | real air scattering isn't linear in distance, and **distant hills don't only get blurrier, they get bluer**. A single linear fog can't do that, which is why distant hills are always "the same crisp green" |
 
-`patchStandard` 新增 `fogHint` 钩子，插在 `#include <fog_fragment>` **之前**——
-插在它后面会被雾直接覆盖掉，而不覆盖这件事不报错，只是那段代码看起来完全没生效。
+`patchStandard` gained a `fogHint` hook, inserted **before**
+`#include <fog_fragment>` — inserted after it, the fog overwrites it, and not
+overwriting raises no error, so that code just silently appears to do nothing.
 
-**一处注释与代码对不上**，顺手记一笔：大气透视第一版系数写的是 `2.2e-6`，
-注释却写"100m 处给 0.22"，实际只有 0.022——**比自己的意图弱十倍**，
-近景完全看不出效果。现在是 `8e-6`（100m / 7.7%、200m / 27%、400m / 72%），
-注释与代码一致。
+**One comment that didn't match its code**, noted while passing: the first
+version of the atmospheric perspective coefficient was written as `2.2e-6` while
+the comment said "0.22 at 100 m" — the actual value was only 0.022, **ten times
+weaker than intended**, with no visible effect in the foreground. It's now `8e-6`
+(100 m / 7.7%, 200 m / 27%, 400 m / 72%), and comment and code agree.
 
 ---
 
-## 仓库
+## Repository
 
-源码在 `https://github.com/Jasper-Leung/188js`，分支 `main`。
+Source at `https://github.com/Jasper-Leung/188js`, branch `main`.
 
 ```bash
 npm install
-npm run dev        # 开发服务器
+npm run dev        # dev server
 npm run typecheck  # strict + noUnusedLocals + noUnusedParameters
-npm run build      # 产物进 dist/
-npm run verify     # 无头回归 32 条 / 468 断言 + 文案死字扫描
+npm run build      # output into dist/
+npm run verify     # headless regression: 32 suites / 468 assertions + dead-string scan
 ```
 
-**一个不明显的坑**：`git push` 在这台机器上第一次报
-`Recv failure: Connection was reset`，而 `Invoke-WebRequest` 同一个地址是 200。
-原因是 git 自带的 HTTP/2 协商被中间设备重置了。本仓库已经设了
+**One non-obvious trap**: on this machine the first `git push` failed with
+`Recv failure: Connection was reset`, while `Invoke-WebRequest` against the same
+URL returned 200. The cause is git's bundled HTTP/2 negotiation being reset by
+something in between. This repository has therefore set
 
 ```
 git config http.version HTTP/1.1
 ```
 
-换台机器克隆后如果 push 报同样的错，先试这一条。
+If you clone elsewhere and push hits the same error, try that first.
 
-**忽略规则的两条决定**：
-- `dist/` 与 `node_modules/` 忽略（能重建）。
-- **`public/` 不忽略**——那 8.8MB 是游戏本体（模型/字体/音频），
-  源项目里已压过一轮（22.3MB → 5MB）。忽略掉它，仓库就只剩代码，
-  clone 下来 build 出来是一片空地。
-- `*.import` 忽略：那是 Godot 的导入桩，对 web 构建毫无用处，
-  留着还会让"这个项目依赖 Godot 吗"这个问题变模糊。
-
----
-
-## 正式开发计划
-
-见 **[PLAN.md](PLAN.md)**。一句话结论：**剧情不是没有，是没送达**——
-`prologue_1/2/3` 写清了全部前提（律师函、三十日期限、母亲、守驿人的代价），
-中英双语都翻了，但代码里从来没有播过。玩家这一趟能收到的全部叙事，
-是 3 通电话加 4 句路边的字。
+**Two decisions in the ignore rules**:
+- `dist/` and `node_modules/` are ignored (both rebuildable).
+- **`public/` is not ignored** — those 8.8 MB are the game itself
+  (models/fonts/audio), already compressed once in the source project
+  (22.3 MB → 5 MB). Ignore it and the repository is left with only code; clone it
+  and the build produces an empty field.
+- `*.import` is ignored: those are Godot's import stubs, useless to a web build,
+  and leaving them makes the question "does this project depend on Godot?" vaguer.
 
 ---
 
-## 本轮（正式版第一轮）修掉的东西
+## Development plan
 
-真 bug，不是有意为之的设计变更：
+See **[PLAN.md](PLAN.md)**. In one sentence: **the story isn't missing, it was
+never delivered** — `prologue_1/2/3` spell out every premise (the lawyer's letter,
+the thirty-day deadline, the mother, the cost the waystation keeper pays), and
+all three are translated into both languages, but nothing in the code ever plays
+them. The entire amount of narrative a player receives on this run is 3 phone
+calls and 4 lines of roadside text.
 
-1. **8/16 座驿站是灰盒**。源项目 13 个站模型里只有 5 个是真建筑，
-   另外 7 个（驿楼/茶寮/岭台/神苑/凉亭/廊/亭灯）是作者搭的长方体，
-   加上 `tree.glb` 顶替的「榕树下」，共 9 座在屏幕上就是几个方块，
-   而且沿 1228m 的环线反复出现。
-   → 新增 `src/world/architecture.ts`：为这 7 类程序化生成真正的建筑
-   （举折凹曲屋面 + 角部起翘 + 柱 + 台基 + 栏杆），零贴图、
-   7 座合计 5512 三角面、7 次 draw call、0 字节下载。
-   几何**以米为单位**生成、不再乘 `cfg.scale`——灰盒是"小模型 × 大缩放"，
-   两套缩放同时生效会撑到两倍宽，直接顶穿"离中心线 ≥ 路宽 + 0.9×foot_half"。
+---
 
-2. **植被剔除从未生效**。`setVisible(group, c.index * 3, ...)` 拿块号当
-   `children` 下标，而 `groupTrees.children` 只装**有树的块**
-   （12m 一块、株距 25m，近一半的块根本没有树），于是越界的下标被
-   `if (child)` 吞掉，本该隐藏的近处块从来没被隐藏过。
-   症状极安静：帧率只掉几个点，没有报错，没有任何判据会红。
-   → 改成显式的"块号 → mesh"映射表。**三角面 143 万 → 62 万，
-   绘制调用 58 → 11。**
+## Fixed in this round (first release round)
 
-3. **心神遮罩系数算了却扔掉**。`treeR = preset.treeRadius * visibilityFactor`
-   算出来之后直接 `void`，判定仍用 `preset.*Radius`——于是
-   「心神低 → 看得更短」在整个游戏里从来没生效过，灯笼、香囊、遮罩三样
-   都在给一个没人读的数写账。`verify_mood` 守的是那条公式本身，守不到这里。
-   → 让它真的进半径。
+Real bugs, not intentional design changes:
 
-4. **草皮几何体缺 `normal` 属性**。three 的 `beginnormal_vertex` 写的是
-   `vec3 objectNormal = vec3(normal);`，属性不存在时 WebGL 给默认的 (0,0,0)，
-   于是 `vNormal = normalize(vec3(0))` 是 NaN，阴影那一路
-   `inverseTransformDirection(transformedNormal, viewMatrix)` 同样是 NaN——
-   **通过 alphaTest 的每一个像素都算成黑色**。这就是"草地上有黑方块"的
-   另一半（另一半是灰盒驿站）。
-   → 补上 `normal` 属性，并在顶点着色器里按"卡片朝向相机"重算法线
-   （底部朝相机平躺、梢部逐渐朝上）。
+1. **8 of the 16 stations were greyboxes.** Of the source project's 13 station
+   models only 5 are real buildings; the other 7 (waystation / tea house /
+   ridge terrace / shrine / pavilion / corridor / lantern) were the author's
+   cuboids, plus the banyan-tree stand-in built from `tree.glb` — 9 stations that
+   are a few boxes on screen, recurring all the way around a 1228 m loop.
+   → New `src/world/architecture.ts`: genuinely procedural buildings for those
+   seven types (concave curved roof + upturned corners + columns + plinth +
+   balustrade), zero textures, 5512 triangles and 7 draw calls for all seven,
+   0 bytes downloaded.
+   The geometry is now generated **in metres** and no longer multiplied by
+   `cfg.scale` — the greyboxes were "small model × large scale", and with both
+   scalings live at once they ballooned to twice the width, punching straight
+   through the "≥ road width + 0.9×foot_half from the centreline" invariant.
 
-5. **草皮重打包在 d=0 时把当前块塞了两遍**。`[cur + d, cur - d]` 两个下标
-   在 d=0 时都是 `cur`，而判据里的 `d > 0` 不成立——玩家所在那一块的草皮
-   凭空多出一倍实例，两簇草长在同一个位置，一个压着一个，画面上完全看不出。
+2. **Vegetation culling never took effect.** `setVisible(group, c.index * 3, …)`
+   used the chunk number as an index into `children`, but `groupTrees.children`
+   only holds **chunks that have trees** (12 m chunks, 25 m spacing, so nearly
+   half of them have none), so out-of-range indices were swallowed by `if (child)`
+   and the near chunks that should have been hidden never were. The symptom is
+   extremely quiet: the frame rate drops by a few points, nothing errors, and no
+   criterion goes red.
+   → Replaced with an explicit "chunk number → mesh" map. **Triangles 1.43 M →
+   620 k, draw calls 58 → 11.**
 
-6. **8 字交叉口的圆盘盘去掉了**。源项目在自交点 (0, 43) 放了个半径 12m 的
-   圆盘（Godot 侧不方便给交叉口划线），它同时盖住了两条 ribbon 的高度差
-   （实测 0.16m 的 Z-fighting）与笔直穿过路口的标线，但它是**盖**而不是**做**：
-   路面在盘内变成一张 24m 的圆，玩家绕一圈回来意识不到自己走回了起点。
-   → 改为两件真事：**压平**（以交叉点自身高度为基准，把两条 ribbon 拉到
-   同一平面）与**按世界距离抑制标线**（着色器里 `mark` 淡出中线/路缘线/路肩）。
-   注意基准高度必须取自交叉点**本身**而不是整个半径——按 12m 取最大值时，
-   落在 11m 外的那个采样点已经在爬坡，低的一支会被抬 0.58m，路口中央凭空鼓包。
+3. **The spirits mask coefficient was computed and thrown away.** `treeR =
+   preset.treeRadius * visibilityFactor` was calculated and then `void`ed, with
+   the decision still using `preset.*Radius` — so "low spirits → see less far"
+   had never taken effect anywhere in the game, and the lanterns, the sachet and
+   the mask were all writing accounts against a number nobody read. `verify_mood`
+   guards the formula itself, so it can't catch this.
+   → It actually goes into the radius now.
 
-7. **后台标签页打开游戏会永远停在启动 62%**。`nextFrame()` 纯用
-   `requestAnimationFrame`，而浏览器对后台标签页是**完全暂停** rAF 的。
-   玩家在另一个标签页点开链接、回头再切过来，就会看到进度条死在 62%、
-   页面上什么也不发生。→ 让 rAF 和 20ms 定时器赛跑。
+4. **The grass geometry was missing its `normal` attribute.** three's
+   `beginnormal_vertex` reads `vec3 objectNormal = vec3(normal);`, and when the
+   attribute doesn't exist WebGL supplies the default (0,0,0), so `vNormal =
+   normalize(vec3(0))` is NaN, and the shadow path's
+   `inverseTransformDirection(transformedNormal, viewMatrix)` is NaN too —
+   **every pixel that passed alphaTest was computed as black**. That's half of
+   "black squares on the grass" (the other half is the greybox stations).
+   → Added the `normal` attribute and recomputed normals in the vertex shader as
+   "cards face the camera" (bottom lying flat toward the camera, tips curving up).
 
-8. `src/shaders/world.ts` 里那份从未被引用的 `GRASS_PATCH` 删掉了——
-   它引用了未声明的 `vUvG`，一旦有人用它就是编译错误；
-   而真正在用的那份在 `vegetation.ts` 内联，两边早就漂移了。
+5. **Grass repacking duplicated the current chunk when d = 0.** The two indices
+   `[cur + d, cur - d]` are both `cur` when d = 0, and the criterion's `d > 0`
+   doesn't hold — so the grass in the player's own chunk doubled for free, two
+   clumps of grass growing in the same spot, one on top of the other, and
+   completely invisible on screen.
 
-**新增的调试入口**（正式发行时不存在）
+6. **The figure-eight crossing had a disc laid over it.** The source project put
+   a 12 m radius disc at the self-intersection (it wasn't convenient to mark a
+   crossing from Godot's side), and it covered both the height difference between
+   the two ribbons (a measured 0.16 m of Z-fighting) and the lane markings running
+   straight through the junction — but it *covers* rather than *does*. Inside the
+   disc the road becomes a 24 m circle, and riding round it you don't notice you
+   came back to where you started.
+   → Replaced by two real things: **flattening** (using the crossing point's own
+   height as the datum, pulling both ribbons onto one plane) and **world-distance
+   suppression of the markings** (the shader fades out the centre/edge/shoulder
+   lines). Note the datum height must come from the crossing point **itself**,
+   not from the whole radius — taking the maximum over 12 m means the sample
+   11 m out is already climbing the slope, and the lower branch gets lifted by
+   0.58 m, so the middle of the junction bulges for no reason.
 
-| 入口 | 作用 |
+7. **Opening the game in a background tab leaves it stuck at 62% of loading.**
+   `nextFrame()` relies purely on `requestAnimationFrame`, and browsers
+   **completely suspend** rAF in background tabs. A player who clicks the link in
+   another tab and switches back sees the progress bar frozen at 62% and nothing
+   else happening. → Race rAF against a 20 ms timer.
+
+8. The never-referenced `GRASS_PATCH` in `src/shaders/world.ts` was deleted — it
+   referenced an undeclared `vUvG`, so the moment anyone used it would be a
+   compile error, and the copy actually in use has been inlined in
+   `vegetation.ts` for a long time, so the two had drifted apart.
+
+**New debugging entry points** (not present in the shipped release)
+
+| Entry point | What it does |
 |---|---|
-| `?dump=1` + **F9** | 场景自检：列出玩家附近每个可渲染对象的名字、实例数、包围盒、材质有无贴图、alphaTest、三角面数。回答"画面左边那个方块到底是什么"——这类问题看代码看不出来 |
-| `?arc=0.462` | 把车放到中心线参数 0.462 处 |
-| `?yaw=90` | 再指定朝向（度） |
-| `?caps` | 只跑能力探测，不建世界 |
-| `?tier=0\|1\|2` | 强制档位 |
-| `?touch=1\|0` | 强制挂/不挂触屏控件 |
-| **F8** | 性能面板（帧率/绘制/三角面/渲染分辨率/车速/是否在路上/阶段/画质档） |
+| `?dump=1` + **F9** | scene self-check: lists the name, instance count, bounding box, texture presence, alphaTest and triangle count of every renderable near the player. It answers "what exactly is that box on the left of the screen" — a question code can't answer |
+| `?arc=0.462` | place the vehicle at centreline parameter 0.462 |
+| `?yaw=90` | then set the heading (degrees) |
+| `?caps` | run capability detection only, don't build the world |
+| `?tier=0\|1\|2` | force a quality tier |
+| `?touch=1\|0` | force touch controls on/off |
+| **F8** | performance panel (fps/draws/triangles/render resolution/speed/on-road/phase/quality tier) |
 
-`?arc` + `?yaw` 这两个是一起加的：同一个画面看两次做不到，
-而"要看清楚 8 字交叉口就得骑过去"，错过一次就得再绕一整圈。
-配合 `tools/crossings.mjs`（算出环线上所有自交点与夹角）
-和 `tools/glb-inspect.mjs`（列出 GLB 每个部件的顶点数与包围盒），
-这一类"画面里有东西但不知道是什么"的问题就有了确定答案。
-
----
-
-## 改了判据的
-
-
-- 8 字交叉数：改成末尾接回开头再数（见上）
-- `hash2d` 补回源项目漏掉的 `fmod`（这是 bug 修复，不是移植引入的）
-- 小游戏的 `CANCELLED` 拆成 `lose`（玩法失败）与 `cancel`（玩家按 Esc）：
-  原作两者同出口，而它们对驿站奖励的判定完全不同
-- **新增**：程序化地标的几何硬约束 5 条（半宽 ≤ `STATION_FOOT_HALF`、
-  不埋进地面、高度不越过站名标签、7 座合计三角面 ≤ 6 万、每类都真的被用到）。
-  它们会红的做法都写在 `src/verify/entry.ts` 的注释里。
-- **新增**：交叉口 3 条（核心区共面偏差 ≤ 5cm、平面离地 ≤ 0.4m、
-  路口前后 48m 内每一步都在路上且高度不跳）。
+`?arc` + `?yaw` were added together: you cannot look at the same view twice, and
+"to see the figure-eight crossing clearly you have to ride to it", so missing it
+means riding the whole loop again. With `tools/crossings.mjs` (computes all
+self-intersections and angles along the loop) and `tools/glb-inspect.mjs` (lists
+every GLB part's vertex count and bounding box), this whole class of "there's
+something on screen and I don't know what it is" finally has a definite answer.
 
 ---
 
-## 法律 / 命名
+## Criteria that were changed
 
-本游戏不使用任何现实中的官方驿站名称，路线是自行构造的数学 8 字图案，
-不复现任何真实公路。公共文化母题可自由使用，也是本作的题材基础，
-包括苏轼的十六赏心乐事（1037–1101）与"风景骑行"这一想法本身。
+- Figure-eight crossing count: changed to counting once more with the tail
+  joined to the head (see above)
+- `hash2d` restored the `fmod` the source project dropped (that's a bug fix, not
+  something the port introduced)
+- The minigames' `CANCELLED` split into `lose` (failed the round) and `cancel`
+  (the player pressed Esc): the original routes both to the same exit, yet they
+  decide station rewards completely differently
+- **New**: 5 hard geometric constraints on procedural landmarks (half-width ≤
+  `STATION_FOOT_HALF`, not buried in the ground, height not exceeding the station
+  name label, ≤ 60 k triangles for all seven, every type actually used). How each
+  of them goes red is written in the comments in `src/verify/entry.ts`.
+- **New**: 3 crossing constraints (core-region coplanar deviation ≤ 5 cm, plane
+  clearance ≤ 0.4 m, on-road and height-stable at every step within 48 m of the
+  junction).
 
-建议的措辞：虚构叙事 demo / 虚构路线几何 / 公有领域诗文。
-建议避免：灵感来自某条真实公路 / 官方合作 / 官方授权 / 真实景区还原。
+---
+
+## Legal / naming
+
+This game uses no real historical waystation names. The route is a
+self-constructed mathematical figure-eight and reproduces no real road. Common
+cultural motifs are free to use and form the basis of this game's subject
+matter, including Su Shi's *Sixteen Things That Delight the Heart* (1037–1101)
+and the idea of "scenic cycling" itself.
+
+Suggested wording: fictional narrative demo / fictional route geometry /
+public-domain poetry.
+Suggested to avoid: inspired by a specific real road / official collaboration /
+official endorsement / faithful recreation of a real scenic route.
