@@ -44,7 +44,7 @@ jobs:
       # dist/ 不存在时它直接判红。CI 是全新检出，本地有 dist/ 只是因为
       # 上一轮 build 顺手留下了——**本地永远踩不到，CI 必然踩到**。
       - run: npm run build
-        with:
+        env:
           # vite.config.ts 里 base 已经是 './'，这里保持一致。
           # 两处不一致时的症状很安静：本地一切正常，线上白屏 404。
           NODE_ENV: production
