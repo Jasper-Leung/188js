@@ -135,10 +135,17 @@ npm run verify      # 57 条 / 829 断言
 **其中 53% 压在三个文件上**：`motorcycle.glb` 4.82 / `bicycle.glb` 2.79 /
 `survivor.glb` 1.33 MB。`bicycle.glb` 在首屏关键路径上。
 
-> ⚠ **资产管线在干净克隆上跑不起来，这不是能靠重跑解决的。**
-> `tools/compress-textures.mjs` 的输入是**仓库之外**的 Godot 源项目
-> （默认 `D:/code/20260926/no188/…`，可用 `GIFT188_SRC_MODELS` /
-> `GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA` 覆盖），中间产物落在被 gitignore 的
-> `.cache/tex/`。所以 `npm run assets:all` **要么压，要么响亮地报错**——
-> 它不会"成功"地产出一个空缓存（那是上一版的行为：空数组 + `exit(0)`）。
-> 要真正减小体积，得先把源项目指过来。
+> ⚠ **资产管线在干净克隆上跑不全，但这不是能靠重跑解决的。**
+> `tools/compress-textures.mjs` 的输入分两族：
+>
+> · **自行车在版本库里** —— `assets-src/vehicles/bicycle_clean.glb`
+>   （21.5MB / 184,433 面），清单默认指向它，所以**干净克隆至少压得出这台车**。
+>   判据 `verify_assets_src` 守着它在。
+> · **其余全在仓库之外** —— Godot 源项目（默认 `D:/code/20260926/no188/…`），
+>   以及摩托车 / 角色 / 松树 / 竹 / 现代建筑。可用 `GIFT188_SRC_MODELS` /
+>   `GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA` 覆盖。
+>
+> 中间产物落在被 gitignore 的 `.cache/tex/`。判据只有一个：**有没有活可干**。
+> `jobs.length === 0` 时 `exit(1)`；缺的族逐条告警并跳过。
+> 它不会"成功"地产出一个空缓存——那是上一版的行为（空数组 + `exit(0)`），
+> 也是 README 里 `8.6MB` / `5.0MB` 那些数字能一直错的原因。

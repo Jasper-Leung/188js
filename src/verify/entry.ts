@@ -10,7 +10,7 @@
  * 更糟：它绿着，而漏洞也在。
  */
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, FRAGMENT_STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
 import {
@@ -8349,6 +8349,104 @@ check('verify_first_run', () => {
     probs.length
       ? probs.join('；')
       : '演示等车有明示 · Esc 关得掉铺子 · 心神三处同名',
+    asserts,
+  );
+});
+
+/**
+ * 关键路径上的资产，源必须在仓库里。
+ *
+ * ## 它守的是哪一族
+ *
+ * 自行车是**玩家第一眼看到的东西**，也落在首屏关键路径上。
+ * 它的源本来在 `D:/code/20261001/modelbone/…`，不提交，于是：
+ *
+ * · 干净克隆跑不了 `assets:all`（真正的原因不是"管线坏了"，是"输入不在"）；
+ * · README 资产表里 `22.3MB → 5.0MB` 那一行**没有任何东西可以对照**——
+ *   而它实际上压到的是 2.79MB，比承诺值大 3.4 倍，多年没人发现，
+ *   因为**验证它的那条管线在干净克隆上报成功**。
+ *
+ * 把它收进 `assets-src/` 之后，上面第一、二条才成立。
+ *
+ * ## 为什么判的是"存在 + 指向正确"，而不是"跑一遍管线"
+ *
+ * 跑管线要 20MB 的读 + 两趟重编码，在每一条回归里做一遍不划算，
+ * 而且它验的是当次结果、不是"下一个克隆能不能重跑"。
+ * 不变式是那条**永久的**事实：**这个文件在版本库里，且清单指向它**。
+ *
+ * 顺带钉一个数量级：源必须明显大于产物。真压缩过一轮的 GLB
+ * 不会比它的源更大——两者反过来就说明指错了文件，
+ * 而"指错文件"的症状是压出来一台**轮子不转**的车（见 assets-src/README.md）。
+ *
+ * 会红的做法：
+ *   · 从版本库删掉 `assets-src/vehicles/bicycle_clean.glb`   → 红
+ *   · 把清单里那一项改回 `SRC_VEHICLE`                        → 红
+ *   · 把某个几 KB 的占位文件放在那个路径上                     → 红（数量级）
+ */
+check('verify_assets_src', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const SRC_REL = join('assets-src', 'vehicles', 'bicycle_clean.glb');
+  const OUT_REL = join('public', 'models', 'bicycle.glb');
+  const srcPath = join(process.cwd(), SRC_REL);
+  const outPath = join(process.cwd(), OUT_REL);
+
+  // 1. 源在，而且是一个**真的高模**，不是占位文件。
+  asserts++;
+  let srcBytes = 0;
+  if (!existsSync(srcPath)) {
+    probs.push(`${SRC_REL} 不在仓库里 —— 干净克隆压不出自行车，而它在首屏关键路径上`);
+  } else {
+    srcBytes = statSync(srcPath).size;
+    // 184,433 面 + 21 张贴图实际是 21.5MB。给一个 20MB 的地板：
+    // 低了说明被换成了占位文件或者半截导出。
+    if (srcBytes < 20 * 1024 * 1024) {
+      probs.push(`${SRC_REL} 只有 ${(srcBytes / 1048576).toFixed(2)}MB —— 那不是 184,433 面那台车（应该 ≈21.5MB）`);
+    }
+  }
+
+  // 2. 产物在。
+  asserts++;
+  if (!existsSync(outPath)) {
+    probs.push(`${OUT_REL} 不在 —— 游戏缺车`);
+  }
+
+  // 3. 源必须明显大于产物：这是"指对了文件"的反向证据。
+  asserts++;
+  if (srcBytes > 0 && existsSync(outPath)) {
+    const outBytes = statSync(outPath).size;
+    if (srcBytes <= outBytes) {
+      probs.push(
+        `源（${(srcBytes / 1048576).toFixed(2)}MB）没有比产物（${(outBytes / 1048576).toFixed(2)}MB）大 —— ` +
+          `清单多半指到了别的地方。压过一轮的 GLB 不可能比它的源更大`,
+      );
+    }
+  }
+
+  // 4. 清单里自行车那一项指向仓库内，不是仓库外。
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'tools', 'extra-models.mjs'), 'utf8');
+    // 只看那一条：'bicycle_clean.glb' 开头的数组项。
+    const entry = src.match(/\[\s*'bicycle_clean\.glb'[^\]]*\]/)?.[0] ?? '';
+    if (!entry) {
+      probs.push("extra-models.mjs 里找不到 ['bicycle_clean.glb', …] 这一项 —— 自行车不在清单里");
+    } else if (!/SRC_INREPO/.test(entry)) {
+      probs.push(`自行车那一项没有指向 SRC_INREPO（现在是：${entry}）—— 干净克隆压不出它`);
+    }
+    // 外部那份车模还在被引用是正常的（GIFT188_SRC_EXTRA），但要留着注释提醒。
+    asserts++;
+    if (!/别和\s*`?D:\/code\/20260926/.test(src)) {
+      probs.push('extra-models.mjs 里丢了「别和 D:/code/20260926 那台下载的车搞混」的提醒 —— 它和 SRC_BIKE 指向同一个文件名前缀，极易接错');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `自行车源在仓库内（${(srcBytes / 1048576).toFixed(2)}MB → ${(existsSync(outPath) ? (statSync(outPath).size / 1048576).toFixed(2) : '?')}MB），清单指向它`,
     asserts,
   );
 });

@@ -72,42 +72,58 @@ const MIN_BYTES = 24 * 1024;
 mkdirSync(CACHE, { recursive: true });
 
 /**
- * 源不在就**停下**，而不是继续。
+ * 一个源都找不到就**停下**；找到了别的、缺这一个，只告警。
  *
- * 这是一个 `process.exit(1)`，不是警告：这条管线唯一的产物是
- * `.cache/tex/`，而它只被下一步 `optimize-assets.mjs` 读。
- * 源缺失时继续跑的唯一结果是"成功地什么都不做"——
- * 退出码 0、`public/models/` 原封不动、下一个人以为刚压过。
- * 宁可让 `npm run assets:all` 红灯：红灯说明"没压"，绿灯才说明"压过了"。
+ * 上一版是"主模型目录不在就 exit(1)"，那对"仓库自带自行车"是个错的门槛：
+ * `assets-src/vehicles/bicycle_clean.glb` 现在**在版本库里**，一台干净克隆上
+ * 它一定在，而 Godot 源项目一定不在——照旧的话，仓库里明明带着车模，
+ * `npm run assets:all` 却因为"另一个目录找不到"而拒绝干活。
+ *
+ * 判据因此只能是**有没有活可干**：
+ * · 一件都没有 → 红灯。命令成功、`.cache/tex/` 空、`public/models/` 一字节没动，
+ *   而下一个人以为刚压过——**一个不做任何事的绿灯比红灯贵得多**。
+ * · 有活 → 干。缺的那几个在下面点名，产物里也自然少那几个。
  */
-if (!existsSync(SRC_MODELS)) {
-  console.error(
-    `[assets] 找不到源模型目录：${SRC_MODELS}\n` +
-      `        源资产在**仓库之外**（Godot 源项目），不会被提交。用环境变量指过去：\n` +
-      `          GIFT188_SRC_MODELS=<目录>   # 里面是一批 .glb\n` +
-      `          GIFT188_SRC_BIKE=<文件>     # 自行车单独一条\n` +
-      `          GIFT188_SRC_EXTRA=<目录>    # 松树 / 竹 / 现代建筑，见 tools/extra-models.mjs\n` +
-      `        停下是因为继续跑会"成功"地产出一个空缓存，\n` +
-      `        而 public/models/ 会保持上一次的旧体积——那正是它最难被发现的样子。`,
-  );
-  process.exit(1);
-}
-
 const MASS_MODELS = { has: isMassModel };
-const jobs = readdirSync(SRC_MODELS)
-  .filter((f) => f.toLowerCase().endsWith('.glb'))
-  .map((f) => ({ src: join(SRC_MODELS, f), name: f, dst: f, maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO }));
+const jobs = [];
+if (existsSync(SRC_MODELS)) {
+  for (const f of readdirSync(SRC_MODELS)) {
+    if (!f.toLowerCase().endsWith('.glb')) continue;
+    jobs.push({
+      src: join(SRC_MODELS, f),
+      name: f,
+      dst: f,
+      maxTex: MASS_MODELS.has(f) ? MAX_TEX_MASS : MAX_TEX_HERO,
+    });
+  }
+} else {
+  console.warn(`  ! 源项目模型目录不在，跳过这一族：${SRC_MODELS}`);
+  console.warn('    （GIFT188_SRC_MODELS 可覆盖。干净克隆上这是正常的——它们不提交。）');
+}
 if (existsSync(SRC_BIKE)) {
   jobs.push({ src: SRC_BIKE, name: 'bike.glb', dst: 'bike.glb', maxTex: MAX_TEX_HERO });
 } else {
-  console.warn(`  ! 自行车源缺失，跳过：${SRC_BIKE}`);
+  console.warn(`  ! 源项目那份 bike.glb 不在，跳过：${SRC_BIKE}`);
 }
-// 外部补充资产（松树 / 竹 / 两栋现代建筑）。清单见 tools/extra-models.mjs 的文件头：
-// 松树是这一轮补上的关键——源项目那株行道树简化压不动，见那份文件的说明。
+// 补充资产（松树 / 竹 / 现代建筑 / 自行车 / 摩托车 / 角色 / 滑板）。
+// 清单见 tools/extra-models.mjs 的文件头。**自行车那一项在版本库里**（assets-src/），
+// 所以一台干净克隆至少有它能压。
 for (const [srcName, dstName, maxTex, split, trim, srcDir] of EXTRA_MODELS) {
   const p = join(srcDir ?? SRC_EXTRA, srcName);
   if (existsSync(p)) jobs.push({ src: p, name: dstName, dst: dstName, maxTex, split, trim });
   else console.warn(`  ! 补充资产缺失，跳过：${p}`);
+}
+
+if (jobs.length === 0) {
+  console.error(
+    '[assets] 一个源模型都没有 —— 没有压过任何东西，退出。\n' +
+      '        仓库自带的是 assets-src/vehicles/bicycle_clean.glb；它不在的话仓库可能是残的。\n' +
+      '        其余源资产在**仓库之外**（Godot 源项目 + 后补进来的车模），用环境变量指过去：\n' +
+      '          GIFT188_SRC_MODELS=<目录>   GIFT188_SRC_BIKE=<文件>   GIFT188_SRC_EXTRA=<目录>\n' +
+      '        停下是因为继续跑会"成功"地产出一个空缓存，\n' +
+      '        而 public/models/ 会保持上一次的旧体积——那正是它最难被发现的样子。',
+  );
+  process.exit(1);
 }
 
 let inBytes = 0;

@@ -360,16 +360,27 @@ site exclusion list, or turn off its browser integration.
 | Font (handwritten) | 24.4 MB | 404 KB (lazy) | the ~3500 most common Chinese characters, loaded only when the back of the postcard is opened |
 | Audio | 2.2 MB | 2.2 MB | as-is (already ogg; recompressing hurts the ambience) |
 
-### ⚠ The models are 3.4× over target, and re-running the pipeline won't fix it
+### ⚠ The models are 3.4× over target
 
-The source GLBs live **outside this repository** (the Godot project — default
-`D:/code/20260926/no188/…`, overridable with `GIFT188_SRC_MODELS` /
-`GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA`), and the intermediate `.cache/tex/` is
-gitignored. So on a clean clone `npm run assets:all` now **fails loudly**. It
-used to do the opposite: `existsSync(…) ? … : []` gave it an empty job list, it
-printed "no source models found, skipping", and exited **0** — leaving
-`public/models/` at its previous size with every downstream number in this
-README still looking correct.
+The source GLBs live **outside this repository**, and until 2026-10-07 the
+pipeline that compressed them had two ways to fail — and one way to *pretend* it
+hadn't: `existsSync(…) ? … : []` gave it an empty job list, it printed "no source
+models found, skipping", and exited **0**. `public/models/` stayed at its
+previous size while every number in this README still looked correct. The two
+hostile paths were now configurable (`GIFT188_SRC_MODELS` / `GIFT188_SRC_BIKE` /
+`GIFT188_SRC_EXTRA`), and the only hard stop is `jobs.length === 0`.
+
+**The bicycle is the exception, and it is now in the repository**:
+`assets-src/vehicles/bicycle_clean.glb` (21.5 MB / 184,433 faces) is committed,
+and `tools/extra-models.mjs` points at it by default. It is the first thing the
+player looks at, it is on the first-screen critical path, and an asset *nobody
+can re-compress* is an asset whose numbers in this file have no source. A clean
+clone can now regenerate it. `verify_assets_src` guards the file's presence, its
+order of magnitude, and the fact that the manifest still points at it.
+
+The rest — motorcycle, character, pine, bamboo, the two modern buildings — are
+still external; their compressed output is committed, and re-compressing them
+means pointing the `GIFT188_*` variables at the sources.
 
 Half the budget sits in three files, and one of them is on the critical path:
 

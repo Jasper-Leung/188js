@@ -28,13 +28,39 @@
  */
 
 /** 补充资产的源目录（和 SRC_MODELS 一样是机器相关的硬编码，见各脚本） */
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REPO = join(__dirname, '..');
+
+/**
+ * **仓库自带的源资产。**
+ *
+ * 这一族里只有自行车是提交进版本库的（`assets-src/vehicles/bicycle_clean.glb`，
+ * 21.5MB / 184,433 面）。理由很具体：
+ *
+ * · 它是**玩家第一眼看到的东西**，也是首屏关键路径上的那个；
+ * · 它的源项目（`D:/code/20261001/modelbone/…`）在仓库之外，
+ *   而 README 里"模型 22.3MB → 5.0MB"那一栏讲的就是压它；
+ *   一个**谁都压不出来**的关键路径资产，等于这条链上的数字全都没有出处。
+ *
+ * 其余几族（摩托车 24.4MB、角色 5.3MB、松树、竹、现代建筑）没有进库，
+ * 因为它们不在首屏上，而 `public/models/` 里已经有压好的产物；
+ * 要重压它们就把 `GIFT188_SRC_EXTRA` / `SRC_VEHICLE` 指过去。
+ *
+ * `verify_assets_src` 守着这个文件在不在——它不在的话，
+ * "干净克隆能重压自行车"这句话就变成了一句空话。
+ */
+export const SRC_INREPO = join(REPO, 'assets-src/vehicles');
+
 /**
  * 补充资产的源目录。
  *
  * 同样在**仓库之外**、同样曾经写死成一条绝对路径。
  * 现在可以用 `GIFT188_SRC_EXTRA` 覆盖（`compress-textures.mjs` 会读它）。
  * 缺了会在压缩那一步逐条告警并跳过——这一族是可有可无的，
- * 所以这里不退出，只提示；真正让管线停下来的是主模型目录。
+ * 所以这里不退出，只提示；真正让管线停下来的是"一件活都没有"。
  */
 export const SRC_EXTRA = process.env.GIFT188_SRC_EXTRA ?? 'D:/code/20260920';
 /** 角色与滑板在另一个目录（`modelbone`），文件名也不同 */
@@ -97,7 +123,15 @@ export const EXTRA_MODELS = [
   // 轮半径实测 0.1947（`tripo_part_0` 圆度 5%，`tripo_part_2` 圆度 6%，
   // 而车架大三角圆度 27% 被正确挡在外面）。
   // 贴图 1024：玩家骑的是它，离镜头最近。
-  ['bicycle_clean.glb', 'bicycle.glb', 1024, false, 0, SRC_VEHICLE],
+  //
+  // **源目录是仓库内的 `assets-src/vehicles/`**，不是 `SRC_VEHICLE`。
+  // `SRC_VEHICLE` 那份仍然可以用（它就是同一批文件的原始位置），
+  // 但默认走仓库内，理由见 `SRC_INREPO` 的注释。
+  //
+  // ⚠ 别和 `D:/code/20260926/no188/assets/bike.glb` 搞混：那是**外部下载**的
+  // 另一台车（1.8MB，轮子不转），和这一台无关。`compress-textures.mjs` 里
+  // 那个 `SRC_BIKE` 指的是它，不是这里。
+  ['bicycle_clean.glb', 'bicycle.glb', 1024, false, 0, SRC_INREPO],
   // 摩托车：**Tripo 导出**，69 个 `tripo_part_N` 静态网格，**无骨骼无动画**，
   // 骑手与车体焊死在同一批零件里（所以这个模式下共享角色必须藏起来）。
   // 原始 24.4MB / 381,656 顶点 / **376,765 面** / **207 张贴图**。
