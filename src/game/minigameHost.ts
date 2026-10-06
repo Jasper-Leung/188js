@@ -34,6 +34,17 @@ export interface MiniGameHandle {
   result: MiniGameResult;
   /** 这一件乐事的 id */
   id: MiniGameId;
+  /**
+   * 这一局是不是**宿主 30 秒兜底**收的，而不是玩法自己判负。
+   *
+   * 为什么要单独记一个布尔而不是给 `MiniGameResult` 加第四个值：
+   * 结算三态（成了 / 没完成 / 先放一放）是 `verify_settle` 钉死的语义，
+   * 加第四个值会让那一整套判据与 `settleTextKey` 一起重写。
+   * 而"超时"和"玩砸了"本来就**不该换大字**——玩家看到的大字仍然是
+   * 「这次没有完成」，区别只在小字：一个是「不要紧，骑一会儿再来」，
+   * 一个是「这一件超时了」。所以它是一个**修饰**，不是一个状态。
+   */
+  timedOut: boolean;
 }
 
 export class MiniGameHost {
@@ -45,6 +56,8 @@ export class MiniGameHost {
   private elapsed = 0;
   private resultT = -1;
   private currentResult: MiniGameResult = 'cancel';
+  /** 本局是不是被 30 秒兜底收的。`settle()` 读完就清，所以不会串到下一局 */
+  private timedOut = false;
   private resolveFn: ((h: MiniGameHandle) => void) | null = null;
   private dpr = 1;
 
@@ -102,7 +115,6 @@ export class MiniGameHost {
       t,
       seed,
       onDone: (r) => this.finish(r),
-      tick: (dt) => this.game?.step(dt),
     };
 
     this.game = createMiniGame(id, ctxObj);
@@ -126,6 +138,7 @@ export class MiniGameHost {
     this.elapsed += dt;
     // 超时兜底：云与茶没有内建计时，靠这道
     if (this.resultT < 0 && this.elapsed > TIMEOUT_SEC) {
+      this.timedOut = true;
       this.finish('lose');
     }
     if (this.resultT >= 0) {
@@ -225,8 +238,9 @@ export class MiniGameHost {
 
   private settle() {
     const id = this.game?.id ?? 'cloud';
-    const h: MiniGameHandle = { result: this.currentResult, id };
+    const h: MiniGameHandle = { result: this.currentResult, id, timedOut: this.timedOut };
     this.running = false;
+    this.timedOut = false;
     this.root.hidden = true;
     this.game?.dispose();
     this.game = null;
@@ -235,18 +249,42 @@ export class MiniGameHost {
     cb?.(h);
   }
 
-  /** 强制退出（玩家从暂停面板直接离开这一趟） */
+  /**
+   * 强制退出（宿主决定这一趟结束了，而某一局还开着）。
+   *
+   * 原来这里是 `this.finish('cancel')`——**绕过游戏自己的 `cancel()`**。
+   * 五个游戏都实现了 `cancel()`（各自的注释写着"玩家按 Esc"），而它们是
+   * 通往同一个 `finish('cancel')` 的**第二扇门**，从来没有被推开过。
+   * 现在这里走 `game.cancel()`，那五个实现才真的接上了：
+   * 玩家按 Esc 走游戏自己的 `onKeyDown`，宿主强制收尾走这里，两条路
+   * 进的是同一段逻辑，而不是两条各自维护的平行实现。
+   *
+   * 调用方是 `main.finishRun()`（暂停面板的「结束这一趟」）。
+   * 今天这条路径在小游戏期间**按不到**——小游戏期间 Esc 被游戏吃掉，
+   * 暂停面板开不出来——所以它是一道按不到的保险。
+   * 留着并接上，而不是删掉：这一趟结束与某一局还开着同时发生，
+   * 是那种"改一次相位机就会撞上"的组合，而它的正确处置只有一行。
+   */
   abort() {
-    if (this.running) this.finish('cancel');
+    if (!this.running) return;
+    const g = this.game;
+    if (g && g.cancel()) return;
+    this.finish('cancel');
   }
 
   dispose(force = false) {
     if (force) {
       this.running = false;
+      this.timedOut = false;
       this.root.hidden = true;
+      // ⚠️ 原来这里 resolve 的是 `{ result: 'cancel', id: 'cloud' }`——
+      // **id 写死成云**。被强制收掉的是琴，句柄却说这是云，
+      // 而 `main.runMiniGame` 后面拿 `handle.id` 做过判断。
+      // 现在读真实的 id。
+      const id = this.game?.id ?? 'cloud';
       this.game?.dispose();
       this.game = null;
-      this.resolveFn?.({ result: 'cancel', id: 'cloud' });
+      this.resolveFn?.({ result: 'cancel', id, timedOut: false });
       this.resolveFn = null;
     }
   }

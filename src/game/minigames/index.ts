@@ -44,10 +44,11 @@ export function gameFor(slot: number, visit: number): number {
   return (slot + Math.max(visit, 0)) % MINI_GAME_IDS.length;
 }
 
-/** 15 局的完整排布：一行一个 slot，三次到访从左到右。 */
-export function schedule(): number[][] {
-  return MINI_GAME_IDS.map((_, slot) => [0, 1, 2].map((visit) => gameFor(slot, visit)));
-}
+// 原来这里还有一个 `schedule()`，返回 15 局的完整排布表，**零调用方**。
+// 同一张表已经有两个活着的副本：`data/generated/miniGames.json`（数据）
+// 和 `verify_mini_game`（判据）。三份里两份是活的、一份没人读，
+// 而最容易出问题的那份正是没人读的那份——它和 JSON 不同步时不会有任何症状。
+// 删掉。要看排布表看 JSON，要验它看 verify_mini_game。
 
 /**
  * 造一个**未启动**的实例。

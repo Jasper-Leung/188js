@@ -446,9 +446,19 @@ export class UI {
     this.storyCards.show(text, { title, interrupt: true, ms });
   }
 
-  /** 小游戏结算屏。一句大字 + 这件乐事的名字。三态——**取消不是失败**。 */
-  showResult(outcome: SettleOutcome, slot: number, onDone?: () => void): void {
-    this.resultCard.show(outcome, slot, undefined, onDone);
+  /**
+   * 小游戏结算屏。三态——**取消不是失败**。
+   *
+   * `o.gain` 是这一局实际到账的旅币，`o.timedOut` 区分"超时"与"玩砸了"。
+   * 两者都只改小字，大字仍由 `settleTextKey` 判，所以结算三态的语义没被动过。
+   */
+  showResult(
+    outcome: SettleOutcome,
+    slot: number,
+    onDone?: () => void,
+    o: { gain?: number; timedOut?: boolean } = {},
+  ): void {
+    this.resultCard.show(outcome, slot, undefined, onDone, o);
   }
 
   /** 结算屏还在的时候宿主要让出控制权（否则玩家在过场里按了空格）。 */

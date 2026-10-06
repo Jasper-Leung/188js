@@ -33,7 +33,7 @@ import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
 import { ECON, SHOPS, WORLD } from './data/raw';
 import { UI } from './ui';
-import { setSpaceKeyOwner } from './ui/hud';
+import { setSpaceKeyOwner, stationName } from './ui/hud';
 import { clamp } from './core/math';
 import { perf } from './core/perf';
 import { getBasins } from './world/basins';
@@ -1008,8 +1008,27 @@ class App {
     this.phase = 'roaming';
     this.ui.enterWorld();
     this.ui.syncFromState();
-    // **序章**：只在第一次进世界时播。
-    //
+    this.playPrologue();
+  }
+
+  /**
+   * **序章**：只在 `prologueDone` 为假时播，播完立刻落盘。
+   *
+   * 它原来是 `enterWorld()` 的一整个代码块，抽出来是因为**进世界的路径不止一条**：
+   * 标题页的「开始旅程」、标题页的「继续旅程」、以及**世界里的「重新开始」**。
+   * 前两条都经过 `enterWorld()`，第三条原来直接走 `toRoaming()` 绕开了它——
+   * 而 `resetRun()` 已经把 `prologueDone` 清成了 false 并落盘（这一点
+   * `verify_story` 有专门的断言：重开就该再看一遍序章）。
+   * 于是玩家在世界���按「重新开始」，拿到的是一个进度全清、**而一个字故事都没有**的存档：
+   * 他不知道自己是谁、替谁跑、代价是什么，而这三句在这个游戏里只在这里出现过。
+   * 想补回来只能退回标题页再点一次「继续旅程」——没有人会知道要这么做。
+   *
+   * 幂等靠 `prologueDone` 自己，不靠调用点，所以三条路径随便怎么改都不会重播第二次。
+   *
+   * 下面这段设计说明与实现一起搬过来了（顺序即因果、六句分卡不合并、
+   * `dismissible` 的理由），它们是这一段的约束，不是历史包袱。
+   */
+  private playPrologue() {
     // 这是整个游戏里最该被送达而一直没送达的三句——
     // 律师函、母亲、还有"代价是没有人记得你"。它决定玩家知不知道
     // 自己这一趟在替谁跑。不锁操作、自动推进、**点一下就能退场**，
@@ -1052,7 +1071,9 @@ class App {
         t('prologue_speaker'),
         { dismissible: true },
       );
+      return true;
     }
+    return false;
   }
 
   private toRoaming() {
@@ -1081,6 +1102,11 @@ class App {
       this.continueRun();
     } else {
       this.toRoaming();
+      // 世界里「重新开始」也是**新的一趟**。`resetRun()` 刚把
+      // `prologueDone` 清成 false，所以序章必须在这里重播：
+      // 进度清零而前提不补，玩家就得到一个"不知道自己是谁"的存档。
+      // 标题页那条路经 `enterWorld()` 已经播过了，所以不重复调。
+      this.playPrologue();
     }
     this.ui.syncFromState();
   }
@@ -1114,6 +1140,12 @@ class App {
   }
 
   private finishRun() {
+    // 保险：这一趟结束了，而某一局还开着的话先把它收掉，
+    // 否则 runMiniGame 里 await 的那个句柄永远不 resolve，
+    // 那条 `afterMiniGame` 链就断在半截——症状是结算页关掉之后
+    // 再也回不到骑行。今天这条路径按不到（小游戏期间 Esc 被游戏吃掉），
+    // 理由见 `MiniGameHost.abort()` 的注释。
+    this.mg.abort();
     this.phase = 'endcard';
     this.demoActive = false;
     this.loop.suspend();
@@ -1314,25 +1346,47 @@ class App {
     this.world.setBusyForMinigame(false);
 
     // 打卡与经济
+    //
+    // `checkIn()` 与 `onMiniGame()` **都返回这一笔实际到账多少**，
+    // 而它们原来一个返回值都没人接：钱进了账，顶栏的数字跳了一下，
+    // 而玩家没有拿到任何一句"你拿到了什么"。这一趟里唯一"越玩越多"的东西
+    // 就靠那个跳动的数字自己说话——它和"你刚赢了"是两件事，
+    // 玩家要自己把两件事对上号。
+    //
+    // 这里用**前后差值**而不是把两个返回值加起来：
+    // `earn()` 有 tag 幂等（同一笔不重发），差值天然把"这一局没发钱"表示成 0，
+    // 于是取消那一局就不会显示 "+0 coins"。
+    const lvbiBefore = game.lvbi;
     game.checkIn(stationIdx);
     // ⚠️ 取消与失败在这里仍然同价（`LVBI_MINI_LOSE`）。这是**刻意**的：
     // 经济常数是 1:1 移植契约的一部分，改它会动到 `verify_economy`。
     // 本轮只修"玩家被告知了什么"，不改他拿到了多少。
     game.onMiniGame(stationIdx, win);
+    const gained = game.lvbi - lvbiBefore;
     if (win) audio.sfx('collect');
 
     // **结算屏**。之前只有一条 toast 飘过去——这是玩家唯一确认
     // 自己做到什么的地方，而 toast 长得很像"又一条提示"。
     // 一句大字 + 这件乐事的名字，是这件事应有的分量。
-    this.ui.showResult(outcome, st.slot, () => this.afterMiniGame(stationIdx, win));
+    // 旅币到账、超时与玩砸的分别，都写在这一屏上而不是再叠一条 toast：
+    // 同一时刻两条提示会把"你赢了"和"你得了 20 旅币"拆成两件无关的事。
+    this.ui.showResult(outcome, st.slot, () => this.afterMiniGame(stationIdx, visit), {
+      gain: gained,
+      timedOut: handle.timedOut,
+    });
     this.ui.syncFromState();
   }
 
-  /** 结算屏落幕之后才继续流程——否则面板和下一步会同时在屏幕上。 */
-  private afterMiniGame(stationIdx: number, _win: boolean) {
-    void stationIdx;
-    void _win;
-
+  /**
+   * 结算屏落幕之后才继续流程——否则面板和下一步会同时在屏幕上。
+   *
+   * @param stationIdx 刚打完的那座驿站
+   * @param visit **打卡前**已经来过几次（0 = 第一次来）。用它挑"第几圈"那一句。
+   *        原来第二个参数是 `_win` 且被显式 void 掉了——胜负在这一步已经
+   *        由结算屏说完了，而这一屏之后真正还缺的信息是"我还能再来几次"，
+   *        那个数只有这里拿得到。
+   */
+  private afterMiniGame(stationIdx: number, visit: number) {
     // 集齐五件之后**不结算**。原来这里是直接弹合成面板，
     // 于是"这一趟结束了"是游戏替玩家做的决定，中间没有任何过渡。
     // 现在改成把目标换成"回十八驿"——188 号环线自闭合，
@@ -1351,20 +1405,62 @@ class App {
       this.ui.showToast(t('objective_overdue'), 5200);
       return;
     }
-    // 完满评级（五座各去三次）是**可选**的另一条路，仍然就地结算
+    // 完满评级（五座各去三次）是**可选**的��一条路，仍然就地结算
     if (game.allFragmentsMaxed()) {
       this.phase = 'synthesis';
       this.ui.showSynthesis('maxed');
       return;
     }
     this.toRoaming();
+    this.showRevisitLine(stationIdx, visit);
+  }
+
+  /**
+   * 「第几圈」那一句。
+   *
+   * `MAX_VISITS_PER_STATION = 3` 这个结构一直是对的（`verify_checkin` 守着），
+   * 而它在界面上**完全看不出来**：顶栏那一格圆点很小，而"同一座驿站还要去
+   * 两次"这件事从来没有被说出来过。于是第二圈和第三圈在玩家眼里和第一圈
+   * 一模一样——他不知道自己刚才那趟是白跑还是算数。
+   *
+   * 这两句本来就写在文案表里（`revisit_2nd_round` / `revisit_3rd_round`），
+   * 一直没人念。放在**结算屏落幕、回到骑行之后**这个位置是有理由的：
+   * 它是"这件做完了"和"继续骑"之间的那半句，
+   * 而放在小游戏之前会把玩家按在原地先等一句话。
+   *
+   * 第一次来（`visit === 0`）不给——那时候还没有"又来了一趟"这回事。
+   * 集齐 / 过期 / 完满那三条出口不给——它们各有各的收尾，
+   * 在那里插一句"山还是那些山"是抢戏。
+   */
+  private showRevisitLine(stationIdx: number, visit: number) {
+    const key = visit === 1 ? 'revisit_2nd_round' : visit === 2 ? 'revisit_3rd_round' : '';
+    if (!key) return;
+    this.ui.showStoryCard(t(key), stationName(stationIdx));
   }
 
   // ---------------------------------------------------------------- 铺子
+  /**
+   * 买一件。
+   *
+   * 原来这里只 `syncFromState()` 一下就结束了：商品变成"已拥有"、旅币少了，
+   * 而**玩家没有得到任何一句确认**。`shop_bought`（"已购"）一直躺在文案表里
+   * 没人念——于是在一个要盯着余额做减法的经济里，"我到底买没买上"这件事
+   * 只能靠读商品条目自己的状态去反推，而那一栏在成交瞬间是不动的。
+   *
+   * `buy()` 返回成交与否，所以买不成（钱不够 / 已拥有 / 满心神）时**不弹**：
+   * 那几种情况铺子面板上本来就有各自的说明（`shop_need_lvbi` 等），
+   * 再叠一条"没买成"只会和它们打架。
+   */
   private buy(id: string) {
     const good = SHOPS.GOODS.find((g) => g.id === id);
     if (!good) return;
-    if (game.buy(good)) audio.sfx('collect', 0.7);
+    const ok = game.buy(good);
+    if (!ok) {
+      this.ui.syncFromState();
+      return;
+    }
+    audio.sfx('collect', 0.7);
+    this.ui.showToast(t('shop_bought'), 1400);
     this.ui.syncFromState();
   }
 

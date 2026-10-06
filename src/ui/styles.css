@@ -468,18 +468,24 @@
 .g-root .g-card-title {
   text-align: center;
   padding: 2rem 1.8rem 1.4rem;
-  /* **去掉实心纸底**，换成一层很薄的暖白纱。
+  /* **那层纱的浓度是量出来的**：0.55 → 0.86。
    *
    * 原来它继承 `.g-card` 的 `background: var(--paper)`——一张实心纸，
    * 于是水墨主视觉被整块盖住，只剩一圈白边。实机截图里那个"白色半透明方块"
-   * 就是它，而它是玩家看到的第一样东西。
+   * 就是它，而它是玩家看到的第一样东西。所以改成一层很薄的暖白纱。
    *
-   * 留 0.55 的白纱而不是完全透明：主视觉是浅色（米白纸底），
-   * 而界面里还有分组小标题、下方那行探测理由等次级文字，
-   * 全透明的话它们会糊在山的纹路里。0.55 让画透出来，字仍然读得出。
+   * 而 0.55 **太薄了**。这张画不是均匀的浅色：它有大片淡墨山体，最暗处
+   * 实测约 rgb(45)。0.55 的纱压上去只有 `236×0.55 + 45×0.45 ≈ 157`，
+   * 也就是一片中灰——卡上每一行字（mark / 副标题 / 引导 / 提示）都浮在上面。
+   *
+   * 0.86 时最暗处是 `236×0.86 + 45×0.14 ≈ 205`，托得住 `--ink-soft`
+   * （5.2:1 那一档）；画仍然透得出来（14% 的反差 + 2px 模糊），
+   * 而且卡只占屏幕三分之一强，其余的画是全幅的。
+   * `verify_paper_backing` 把这个下限钉住了：**不许再降到 0.8 以下**。
+   *
    * `backdrop-filter` 让纱跟着底下的画一起柔化，而不是盖一层灰。
    */
-  background: rgba(var(--pw) calc(var(--pg) + 2) var(--pb), 0.55);
+  background: rgba(var(--pw) calc(var(--pg) + 2) var(--pb), 0.86);
   backdrop-filter: blur(2px);
   box-shadow: 0 0.6rem 2.2rem rgba(20, 17, 12, 0.34);
 }
@@ -579,32 +585,59 @@
   justify-content: center;
 }
 
-/* 画质这一块要**自己的**实心纸底。
+/* 标题页上**有意义**的字不许再往浅了走。
  *
- * 卡本身只有一层 0.55 的白纱（`.g-card-title`），而标题页的 `::after`
- * 专门把**画面上下两端**压到 0.72~0.78 的暗。画质组正好坐在下半张卡里，
- * 于是它背后的实际颜色是「暗山 × 0.55 纸」≈ 一片中灰（~rgb(160,150,130)）。
+ * `--ink-faint` 是 #9a8d76，而纸是 rgb(236,227,206)：**压实心纸也只有 2.3:1**。
+ * 也就是说它不是"在画面上会看不清"，而是**在任何底上都偏浅**——
+ * 这一档留给真正无关紧要的字（版权、几何调试、装饰性的编号），
+ * 而标题页这三处都在替游戏说话：编号、怎么玩、以及"演示"到底演示什么。
  *
- * 压在那片中灰上的偏偏是这一页**最浅的三种字**：
- * · `.g-row-k`   `--ink-soft`   —— Render scale / Shadows / Ground detail
- * · `.g-note-dim` `--ink-faint`  —— Low turns off shadows and ground detail…
- * · `.g-note-why` `--accent`（红）—— Discrete GPU: AMD Radeon RX 5500 XT
- * faint 压中灰的对比度不到 1.1:1，红字也不到 3:1。实机截图里那一块
- * 读作"糊在山体上的几行字"——而它是标题页唯一的解释性文字。
- *
- * 这和碎片栏（`.g-frags`）是**同一个 bug 换了个位置**，所以口径一样：
- * **压在画面上的次级文字必须有一块自己的实色底。**
- * 靠外层那层纱去兜是不作数的——纱的浓度取决于它底下那张画，
- * 画一亮一暗，同一段字就从"读得出"变成"读不出"，而没人会为此报错。
- * `verify_paper_backing` 把这条钉住：`.g-frags` 与 `.g-title .g-group`
- * 的 `background` 必须是不透明值（`var(--paper-72)` 这类半透明令牌也算输）。
+ * 上一轮只给画质组补了实色底，漏了这三处，是同一个成因的另一半：
+ * 底不够 → 浅字撑不住；字太浅 → 底再厚也只是勉强。
+ * 两边一起收：纱提到 0.86（见 `.g-card-title`），这三种字提到 `--ink-soft`。
  */
-.g-root .g-title .g-group {
-  background: var(--paper);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius);
-  padding: 0.7em 0.9em 0.8em;
+.g-root .g-title-mark,
+.g-root .g-title-guide,
+.g-root .g-title .g-note-dim {
+  color: var(--ink-soft);
 }
+
+/**
+ * 标题页上的 quiet 按钮要**自己那条边**。
+ *
+ * `.g-btn-quiet` 的常态是 `border-color: transparent`，而它的 `:hover`
+ * 才把边框加回来（`styles.css` 里那条 `border-color: var(--line)`）。
+ * 也就是说**悬停态比静息态可读**——在有底的面板上这只是"低调"，
+ * 而标题页是整个项目里唯一一个底是一张明暗不匀的水墨画的地方：
+ * `Continue / Start over / Language / Controls` 四处加上底部那行说明，
+ * 实机在 726×907 下读不出来。
+ *
+ * 上面那两条修复（纱 0.55→0.86、三种字提到 `--ink-soft`）治的是
+ * **底**，这一条治的是**这一类元素压根没有底**——它是同一族成因的
+ * 另一半：前面补的是"底不够厚"，这里补的是"这一类根本没有底"。
+ *
+ * 代价是这四颗按钮在标题页上从"轻"变成"有边"，和两颗 major 按钮
+ * 争一点注意力。它们字号更小、字色更淡，仍然读得出层级。
+ */
+.g-root .g-title .g-btn-quiet {
+  border-color: var(--line);
+}
+
+/* 这一块**不再有自己那块实心纸底**。
+ *
+ * 上一轮只给画质组补了实色底（`.g-title .g-group { background: var(--paper) }`），
+ * 那是一块贴在半透明卡里的实心纸——治的是"这一块看不清"，
+ * 而病因在**整张卡**：纱只有 0.55，卡上每一行字都浮在淡墨山体上，
+ * 补一块底只是把这一块从"读不出"变成"读得出"，旁边几行照样读不出。
+ *
+ * 改成把纱提到 0.86（见 `.g-card-title`）之后，这块底就是多余的：
+ * 留着一个纸框套在另一层纸里，读作"这里拼了一块补丁"。
+ * 判据 `verify_paper_backing` 也跟着改口径，见那条注释。
+ *
+ * 原来的问题描述留在那里备查：压在中灰上的正是这一页最浅的三种字
+ * （`.g-row-k` / `.g-note-dim` / 红字 `.g-note-why`），
+ * 其中 `--ink-faint` 压 rgb(160,150,130) 的对比度不到 1.1:1。
+ */
 
 /* =============================================================================
    引导页
@@ -733,8 +766,25 @@
   display: flex;
   align-items: baseline;
   gap: 1em;
-  padding: 0.45em 0.9em;
-  background: linear-gradient(to bottom, var(--paper-85), rgb(var(--pw) var(--pg) var(--pb) / 0));
+  /* 底部多留一截空区，**只给渐隐用**。
+   *
+   * 原来的渐变是 `var(--paper-85) → 透明` 平均铺满整条：于是**字底下
+   * 那半条几乎没有纸**。行盒高 1.66em、上下 padding 0.45em，字的底边落在
+   * 全条高度的 82% 处，那里只剩 `0.85 × 0.18 ≈ 0.15` 的纸——
+   * 压亮天空勉强能读，压到山体（rgb≈60）就只剩 `236×0.15 + 60×0.85 ≈ 86`，
+   * `--ink-soft` 压上去 1.4:1，左上角那三个数（天数 / 旅币 / 心神）直接消失。
+   *
+   * 改法：**渐隐改成一个固定高度的空区**，不是百分比。
+   * `calc(100% - 0.9em)` 这个下限让"纸有多厚"与顶栏是**一行还是两行**
+   * （极窄屏会折成两行，见文件尾的媒体查询）无关——按百分比写的话，
+   * 两行布局的第二行又落回渐隐区里，同样的 bug 换个宽度复活。
+   */
+  padding: 0.45em 0.9em 1.1em;
+  background: linear-gradient(
+    to bottom,
+    var(--paper-90) 0 calc(100% - 0.9em),
+    rgb(var(--pw) var(--pg) var(--pb) / 0) 100%
+  );
 }
 
 .g-root .g-top-l {
@@ -743,6 +793,18 @@
   font-size: 0.92em;
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
+  /* **不参与收缩**（见下面 `.g-top` 那段注释）。
+   * 默认 `flex-shrink: 1` 时这一组会被压到 min-content，而每一格的
+   * min-content 就是一个词——于是「29 days left」被折成「29 days / left」，
+   * 顶栏变成两行高度，第二行还骑在碎片栏的渐隐边上。
+   * 锁成不收缩之后，省略号改由「下一处」的站名那一格承担，
+   * 而那一格被截掉的是一个**名字**，不是玩家唯一的方向感。 */
+  flex: 0 0 auto;
+}
+
+/* 每一格都是完整的数或词，不许在格子里折行 */
+.g-root .g-top-l > * {
+  white-space: nowrap;
 }
 
 /* 「下一处」永远靠右：长句短句都不在后面留一条死区 */
@@ -763,10 +825,36 @@
   font-size: 0.94em;
   color: var(--ink);
   text-align: right;
-  white-space: nowrap;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  /* 自己可以被压缩（`min-width: 0` 是 flex 项能缩到内容以下的前提），
+   * 压缩量全部由下面那个站名格承担。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 22em;
+}
+
+/**
+ * 站名格：唯一允许被省略号截掉的一格。
+ *
+ * 这是这一段改动的全部要点。原来整句是**一个**文本节点，而距离排在模板末尾
+ * （`下一处 %s %s · %dm`），于是站名一长，最先消失的就是距离——
+ * 实机在 726px 宽下读到 `Next Birdsong Cove Flower House ↗ · 1…`。
+ * 拆成两格之后，被截掉的从「唯一的方向感」变成「一个名字」，
+ * 而名字认不出来时玩家至少还知道差多远。
+ */
+.g-root .g-next-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 22em;
+  white-space: nowrap;
+}
+
+/** 距离 / 余次：`flex: 0 0 auto` = 任何宽度下都不参与收缩，永不被截断。 */
+.g-root .g-next-meta {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* 五座都走满的那一档：换一行颜色，让它读成「收尾」而不是「目标」 */
@@ -777,7 +865,11 @@
 /* ---- 碎片栏 ---- */
 .g-root .g-frags {
   position: absolute;
-  top: 2.6em;
+  /* 2.6em → 3.3em：顶栏为了那条固定高度的渐隐多留了 0.65em 空区，
+     碎片栏跟着往下挪，两块之间还是原来那点缝。
+     这两块的间距是**眼睛量的**（.g-frags 的注释在下面），
+     所以凡是动 `.g-top` 的高度，这里必须一起动。 */
+  top: 3.3em;
   left: 0.9em;
   padding: 0.35em 0.5em 0.4em;
   border: 1px solid var(--line-soft);
@@ -1662,14 +1754,28 @@
   }
 
   .g-root .g-frags {
-    top: 2.4em;
+    /* 与主规则同一个 +0.7em 偏移：顶栏为渐隐留了固定高度的空区，
+       窄屏这一份必须一起挪，否则碎片栏会骑在顶栏的渐隐边上。 */
+    top: 3.1em;
     transform: scale(0.9);
     transform-origin: top left;
   }
 }
 
-/* 极窄（<=30rem）：顶栏两行，否则「下一处」会被压到只剩省略号 */
-@media (max-width: 30rem) {
+/* 窄（<=48rem）：顶栏两行。
+ *
+ * 原来是 30rem（480px），而那条规则自己的注释写着「否则「下一处」会被压到
+ * ���剩省略号」——**症状预测对了，阈值低了 288px**：726px 的窗口里就已经
+ * 顶出一行省略号，而这一档的作者显然是在更窄的视口上遇到的。
+ *
+ * 提到 48rem 的理由不是"让名字显示全"，而是**两行布局比省略号更体面**：
+ * 拆成站名格之后，即使单行，截掉的也只是一个名字（见 `.g-next-name`），
+ * 距离在任何宽度下都读得到。两行是第二道保险，让长站名在窄窗口里
+ * 直接完整显示，而不是逼玩家去猜被吃掉的那几个字。
+ *
+ * 48rem = 768px：窄笔记本窗口、侧栏分屏、浏览器缩放 130% 都落在这边，
+ * 而正常桌面窗口仍然是一行。 */
+@media (max-width: 48rem) {
   .g-root .g-top {
     flex-direction: column;
     align-items: flex-start;

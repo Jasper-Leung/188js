@@ -77,6 +77,26 @@ export interface NextTarget {
 }
 
 /**
+ * 把渲染好的「下一处」一句切成 `[站名, 距离·余次]`。
+ *
+ * 切点取**最后一个** ` · `，而分隔符本身留在后半段（`" · 18m"`），
+ * 所以界面上仍然是原来那句的样子——`setText` 两侧拼回去逐字相同。
+ * 这一点有回归守着（`verify_hud_next_split`），不是靠人记得。
+ *
+ * 为什么按分隔符切而不拆成两个文案 key：中英语序不同
+ * （`下一处 %s %s · %dm` / `Next %s %s · %dm`），拆 key 等于把语序搬进代码，
+ * 而语序本来就该住在文案表里。四个模板各含一个 ` · `，所以切点是确定的。
+ *
+ * 没有分隔符时（将来有人改了模板）返回 `[整句, '']`：站名格里是整句，
+ * 距离格空着——**可辨认的降级**，不是距离静默消失。
+ */
+export function splitNextTarget(rendered: string): [string, string] {
+  const i = rendered.lastIndexOf(' · ');
+  if (i < 0) return [rendered, ''];
+  return [rendered.slice(0, i), rendered.slice(i)];
+}
+
+/**
  * 「下一处」：最近的、**还欠一次到访**的碎片驿站。没有就返回 null。
  *
  * 距离用**世界坐标的直线距离**，不是沿中心线的弧长。原作也是直线距离，
@@ -148,6 +168,9 @@ export class Hud {
   private daysEl: HTMLSpanElement;
   private offRoadEl: HTMLSpanElement;
   private nextEl: HTMLDivElement;
+  /** 「下一处」的两格：站名（可省略号）/ 距离·余次（永不省略） */
+  private nextNameEl: HTMLSpanElement;
+  private nextMetaEl: HTMLSpanElement;
 
   // 碎片栏
   private fragCountEl: HTMLSpanElement;
@@ -213,6 +236,23 @@ export class Hud {
     left.appendChild(this.offRoadEl);
     top.appendChild(left);
     this.nextEl = el('div', 'g-next');
+    /**
+     * 「下一处」拆成两格：**站名**与**距离 / 余次**。
+     *
+     * 原来是 `setText(this.nextEl, t('hud_next_target', ...))` 一整句，
+     * 靠 CSS 的 `text-overflow: ellipsis` 收尾。而距离在模板里排在**最后**
+     * （`下一处 %s %s · %dm`），于是站名一长，最先被省略号吃掉的就是距离——
+     * 也就是唯一告诉玩家"我在靠近"的那个数。实机在 726px 宽下读到的是
+     * `Next Birdsong Cove Flower House ↗ · 1…`。
+     *
+     * 拆开之后收缩压力只落在站名那一格：距离 `flex: 0 0 auto`，
+     * 任何宽度下都不会被截断，而站名省略号是一个**体面的**降级
+     * （名字认不出来，但还差多远一定读得到）。
+     */
+    this.nextNameEl = el('span', 'g-next-name');
+    this.nextMetaEl = el('span', 'g-next-meta');
+    this.nextEl.appendChild(this.nextNameEl);
+    this.nextEl.appendChild(this.nextMetaEl);
     top.appendChild(this.nextEl);
     this.root.appendChild(top);
 
@@ -315,6 +355,22 @@ export class Hud {
    * 第一档也不是空串——`verify_minimap.gd` 第 10 节末尾钉的就是这一条：
    * 五座都刷满到跳结算页之间有 2.5 秒，那 2.5 秒里导航栏不能哑掉。
    */
+  /**
+   * 写「下一处」：一句模板先渲染，再按**最后一个** ` · ` 切成两格。
+   *
+   * 为什么不新增两个 key（一个给名字一个给距离）而要切字符串：
+   * 中英文的语序不同（`下一处 %s %s · %dm` / `Next %s %s · %dm`），
+   * 拆成两个 key 就等于把语序写死进代码，而那份语序本来就该住在文案表里。
+   * 四个模板里都已经有一个 ` · `，所以「按最后一个分隔符切」是确定的；
+   * 万一哪天有人把分隔符删了，`verify_hud_next_split` 会红，而界面上
+   * 退化成「整句进站名格、距离格为空」——不是静默地读不到距离。
+   */
+  private setNext(rendered: string): void {
+    const [name, meta] = splitNextTarget(rendered);
+    setText(this.nextNameEl, name);
+    setText(this.nextMetaEl, meta);
+  }
+
   private syncTop(target: NextTarget | null): void {
     setText(this.seenEl, t('stations_seen', { 0: this.game.getSeenStationCount() }));
     setText(this.lvbiEl, t('lvbi_label', { 0: this.game.lvbi }));
@@ -343,14 +399,14 @@ export class Hud {
       const f = this.world.ride.forward;
       const arrow = arrowGlyph(home.x - p.x, home.z - p.z, f.x, f.z);
       const dist = Math.floor(Math.hypot(home.x - p.x, home.z - p.z));
-      setText(this.nextEl, t('hud_home_target', { 0: arrow, 1: dist }));
+      this.setNext(t('hud_home_target', { 0: arrow, 1: dist }));
       setFlag(this.nextEl, 'is-home', true);
       return;
     }
     setFlag(this.nextEl, 'is-home', false);
 
     if (!target) {
-      setText(this.nextEl, t('hud_all_done'));
+      this.setNext(t('hud_all_done'));
       setFlag(this.nextEl, 'is-done', true);
       return;
     }
@@ -364,14 +420,11 @@ export class Hud {
 
     if (this.game.isCollected(target.idx)) {
       const left = Math.max(ECON.MAX_VISITS_PER_STATION - this.game.getStationCount(target.idx), 0);
-      setText(
-        this.nextEl,
-        t('hud_revisit_target', { 0: name, 1: arrow, 2: t('visits_left_n', { 0: left }) }),
-      );
+      this.setNext(t('hud_revisit_target', { 0: name, 1: arrow, 2: t('visits_left_n', { 0: left }) }));
     } else {
       // 原作是 int(dist)，**向下取整**。取整而不是四舍五入是有意义的：
       // 数字往上跳会让人以为"刚刚近了很多"，而这一栏每帧都在跳。
-      setText(this.nextEl, t('hud_next_target', { 0: name, 1: arrow, 2: Math.floor(target.dist) }));
+      this.setNext(t('hud_next_target', { 0: name, 1: arrow, 2: Math.floor(target.dist) }));
     }
   }
 

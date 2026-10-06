@@ -60,6 +60,14 @@ export class TitleScreen {
 
   /** 面板上选中的档位。宿主可能有自己的存档先例，所以 UI 先存一份。 */
   private picked: Tier;
+  /**
+   * 玩家**自己**动过档位没有。
+   *
+   * 它只服务一件事：区分"档位和探测结果不一样，是因为你上次选过"
+   * 与 "……因为不明所以"。见 `reasonText()`。
+   * `setTier()`（宿主读档 / 夹回一次）**不**置它——那不是玩家的选择。
+   */
+  private touched = false;
 
   private tierBtns: HTMLButtonElement[] = [];
   private summaryBox: HTMLDivElement;
@@ -165,14 +173,35 @@ export class TitleScreen {
    * `cap.reasonKey` 是键、`reasonVars` 是参数，显示在这里才 `t()`。
    * 它必须跟着语言走：这一行是标题页上唯一解释「画面为什么这么糊」的话，
    * 写死中文的话英文玩家看到的就是一句读不懂的辩解。
+   *
+   * ## 为什么有两种说法
+   *
+   * 面板上选中的档位有两个来源：**本次探测**（`cap.suggestedTier`）与
+   * **上次存档**（宿主传进来的 `o.tier`）。两个来源不一致时，原来这一行
+   * 仍然只报探测结果，于是同一屏上会出现一句自相矛盾的话：
+   *
+   * > 　独显：AMD Radeon RX 5500 XT　　　［选中：中］
+   *
+   * `cap_reason_gpu_strong` 只在 `decideTier()` 判定为高档时才会返回
+   * （`capability.ts` 里它和 `tier: TIER_HIGH` 是同一条 return），
+   * 所以这一行等于在说"我判定你是高档"，而按钮停在中档。
+   * 玩家看到的是一个**没人解释的矛盾**，而这一页本来就是解释设置的地方。
+   *
+   * 只在**玩家自己没动过**时用 `cap_reason_restored`：一旦他点了某一档，
+   * "为什么不是探测档"就有了答案（他自己的选择），再说一遍是废话。
    */
   private reasonText(): string {
-    return t(this.cap.reasonKey, this.cap.reasonVars);
+    const detected = t(this.cap.reasonKey, this.cap.reasonVars);
+    if (!this.touched && this.picked !== this.cap.suggestedTier) {
+      return t('cap_reason_restored', [detected]);
+    }
+    return detected;
   }
 
   private pickTier(tier: Tier): void {
     if (this.picked === tier) return;
     this.picked = tier;
+    this.touched = true;
     this.sync();
     this.hooks.onQualityChange(tier);
   }

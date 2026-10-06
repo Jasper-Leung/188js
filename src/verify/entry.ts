@@ -46,7 +46,8 @@ import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSe
 import { assertRide, assertDemoDrive } from './ride';
 import { GameStateManager } from '../game/state';
 import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
-import { readingMs, StoryCards, setNarrativeQuiet } from '../ui/storyCard';
+import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
+import { splitNextTarget } from '../ui/hud';
 import { PRESETS, clampTier } from '../core/settings';
 import { DEFAULT_LANG, setLang, t } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
@@ -456,6 +457,409 @@ check('verify_i18n', () => {
   }
 
   return expect(probs.length === 0, probs.length ? probs.join('；') : `${zh.length} 条，中英完全一致，英文侧无中文`, asserts);
+});
+
+/**
+ * 引导页教的词，必须和 HUD 用的 label 是**同一个名词**。
+ *
+ * ## 这条守的是哪一族 bug
+ *
+ * `verify_i18n` 守的是两侧 key 集合相等 + 英文侧没有汉字 + 占位符替换没坏。
+ * 它**结构上抓不到**下面这一族：两个 key 都存在、两侧都翻了、都不是硬编码，
+ * 但它们指的是同一样东西而英文用了两个词。
+ *
+ * 症状只有实机才看得见：引导页把旅币教成 `Coins`，HUD 上一路写 `Lvbi`；
+ * 引导页教 `Heart`，HUD 写 `Composure`；碎片在同一个面板里同时出现
+ * `Fragments`（表头）和 `Shards`（计数）。**玩家在引导页学会的那套词，
+ * 到了 HUD 一个都不成立**——而这正是"我不知道这些数字是什么"的成因。
+ * 数字本身是清楚的，清楚到没有余地让人猜它指的是别的东西。
+ *
+ * ## 判据怎么写才算数
+ *
+ * 把 HUD label 里的 printf 占位符剥掉，然后要求 glossary 那个词
+ * 以**整词**形式出现在结果里。不写死英文，只写"两边指的是同一个词"，
+ * 所以中文侧同样受约束（`旅币 %d` 必须含 `旅币`）。
+ *
+ * 会红的做法（每一条都实测过）：
+ *   · `lvbi_label` 的英文改回 `Lvbi %d`  → 红「旅币：HUD 写 Lvbi，引导页教 Coins」
+ *   · `mood_label` 改回 `Composure`      → 红
+ *   · `stations_seen` 改回 `Posts passed`→ 红
+ *   · `fragments` 改回 `Shards %d/5`    → 红
+ *   · 往 PAIRS 里加一个不存在的 key      → 红（而不是静默通过）
+ */
+const GLOSSARY_PAIRS: { term: string; label: string; zh: string; en: string }[] = [
+  { term: 'glossary_lvbi', label: 'lvbi_label', zh: '旅币', en: 'Coins' },
+  { term: 'glossary_mood', label: 'mood_label', zh: '心神', en: 'Heart' },
+  { term: 'glossary_station', label: 'stations_seen', zh: '驿', en: 'Stations' },
+];
+
+/** 剥掉 printf 占位符（%d / %s / %f / %.1f / %%），只留下人读的那部分 */
+function stripPrintf(s: string): string {
+  return s.replace(/%%|%(\.\d+)?[sdf]/g, '');
+}
+
+check('verify_i18n_glossary', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  asserts++;
+  if (GLOSSARY_PAIRS.length !== 3) {
+    probs.push(`配对表有 ${GLOSSARY_PAIRS.length} 组，应为 3（旅币 / 心神 / 驿 三个复合成 label）`);
+  }
+
+  for (const p of GLOSSARY_PAIRS) {
+    for (const lang of ['zh', 'en'] as const) {
+      const side = I18N[lang];
+      const term = side[p.term];
+      const label = side[p.label];
+
+      // key 必须真的存在——引用了没写是另一族（"相等地都缺" verify_i18n 抓不到）
+      asserts++;
+      if (typeof term !== 'string' || term.trim() === '') {
+        probs.push(`${lang} 侧 ${p.term} 不存在或为空`);
+        continue;
+      }
+      asserts++;
+      if (typeof label !== 'string' || label.trim() === '') {
+        probs.push(`${lang} 侧 ${p.label} 不存在或为空`);
+        continue;
+      }
+
+      // 词本身两侧必须一致：同一个概念的术语，不该中英各叫一个
+      asserts++;
+      if (term !== p[lang]) {
+        probs.push(`${lang} 侧 ${p.term} 是「${term}」，应为「${p[lang]}」`);
+      }
+
+      // 核心判据：HUD label 剥掉占位符之后必须含这个词，且是整词
+      asserts++;
+      const bare = stripPrintf(label);
+      if (!new RegExp(`(^|[^A-Za-z0-9])${escapeRe(term)}([^A-Za-z0-9]|$)`).test(bare)) {
+        probs.push(
+          `${p.zh}：HUD 写「${label}」，引导页教「${term}」——` +
+            `玩家在引导页学的那个词到了 HUD 不成立`,
+        );
+      }
+    }
+  }
+
+  // 英文侧不许出现拼音直译。这三条是**具体值**判据，所以单列：
+  // 上面的整词判据能抓住"教什么 HUD 写什么"对不上，抓不住
+  // "两边一起换成了另一个更难懂的词"（比如两边都叫 Currency）。
+  asserts++;
+  const PINYIN = ['Lvbi', 'lvbi', 'Composure', 'Shards', 'Posts passed'];
+  for (const p of GLOSSARY_PAIRS) {
+    const bare = stripPrintf(I18N.en[p.label] ?? '');
+    const hit = PINYIN.find((w) => bare.includes(w));
+    if (hit) probs.push(`英文侧 ${p.label} 仍带源项目直译「${hit}」`);
+  }
+
+  // ---- 碎片：面板表头带词，计数是纯数字 ----
+  //
+  // 第四个资源走的是**另一种结构**，所以单独判：碎片栏的表头直接用
+  // `glossary_fragment`（canonical 词，已经天然一致），而旁边的计数
+  // 是一个**数字**，不是第二个标签。
+  //
+  // 它原来叫 Shards，于是表头和计数是同一个面板里的两个词；
+  // 把它统一成 Fragments 之后，两处都变成 Fragments ——
+  // 从"两个词"变成"同一个词说两遍"。实机读作
+  // `Fragments   Fragments 0/5`。所以计数必须退回纯 `%d/5`，
+  // 让"碎片"这个词在整个面板里只出现一次。
+  asserts++;
+  for (const lang of ['zh', 'en'] as const) {
+    const count = (I18N[lang].fragments ?? '').trim();
+    if (!/^%d\s*\/\s*5$/.test(count)) {
+      probs.push(`${lang}.fragments 是「${count}」，应为纯计数「%d/5」——碎片这个词由面板表头承担，不该在这里再说一遍`);
+    }
+  }
+  // 表头必须真的用 canonical 词，而不是某个人顺手写死的另一个词
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'ui', 'hud.ts'), 'utf8');
+    if (!src.includes("t('glossary_fragment')")) {
+      probs.push('碎片栏表头没有用 glossary_fragment——它和引导页教的词会各说各的');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : GLOSSARY_PAIRS.map((p) => `${p.zh}=${p.en}`).join(' / ') +
+        ' · 碎片：表头用 canonical 词、计数是纯 %d/5',
+    asserts,
+  );
+});
+
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 「下一处」拆两格之后，那一格距离**必须还在**。
+ *
+ * ## 为什么要拆
+ *
+ * 原来是 `setText(nextEl, t('hud_next_target', ...))` 一整句 + CSS 省略号，
+ * 而距离在模板里排**最后**（`下一处 %s %s · %dm`）。于是站名一长，
+ * 最先被吃掉的就是距离——实机在 726px 宽下读到的是
+ * `Next Birdsong Cove Flower House ↗ · 1…`。距离是顶栏里**唯一**
+ * 告诉玩家"我在靠近"的数，而它是可以整句消失的。
+ *
+ * 拆成 `.g-next-name` / `.g-next-meta` 两格之后，省略号只落在名字上。
+ *
+ * ## 判据分两层
+ *
+ * 1. **纯函数层**：`splitNextTarget()` 切出来的后半段必须真的带着数字，
+ *    而且两段拼回去要**逐字等于**原句（分隔符留在后半段，所以界面上
+ *    看起来和以前一模一样——这条是防止"顺手 trim 掉那个 `·`"）。
+ * 2. **模板层**：四个模板各自必须恰好有一个 ` · `。有人把分隔符删了，
+ *    切点就没了，`splitNextTarget()` 会退化成「整句进名字格、距离格空着」——
+ *    界面上距离**静默**消失，而这里会红。
+ *
+ * 会红的做法：把 `hud_next_target` 的 ` · %dm` 改成 `%dm` → 红；
+ * 把 `splitNextTarget` 改成按**第一个**分隔符切（站名里若出现 `·` 就切错）→ 红。
+ */
+check('verify_hud_next_split', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const TEMPLATES = ['hud_next_target', 'hud_revisit_target', 'hud_home_target', 'hud_all_done'];
+
+  for (const key of TEMPLATES) {
+    for (const lang of ['zh', 'en'] as const) {
+      const tpl = I18N[lang][key] ?? '';
+      asserts++;
+      // 恰好一个分隔符。0 个 = 切点没了；2 个 = 切点会落在中间那一段上
+      const n = tpl.split(' · ').length - 1;
+      if (n !== 1) {
+        probs.push(`${lang}.${key} 里有 ${n} 个「 · 」，应为 1（切点靠它定位）`);
+        continue;
+      }
+      // 拼回去必须逐字相同
+      asserts++;
+      const rendered = tpl
+        .replace('%s', '竹雨庭')
+        .replace(/%[sdf]/g, '7');
+      const [name, meta] = splitNextTarget(rendered);
+      if (`${name}${meta}` !== rendered) {
+        probs.push(`${lang}.${key} 切两段再拼回去不是原句：「${name}」+「${meta}」≠「${rendered}」`);
+        continue;
+      }
+      // 后半段必须带数字：距离 / 余次 / "收尾中"这三个模板都该有一个数
+      if (key !== 'hud_all_done') {
+        asserts++;
+        if (!/\d/.test(meta)) {
+          probs.push(`${lang}.${key} 的后半段「${meta}」里没有数字——距离那一格可能没被切出来`);
+        }
+      }
+      asserts++;
+      if (name.trim() === '') probs.push(`${lang}.${key} 的前半段是空的`);
+    }
+  }
+
+  // 没有分隔符时的退化形态必须是**可辨认的**，不是静默丢失
+  asserts++;
+  {
+    const [name, meta] = splitNextTarget('Next Somewhere · 12m');
+    if (name !== 'Next Somewhere' || meta !== ' · 12m') {
+      probs.push(`切分结果不对：「${name}」/「${meta}」`);
+    }
+  }
+  asserts++;
+  {
+    const [name, meta] = splitNextTarget('没有分隔符的一句');
+    if (name !== '没有分隔符的一句' || meta !== '') {
+      probs.push(`无分隔符时应整句进名字格且距离格为空，实得「${name}」/「${meta}」`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `${TEMPLATES.length} 个模板 × 中英 全部恰好一个分隔点 · 拼回原句 · 距离格带数字`,
+    asserts,
+  );
+});
+
+/**
+ * 结算屏必须把这一局的**三件事**说出来：成了没有、拿到多少、为什么没成。
+ *
+ * ## 这一族为什么单独立一条
+ *
+ * 结算屏是玩家唯一确认"我刚才做到什么"的地方，而它原来只有一句大字
+ * （成了 / 这次没有完成 / 先放一放）。于是：
+ *
+ * · **钱**：打卡与小游戏发的旅币只体现在顶栏那个跳了一下的数字上。
+ *   玩家要自己把"顶栏数字变了"和"我刚赢了"两件事对上号。
+ * · **是哪一件**：输了的时候副标题是空的，玩家不知道自己刚试的是茶还是琴。
+ * · **超时还是玩砸**：宿主 30 秒兜底和"弹错一个音"共用同一句话，
+ *   而这两件事该给的建议完全相反（"再来一次" vs "慢慢来"）。
+ *
+ * ## 怎么测
+ *
+ * 造一个真的 `ResultCard`（最小 DOM 桩），把四种收场各走一遍，
+ * 读它真实写出去的文字。canvas 是假的，但这块屏全是 DOM。
+ *
+ * 会红的做法：把 `gain` 那行删掉 → 红「赢了 20 旅币，屏上找不到 +20 coins」；
+ * 把 `mg_played` 从副标题里去掉 → 红；把 `timedOut` 分支去掉 → 红。
+ */
+check('verify_settle_feedback', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const dom = ensureStubDom();
+
+  setLang('en');
+  const card = new ResultCard(dom.parent());
+  const read = (cls: string) => {
+    const n = card.root.querySelector(`.${cls}`) as { textContent: string; classList: { contains(c: string): boolean } } | null;
+    return { text: n?.textContent ?? '', shown: n ? !n.classList.contains('g-hidden') : false };
+  };
+
+  // 1. 成了 + 有到账 → 名字、旅币都在，安慰那行不画
+  asserts++;
+  {
+    card.show('win', 0, 100, undefined, { gain: 20 });
+    const big = read('g-result-big');
+    const sub = read('g-result-sub');
+    const gain = read('g-result-gain');
+    const note = read('g-result-note');
+    if (big.text !== t('result_win')) probs.push(`赢了的大字是「${big.text}」，应为 result_win`);
+    if (!sub.text || !sub.text.includes(t('fragment_0'))) probs.push(`赢了没写出这件乐事：「${sub.text}」`);
+    if (!gain.shown || !gain.text.includes('20')) probs.push(`赢了 20 旅币，屏上找不到：${JSON.stringify(gain)}`);
+    if (note.shown) probs.push('赢了却画了安慰那一行');
+  }
+
+  // 2. 输了 → 必须说清是哪一件 + 安慰；旅币那一行按实际到账（输了也发 5）
+  asserts++;
+  {
+    card.show('lose', 2, 100, undefined, { gain: 5 });
+    const sub = read('g-result-sub');
+    const note = read('g-result-note');
+    if (!sub.text.includes(t('mg_played'))) probs.push(`输了没说是哪一件：「${sub.text}」`);
+    if (!sub.text.includes(t('fragment_2'))) probs.push(`输了没写出乐事名：「${sub.text}」`);
+    if (!note.shown || note.text !== t('mg_failed_hint')) probs.push(`输了没有安慰那一行：${JSON.stringify(note)}`);
+  }
+
+  // 3. 超时 → 那一行必须换成 mg_timeout，不能和玩砸共用一句
+  asserts++;
+  {
+    card.show('lose', 2, 100, undefined, { gain: 5, timedOut: true });
+    const note = read('g-result-note');
+    if (note.text !== t('mg_timeout')) probs.push(`超时显示的是「${note.text}」，应为 mg_timeout`);
+    if (t('mg_timeout') === t('mg_failed_hint')) probs.push('mg_timeout 与 mg_failed_hint 是同一句，超时和玩砸分不开');
+  }
+
+  // 4. 取消 → 什么都没拿到：不画旅币、不画安慰、也不说哪一件
+  asserts++;
+  {
+    card.show('cancel', 2, 100, undefined, { gain: 0 });
+    const sub = read('g-result-sub');
+    const gain = read('g-result-gain');
+    const note = read('g-result-note');
+    if (sub.shown && sub.text !== '') probs.push(`取消了却还报了乐事名：「${sub.text}」`);
+    if (gain.shown) probs.push('取消了却画了旅币那一行');
+    if (note.shown) probs.push('取消了却画了安慰那一行——他没输');
+  }
+
+  // 5. 0 到账不画 "+0 coins"（earn 的 tag 幂等会让取消那一局发不出钱）
+  asserts++;
+  {
+    card.show('win', 0, 100, undefined, { gain: 0 });
+    if (read('g-result-gain').shown) probs.push('到账 0 仍然画了「+0」');
+  }
+
+  setLang(DEFAULT_LANG);
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '赢/输/超时/取消 四种收场都说清了：乐事名 · 到账 · 超时与玩砸分开',
+    asserts,
+  );
+});
+
+/**
+ * 世界里的「重新开始」必须重播序章。
+ *
+ * ## 漏洞长什么样
+ *
+ * `restart()` 调 `resetRun()`，而 `resetRun()` 里的 `game.reset()` 把
+ * `prologueDone` 清成 false **并落盘**（`verify_story` 另一条断言就守着
+ * "重开就该再看一遍序章"）。但 `restart()` 的非标题页分支走的是
+ * `toRoaming()`，**到不了 `enterWorld()`**——而序章住在那里。
+ *
+ * 于是玩家中途按一次「重新开始」，得到的是：进度全清、站回十八驿旁、
+ * **一句故事都没有**。而"他是谁、替谁跑、代价是什么"这三句
+ * 在这个游戏里只在序章出现过一次。补回来的唯一路径是退回标题页
+ * 再点「继续旅程」，没有人会知道要这么做。
+ *
+ * ## 判据为什么读源码
+ *
+ * 这一条没法在 Node 里跑：`App` 要 WebGL。而它守的是**接线**，
+ * 不是数值——"新的一条路进世界时会不会播序章"这件事只有连线图知道。
+ * 项目里已有同族先例（`verify_minigame_resume` 用读 `main.ts` 源码
+ * 的方式断言 `whenDialogueIdle()` 必须排在 `mg.run()` 之前），
+ * 所以这里沿用同一个手法，并且**配一条行为断言**：
+ * `playPrologue()` 自己必须带 `prologueDone` 的幂等闸。
+ *
+ * 会红的做法：把 `restart()` 里那行 `this.playPrologue()` 删掉 → 红；
+ * 把 `playPrologue` 里的 `if (!game.prologueDone)` 闸去掉 → 红（幂等那条）。
+ */
+check('verify_restart_prologue', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // 1. 行为：reset 之后序章必须是"待播"状态
+  asserts++;
+  {
+    const g = new GameStateManager();
+    g.markPrologueDone();
+    if (!g.prologueDone) probs.push('markPrologueDone() 没能把序章标成已播');
+    g.reset();
+    if (g.prologueDone) probs.push('reset() 之后序章仍标成已播——重开就不会再念一遍');
+  }
+
+  // 2. 连线：restart() 的非标题页分支必须调 playPrologue()
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    const start = src.indexOf('  restart() {');
+    if (start < 0) {
+      probs.push('main.ts 里找不到 restart()');
+    } else {
+      // 取到下一个同缩进的方法为止
+      const rest = src.slice(start + 12);
+      const end = rest.search(/\n  [a-zA-Z]/);
+      const body = end < 0 ? rest : rest.slice(0, end);
+      if (!body.includes('this.playPrologue()')) {
+        probs.push('restart() 的世界内分支没有调 playPrologue()——重开之后玩家看不到序章');
+      }
+      // 幂等闸必须在 playPrologue 里，否则三条进世界的路径会重播两次
+      const pStart = src.indexOf('  private playPrologue()');
+      if (pStart < 0) {
+        probs.push('main.ts 里找不到 playPrologue()');
+      } else {
+        const pRest = src.slice(pStart + 24);
+        const pEnd = pRest.search(/\n  [a-zA-Z]/);
+        const pBody = pEnd < 0 ? pRest : pRest.slice(0, pEnd);
+        if (!pBody.includes('if (!game.prologueDone)')) {
+          probs.push('playPrologue() 没有 prologueDone 幂等闸——进世界三次会重播三次序章');
+        }
+        // 七句都要在，别只念了前四句
+        for (const k of ['prologue_0_1', 'prologue_0_2a', 'prologue_0_2b', 'prologue_0_3', 'prologue_1', 'prologue_2', 'prologue_3']) {
+          if (!pBody.includes(`'${k}'`)) probs.push(`playPrologue() 里没有 ${k}`);
+        }
+      }
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : '重开清档后序章回到待播 · 世界内 restart 走 playPrologue · 七句齐全且有幂等闸',
+    asserts,
+  );
 });
 
 // ---------------------------------------------------------------- 经济
@@ -6577,50 +6981,62 @@ check('verify_ui_visibility', () => {
 });
 
 /**
- * 压在画面上的次级文字，必须有一块**自己的**实色底。
+ * 压在画面上的次级文字，必须托得住它的底。
  *
- * ## 这个 bug 已经犯过两次，两处长得完全不一样
+ * ## 这个 bug 换了三个位置，三次的修法还不一样
  *
- * · **碎片栏**（`.g-frags`）：72% 的半透明纸 —— 底下的山透过字缝冒出来，
- *   那一格读作"浮在草地上"而不是"一张纸"。评审第一眼看见的就是它。
- * · **标题页的画质组**（`.g-title .g-group`）：**根本没有底**。
- *   外层卡只有一层 0.55 的白纱（`.g-card-title`），而标题页的 `::after`
- *   专门把画面上下两端压到 0.72~0.78 的暗；画质组正好坐在下半张卡里，
- *   于是它背后是"暗山 × 0.55 纸"≈ 一片中灰。压在这片中灰上的偏偏是
- *   这一页最浅的三种字（`--ink-soft` / `--ink-faint` / 红字 `--accent`），
- *   faint 压中灰对比度不到 1.1:1 —— 实机截图里那一块读作"糊在山体上的几行字"。
+ * · **碎片栏**（`.g-frags`）：72% 的半透明纸 —— 底下的山透过字缝冒出来。
+ * · **标题页那张卡**（`.g-card-title`）：0.55 的白纱压不住画面。
+ *   主视觉不是均匀浅色，它有大片淡墨山体（最暗处约 rgb(45)），
+ *   0.55 压上去只有 `236×0.55 + 45×0.45 ≈ 157` 的一片中灰——
+ *   **卡上每一行字**都浮在上面，不只是某一块。上一轮只给画质组补了块实色底，
+ *   于是"标题页部分文字还是看不清"：补一块底治的是那一个块，不是那张卡。
+ * · **游戏内顶栏**（`.g-top`）：`--paper-85 → 透明` 平均铺满整条，
+ *   字的底边落在全条 82% 处，那里只剩 0.15 的纸；压到山体（rgb≈60）上
+ *   是 `236×0.15 + 60×0.85 ≈ 86`，`--ink-soft` 压上去 1.4:1。
  *
- * 两次都**不报错、别的判据全绿**，靠的是人眼第一眼。
- * 而"标题页画质面板"恰好是评审停留最久的地方（比任何游戏内画面都久）。
+ * 三次都**不报错、别的判据全绿**，靠人眼第一眼。所以下面按机制分开钉，
+ * 而不是笼统一句"要有底"：
+ *
+ * | 目标 | 要求 | 为什么是这一条 |
+ * |---|---|---|
+ * | `.g-frags` | 底必须**不透明** | 小方块压在世界画面上，没有"再垫一层"的地方 |
+ * | `.g-card-title` | 必须**保持半透明**，且 alpha **≥ 0.8** | 整张卡压在主视觉上；0.8 是托住 `--ink-soft` 的下限，再低就回到中灰 |
+ * | `.g-top` | 渐隐必须落在 `calc(100% - …em)` 里 | 顶栏会折成两行，按百分比写渐变的话第二行又落回透明区 |
  *
  * ## 为什么读源码，而不是算对比度
  *
- * 无头环境里没有样式表，`getComputedStyle` 量不到；而"这块底有多不透明"
- * 恰恰就是这条判据本身。量的是 `styles.css` 里那几行字面量：
- * 指定选择器的规则体必须声明 `background`，且那个值必须**不透明**。
+ * 无头环境里没有样式表，`getComputedStyle` 量不到；而"这块底有多厚"
+ * 恰恰就是这条判据本身。量的是 `styles.css` 里那几行字面量。
  *
- * "不透明"的判定刻意把三种写法都算作输，因为它们是同一个错误的三种说法：
- * · `rgba(..., 0.55)` —— 直接带 alpha
- * · `var(--paper-72)` —— 令牌名里的数字就是它的 alpha
- * · `rgb(... / 0.7)` —— 斜杠 alpha 语法
- *
- * ## 口径
- *
- * **外层那层纱不算数，每块次级文字自己得有底。** 纱的浓度取决于它底下
- * 那张画：画一亮一暗，同一段字就从"读得出"变成"读不出"，而没人会为此报错。
+ * "半透明"的三种写法都算输，因为它们是同一个错误的三种说法：
+ * `rgba(…, 0.55)` / `var(--paper-72)`（令牌名里的数字就是它的 alpha）/
+ * `rgb(… / 0.7)`。
  */
 check('verify_paper_backing', () => {
   let asserts = 0;
   const probs: string[] = [];
-  const src = readFileSync(join(process.cwd(), 'src', 'ui', 'styles.css'), 'utf8');
+  /**
+   * **先剥注释再判。** 上一版就栽在这儿：`.g-top` 的规则体里那段解释写着
+   * `calc(100% - 0.9em)`，而规则本身已经退回按百分比写——
+   * 判据连同注释一起读，于是**注释里的字面量把判据自己喂饱了**，
+   * 报出一个绿的、而顶栏其实已经坏掉的结果。
+   *
+   * 这条 CSS 里的注释写得比代码还长（这是本项目的规矩），
+   * 所以"读规则体"和"读规则"是两回事。判据只认后者。
+   */
+  const src = readFileSync(join(process.cwd(), 'src', 'ui', 'styles.css'), 'utf8').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  );
 
   /**
    * 取某个选择器的规则体。**必须按行首匹配**：
-   *  loose 搜索会撞上注释里提到的那几个类名（本文件的那段注释就写着
-   *  「`.g-frags` 与 `.g-title .g-group`」），命中注释就会报一个假故障。
+   *  loose 搜索会撞上注释里提到的那几个类名（`styles.css` 里那段注释
+   *  就写着「`.g-frags` 与 `.g-title .g-group`」），命中注释会报假故障。
    *  `m` 标志让 `^` 落在每一行上，而真实选择器总是顶格写在行首。
    *
-   * 调用方传**纯选择器字符串**（不要自己写正则）：转义在这里做一次，
+   * 调用方传**纯选择器字符串**（不要自己写正则）：转义在这里做一次。
    * 之前两边都转义了一次，`\.g-root` 变成 `\\\.g-root`，一条都匹配不到。
    */
   const ruleBodies = (selector: string): string[] => {
@@ -6644,8 +7060,8 @@ check('verify_paper_backing', () => {
    * 这个选择器**最后声明过**的那次 background。
    *
    * 不能只看最后一条规则：`.g-frags` 在文件尾的媒体查询里还有一条
-   * （只改 `top` 与 `transform`），按"最后一条说了算"去读，
-   * 一个有实色底的碎片栏会被读成"根本没有底"——假故障比没判据更费时间。
+   * （只改 `top` 与 `transform`），按"最后一条说了算"去读，一个有实色底的
+   * 碎片栏会被读成"根本没有底"——假故障比没判据更费时间。
    * 但**后写的覆盖仍然算数**：谁最后写了 background，谁就是当前生效值。
    */
   const lastBg = (selector: string): string | null => {
@@ -6656,36 +7072,76 @@ check('verify_paper_backing', () => {
     }
     return v;
   };
-  const isOpaque = (v: string | null): boolean => {
-    if (!v) return false;
-    if (/rgba\(|hsla\(|color-mix\(/.test(v)) return false;
-    if (/var\(\s*--paper-\d/.test(v)) return false; // --paper-72 就是 72% 透明
-    if (/\/\s*0?\.\d|\/\s*\d+(\.\d+)?%/.test(v)) return false;
-    return true;
+  /**
+   * 这个底的实际 alpha。
+   *
+   * **读最后一个参数**（`, a)` 或 `/ a)` 收尾），不要去数逗号：
+   * 标题卡那个值是 `rgba(var(--pw) calc(var(--pg) + 2) var(--pb), 0.86)`，
+   * 而 `calc(var(--pg) + 2)` 内部就带右括号——第一版用 `[^)]*` 去匹配，
+   * 在那个括号处就断了，于是取不到 alpha、落进"实色"那一支，
+   * 把一张 0.86 的纱报成"被改成实色了"。**报错的判据比没判据更费时间。**
+   *
+   * 取不到就当它是 1——`var(--paper)` 这类实色令牌不写 alpha，
+   * 而"不透明"正是我们要的判定。`color-mix()` 与渐变量不了（-1），
+   * 交给调用方单独判：它们属于"写了就得多看一眼"的那种写法。
+   */
+  const alphaOf = (v: string | null): number => {
+    if (!v) return 0;
+    if (/gradient|color-mix\(/.test(v)) return -1;
+    const tail = /[,/]\s*([\d.]+)\s*\)\s*$/.exec(v);
+    if (tail) return Number(tail[1]);
+    const tok = /var\(\s*--paper-(\d+)/.exec(v);
+    if (tok) return Number(tok[1]) / 100;
+    return 1;
   };
 
-  for (const [sel, what] of [
-    ['.g-root .g-frags', '碎片栏（压在山与天上）'],
-    ['.g-root .g-title .g-group', '标题页画质组（压在被压暗的画面下端）'],
-  ] as const) {
-    asserts++;
-    const bg = lastBg(sel);
+  // 1. 碎片栏：压在山与天上，必须实色。
+  asserts++;
+  {
+    const bg = lastBg('.g-root .g-frags');
     if (!bg) {
-      probs.push(`${what} ${sel} 根本没有 background —— 文字直接压在画面上`);
-    } else if (!isOpaque(bg)) {
-      probs.push(`${what} ${sel} 的底是半透明的（${bg}）——外层那层纱兜不住`);
+      probs.push('碎片栏 .g-root .g-frags 根本没有 background —— 文字直接压在画面上');
+    } else if (alphaOf(bg) < 1) {
+      probs.push(`碎片栏的底是半透明的（${bg}）——外层那层纱兜不住`);
     }
   }
 
-  // 反过来：标题页的卡**仍然**保持那层薄纱。不许有人为了省事把整张卡
-  // 改成实心——主视觉是这一页存在的理由，被一张纸盖住等于把第一眼退回原样。
+  // 2. 标题页那张卡：**保持半透明**，但不许薄过 0.8。
   asserts++;
   {
-    const cardBg = lastBg('.g-root .g-card-title');
-    if (!cardBg) {
+    const bg = lastBg('.g-root .g-card-title');
+    if (!bg) {
       probs.push('.g-card-title 没有 background —— 水墨主视觉会从整张卡底下漏出来');
-    } else if (isOpaque(cardBg)) {
-      probs.push(`.g-card-title 被改成实色了（${cardBg}）—— 主视觉会被一张纸盖住`);
+    } else {
+      const a = alphaOf(bg);
+      if (a === 1) {
+        probs.push(`.g-card-title 被改成实色了（${bg}）—— 主视觉会被一张纸盖住`);
+      } else if (a === -1) {
+        probs.push(`.g-card-title 用了 color-mix()（${bg}）—— 判据量不了它的浓度`);
+      } else if (a < 0.8) {
+        probs.push(
+          `.g-card-title 的纱只有 ${a}：压到淡墨山体（rgb≈45）只剩 rgb(155) 上下，` +
+            '卡上每一行字都会浮在中灰上',
+        );
+      }
+    }
+  }
+
+  // 3. 顶栏：渐隐必须是一个**固定高度**的空区，不是百分比。
+  //
+  // 按百分比写（`--paper-85 0%, transparent 100%`）时，字的底边落在全条 82% 处，
+  // 那里只剩 0.15 的纸；而极窄屏（<=30rem）顶栏折成两行之后，第二行落回同一个
+  // 透明区——**同一个 bug 换个宽度复活**，而那正是它现在的样子。
+  asserts++;
+  {
+    const body = ruleBodies('.g-root .g-top').join('\n');
+    if (!/linear-gradient/.test(body)) {
+      probs.push('.g-top 的 background 不是渐变——顶栏底色被改掉了');
+    } else if (!/calc\(\s*100%\s*-\s*[\d.]+em\s*\)/.test(body)) {
+      probs.push(
+        '.g-top 的渐隐不是固定高度（缺 calc(100% - …em)）——字底下那一段会淡到透明，' +
+          '顶栏一折行第二行就跟着消失',
+      );
     }
   }
 
@@ -6693,7 +7149,7 @@ check('verify_paper_backing', () => {
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : '碎片栏与标题页画质组各自有不透明底 · 标题卡仍是薄纱（主视觉透得出来）',
+      : '碎片栏实色 · 标题卡薄纱但 α≥0.8 · 顶栏渐隐落在固定高度的空区里',
     asserts,
   );
 });
@@ -7126,7 +7582,25 @@ function ensureStubDom(): StubDom {
         const text = { v: '' };
         return {
           tagName: tag.toUpperCase(),
-          className: '',
+          /**
+           * `className` 与 `classList` **必须共用一份**。
+           *
+           * `dom.ts` 的 `el()` 是 `createElement(tag)` 之后才 `node.className = cls`
+           * ——它不把 cls 传给 createElement。所以这里如果只给 `className` 一个
+           * 普通属性，桩上就会出现"className 有值、classList 是空的"，
+           * 于是**类选择器永远找不到东西**：`querySelector('.g-result-gain')` 返回 null，
+           * 读出来的 textContent 全是空串，而判据报的是"屏上找不到这句话"。
+           *
+           * 这不是判据写错了，是桩不像浏览器：真 DOM 上 `className = 'x'`
+           * 之后 `classList.contains('x')` 必然为真。两个视图必须一致。
+           */
+          get className() {
+            return [...cls].join(' ');
+          },
+          set className(v: string) {
+            cls.clear();
+            for (const c of v.split(/\s+/)) if (c) cls.add(c);
+          },
           type: '',
           style: {} as Record<string, string>,
           children: kids,

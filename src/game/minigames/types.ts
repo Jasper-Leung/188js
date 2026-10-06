@@ -36,8 +36,12 @@ export interface MiniGameContext {
   seed: number;
   /** 结束回调。cancel 只能是玩家按 Esc 触发的 */
   onDone(result: MiniGameResult): void;
-  /** 由宿主每帧调用，把 rAF 的 dt 传进来（秒）。暂停时宿主会停止调用。 */
-  tick(dt: number): void;
+  // ⚠️ 这里原来还有一个 `tick(dt)`，由宿主注入 `tick: (dt) => this.game?.step(dt)`。
+  // 它和 `MiniGame.step(dt)` 是同一件事的两扇门，而**五个游戏一个都没读过 ctx.tick**——
+  // 宿主自己的 `fixedUpdate()` 直接调 `step(dt)`。留着的害处不是"多一个字段"，
+  // 而是下一个人会以为"游戏也可以走 tick 那扇门"，于是把状态机接到一个没人调的闭包上，
+  // 而症状是游戏停在开场那一帧（和 `step` 漏掉时一模一样）。
+  // 所以它删了，推进只有 `step` 一条路。
 }
 
 export interface MiniGame {

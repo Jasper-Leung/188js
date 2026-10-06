@@ -109,7 +109,6 @@ export class GameStateManager {
   private _l: {
     fragment: Listener<number>;
     allCollected: Listener<void>;
-    allMaxed: Listener<void>;
     lvbi: Listener<{ delta: number; total: number }>;
     mood: Listener<number>;
     item: Listener<string>;
@@ -118,7 +117,6 @@ export class GameStateManager {
   } = {
     fragment: () => {},
     allCollected: () => {},
-    allMaxed: () => {},
     lvbi: () => {},
     mood: () => {},
     item: () => {},
@@ -153,7 +151,9 @@ export class GameStateManager {
    * 下一次回访打卡会重发一次 allCollected，把合成动画重放一遍。
    */
   private collectedFired = false;
-  private maxedFired = false;
+  // 原来这里还有一个 `maxedFired`，只被 `allMaxed` 那个零订阅事件用。
+  // 事件删了它就没有读者了，而 `noUnusedLocals` 会为"只写不读的私有字段"报错——
+  // 顺带说，这条编译选项正好是这一族死代码的免费探测器。
 
   // ================= 章节 =================
   //
@@ -290,7 +290,6 @@ export class GameStateManager {
     this.collected = new Map();
     for (const idx of ROAD.FRAGMENT_SLOT_STATION_IDX) this.collected.set(idx, 0);
     this.collectedFired = false;
-    this.maxedFired = false;
     this.lvbi = 0;
     this.inv = new Map();
     this.spentKm = 0;
@@ -340,10 +339,12 @@ export class GameStateManager {
       this.collectedFired = true;
       this._l.allCollected();
     }
-    if (this.allFragmentsMaxed() && !this.maxedFired) {
-      this.maxedFired = true;
-      this._l.allMaxed();
-    }
+    // 原来这里还有一个 `allMaxed` 事件（`allFragmentsMaxed()` 时发一次），
+    // **零订阅**。而"五座各去三次"这一刻真正发生的地方是
+    // `main.afterMiniGame()`：它在结算屏落幕后直接判 `allFragmentsMaxed()`
+    // 然后弹合成面板。事件和那个判断是同一件事的两个来源，
+    // 留着一个没人听的，等于给"完满评级"准备了第二条会漂移的路径。
+    // 所以事件删掉，判断留在 afterMiniGame —— 那是玩家真的能看见的那一处。
     return true;
   }
 
@@ -688,7 +689,6 @@ export class GameStateManager {
       // 必须在 collected 载入**之后**再对齐：这两个事件在存档写下的那一刻
       // 就已经发过了，读档回来不该再发一遍。
       this.collectedFired = this.allCollected();
-      this.maxedFired = this.allFragmentsMaxed();
       return true;
     } catch {
       this.clearSave();

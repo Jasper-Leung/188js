@@ -293,6 +293,10 @@ export class ResultCard {
   private life = 0;
   private big: HTMLDivElement;
   private sub: HTMLDivElement;
+  /** 旅币到账。`+N coins`。0 = 这一局没发钱（取消），不画这一行 */
+  private gain: HTMLDivElement;
+  /** 输了之后的那句安慰 / 超时说明。只有 lose 才有 */
+  private note: HTMLDivElement;
   private onDone: (() => void) | null = null;
 
   constructor(parent: HTMLElement) {
@@ -300,8 +304,12 @@ export class ResultCard {
     const box = el('div', 'g-result-box');
     this.big = el('div', 'g-result-big', '');
     this.sub = el('div', 'g-result-sub', '');
+    this.gain = el('div', 'g-result-gain g-hidden', '');
+    this.note = el('div', 'g-result-note g-hidden', '');
     box.appendChild(this.big);
     box.appendChild(this.sub);
+    box.appendChild(this.gain);
+    box.appendChild(this.note);
     this.root.appendChild(box);
     parent.appendChild(this.root);
   }
@@ -313,12 +321,40 @@ export class ResultCard {
    * @param slot 乐事槽位（0..4），用来取 `fragment_<i>` 那两个字
    * @param ms 停留毫秒。不给就按 `settleMs(outcome)`——
    *        **成的时候给得比败的时候长**：赢是这一刻唯一的高光，输只是路过的过程。
+   * @param o.gain 这一局实际到账的旅币。**0 就��画这一行**。
+   *        钱是这一趟唯一"越玩越多"的东西，而它原来只体现在顶栏那个
+   *        跳了一下的数字上——玩家要自己把两件事对上号。
+   *        放在这里而不是再弹一条 toast：这一屏就是玩家唯一在看的屏幕，
+   *        而 toast 和它同时出现会把"你赢了"和"你得了 20 旅币"拆成
+   *        两条互不相干的提示（`storyCard.ts` 文件头记着这个教训）。
+   * @param o.timedOut 是不是**超时**收的，而不是玩砸了。
+   *        宿主 30 秒兜底与"弹错音"是两件事，而它们原来共用一句
+   *        「这次没有完成」——玩家以为自己手慢，其实他根本没机会做完。
    */
-  show(outcome: SettleOutcome, slot: number, ms = settleMs(outcome), onDone?: () => void): void {
+  show(
+    outcome: SettleOutcome,
+    slot: number,
+    ms = settleMs(outcome),
+    onDone?: () => void,
+    o: { gain?: number; timedOut?: boolean } = {},
+  ): void {
     setText(this.big, t(settleTextKey(outcome)));
-    // 副标题只属于"成了"：输了与取消都还没拿到碎片，而取消那句话本身
-    // 已经是一个完整的交代，再挂一行"这件乐事"只会让人以为自己漏了什么。
-    setText(this.sub, outcome === 'win' ? t(`fragment_${slot}`) : '');
+    // 副标题：赢了给乐事名，输了给「这一件：X」——
+    // 输的时候玩家同样需要知道自己刚才是哪一件没做成，
+    // 而 `mg_played` 那个键一直空着（它带一个尾随空格，本来就是给拼接用的）。
+    // 取消不给：他什么都没做，告诉他"这一件是茶"只会让人以为自己漏了什么。
+    const name = t(`fragment_${slot}`);
+    setText(this.sub, outcome === 'win' ? name : outcome === 'lose' ? `${t('mg_played')}${name}` : '');
+
+    const gain = o.gain ?? 0;
+    setText(this.gain, gain > 0 ? t('collecting_lvbi', { 0: gain }) : '');
+    setShown(this.gain, gain > 0);
+
+    // 超时与玩砸分开说。取消没有这一行：他没输。
+    const note = outcome === 'lose' ? t(o.timedOut ? 'mg_timeout' : 'mg_failed_hint') : '';
+    setText(this.note, note);
+    setShown(this.note, note !== '');
+
     this.root.classList.toggle('is-win', outcome === 'win');
     setShown(this.root, true);
     this.life = ms / 1000;
