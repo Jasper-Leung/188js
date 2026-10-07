@@ -11,7 +11,7 @@
  */
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, FRAGMENT_STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join, sep } from 'node:path';
 import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
 import {
   createMiniGame,
@@ -675,7 +675,7 @@ check('verify_i18n_glossary', () => {
   // 上面的整词判据能抓住"教什么 HUD 写什么"对不上，抓不住
   // "两边一起换成了另一个更难懂的词"（比如两边都叫 Currency）。
   //
-  // ⚠ 这张表是**当前不该出现的词**，不是**曾经出现过��词**。
+  // ⚠ 这张表是**当前不该出现的词**，不是**曾经出现过的词**。
   // 它原本含 `Composure`（源项目的直译），而 2026-10-07 心神统一成
   // Composure 之后必须摘掉——否则判据会开始拒绝**它自己的规范词**，
   // 而症状是"刚统一完就红了"，读起来像是统一那一步做错了。
@@ -6140,7 +6140,7 @@ check('verify_offslow', () => {
 //   ② 前后轮完全一样，没有真模型那 0.97°/1.76° 的轴向不一致；
 //   ③ 行车基底在夹具上近似恒等，于是 `alignLocalX` 的父空间换算错了也量不出；
 //   ④ **转向输入是假的**——既有判据只在「heading 每帧变 0.9°」时问车把角，
-//      从没问过「完全不转向���车把角是多少」。
+//      从没问过「完全不转向时车把角是多少」。
 //
 // 而摩托车那个 `steerAngleFor(speed)` 恰恰只在第 ④ 种情况下现形：
 //
@@ -7826,7 +7826,7 @@ check('verify_paper_backing', () => {
 
 // ---------------------------------------------------------------- 档位说明不许说谎
 /**
- * **面板上那一行说明，必须在描述玩家选中��一档。**
+ * **面板上那一行说明，必须在描述玩家选中哪一档。**
  *
  * ## 它守的是哪一族 bug
  *
@@ -8715,6 +8715,104 @@ check('verify_assets_src', () => {
     probs.length
       ? probs.join('；')
       : `自行车源在仓库内（${(srcBytes / 1048576).toFixed(2)}MB → ${(existsSync(outPath) ? (statSync(outPath).size / 1048576).toFixed(2) : '?')}MB），清单指向它`,
+    asserts,
+  );
+});
+
+// ------------------------------------------------------------ 替换字符
+/**
+ * `U+FFFD` 这个码点是"这一段 UTF-8 解不出来"的记号。
+ *
+ * ## 它是怎么进来的
+ *
+ * PowerShell / `Set-Content` / 某些编辑器把 UTF-8 当本地代码页写回去，
+ * 于是**原字被替换成 U+FFFD，写回文件的是替换字符本身**。
+ * 后果不是"某行注释不好看"，而是那一句的意思**永远丢了**——
+ * 中文注释里丢一个字，读者拿到的是一句语法都不通的话，
+ * 而没有工具会告诉你它坏了，因为它在语法上完全合法。
+ *
+ * 这一族是**唯一在增长**的：评审第五轮量到 13 处，上一轮 12 处。
+ * 两处最该点名：`.gitignore` 整行被洗掉、`tools/i18n-supplement.json`
+ * 的 `_override` 说明（那是一个数据文件里的文档字段，而本工程正是靠
+ * 这张表的口径在合并源项目文案）。
+ *
+ * ## 为什么不靠"人肉扫一遍"
+ *
+ * 扫一遍是一次性动作，下一次乱码落地时它不会响。
+ * 变成判据之后它自己会响——这正是 `AGENTS.md` §2 第 1 条要的那种东西。
+ *
+ * ## 扫描范围
+ *
+ * `src/**`、`tools/**`、`index.html`、`.gitignore`。
+ * **不含** `REVIEW-*.md`：那是记录"当时错在哪"的历史档案，
+ * 它自己身上带着旧缺陷恰恰是它的用途（第四轮那一份就是这么写的）。
+ *
+ * ## 会红的做法
+ *   · 在 `src/` 任何文件里写一个 `U+FFFD`（哪怕在注释里）  → 红
+ *   · 把某个源文件的扩展名从 `FFFD_EXT` 里删掉            → 红（扫不到 = 没在扫）
+ */
+const FFFD_EXT = new Set(['.ts', '.tsx', '.css', '.json', '.html', '.mjs', '.js', '.md']);
+const FFFD_ROOTS = ['src', 'tools', 'index.html', '.gitignore'];
+const FFFD_SKIP = new Set(['node_modules', 'dist', '.git', '.cache', 'target']);
+
+function walkText(dir: string, out: string[]): void {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.') && e.name !== '.gitignore') continue;
+    if (FFFD_SKIP.has(e.name)) continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walkText(p, out);
+    else if (FFFD_EXT.has(extname(e.name))) out.push(p);
+  }
+}
+
+check('verify_text_encoding', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const cwd = process.cwd();
+  const files: string[] = [];
+  for (const r of FFFD_ROOTS) walkText(join(cwd, r), files);
+
+  // 1. 扫描范围本身必须是活的：源文件一个都不许漏。
+  //    有人把某个目录从 FFFD_ROOTS 里拿掉、或者把扩展名从 FFFD_EXT 里拿掉，
+  //    这个断言会立刻发现"扫的文件比工程少"——空跑是最难发现的失效。
+  asserts++;
+  if (files.length < 80) {
+    probs.push(`只扫到 ${files.length} 个文件 —— 扫描范围被削了，这条判据在空跑`);
+  }
+  for (const must of ['src/main.ts', 'src/verify/entry.ts', 'tools/i18n-supplement.json']) {
+    asserts++;
+    if (!files.includes(join(cwd, must).replace(/\\/g, '/')) && !files.includes(join(cwd, must))) {
+      probs.push(`没扫到 ${must} —— 它已经不在范围里了`);
+    }
+  }
+
+  // 2. 逐文件扫。顺带盯一个**结构**问题：文件头有没有 BOM。
+  //    带 BOM 的 JSON 能被 JSON.parse 读，但会让"这一行从哪开始"错位一格，
+  //    而本工程自己写过一回（AGENTS.md 里记着：写提交信息别用 Set-Content）。
+  let hit = 0;
+  for (const f of files) {
+    const s = readFileSync(f, 'utf8');
+    const n = (s.match(/\uFFFD/g) || []).length;
+    if (n) {
+      hit++;
+      const line = s.slice(0, s.indexOf('\uFFFD')).split('\n').length;
+      probs.push(`${f.replace(cwd + sep, '').replace(/\\/g, '/')}:${line} 有 ${n} 个 U+FFFD`);
+    }
+    if (f.endsWith('.json') || f.endsWith('.ts')) {
+      asserts++;
+      if (s.charCodeAt(0) === 0xfeff) probs.push(`${f.replace(cwd + sep, '').replace(/\\/g, '/')} 带 UTF-8 BOM`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : `${files.length} 个文本文件，0 个 U+FFFD、0 个 BOM`,
     asserts,
   );
 });

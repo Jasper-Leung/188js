@@ -55,7 +55,7 @@ desktop.ini
 # Windows
 Thumbs.db:ehl
 $RECYCLE.BIN/
-# ���� AI ���ߵ�Ȩ���嵥�������Ǿ���·���뱾�ض˿ڣ���̨������û���ˡ�
+# Claude Code 等 AI 工具的本地缓存与状态（AGENTS.md 那一份是入库的，这里不是）
 .claude/
 
 # Cloudflare Workers 本地状态（wrangler dev 的临时目录与 state，不进版本库）

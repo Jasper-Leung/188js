@@ -1064,7 +1064,7 @@ class App {
    * 前两条都经过 `enterWorld()`，第三条原来直接走 `toRoaming()` 绕开了它——
    * 而 `resetRun()` 已经把 `prologueDone` 清成了 false 并落盘（这一点
    * `verify_story` 有专门的断言：重开就该再看一遍序章）。
-   * 于是玩家在世界���按「重新开始」，拿到的是一个进度全清、**而一个字故事都没有**的存档：
+   * 于是玩家在世界里按「重新开始」，拿到的是一个进度全清、**而一个字故事都没有**的存档：
    * 他不知道自己是谁、替谁跑、代价是什么，而这三句在这个游戏里只在这里出现过。
    * 想补回来只能退回标题页再点一次「继续旅程」——没有人会知道要这么做。
    *
@@ -1207,7 +1207,7 @@ class App {
    * 背包在跑的人、而界面上没有一个字说明为什么，比开坏更伤。
    * 所以真正的修复不在这个方法里，而在两处：
    * 标题页在模型到货前**禁用**演示按钮（`titleScreen.ts` 的 `demoReady`），
-   * 以及车一��货就自动切上去（`onAssetLoaded()`）。
+   * 以及车一到位就自动切上去（`onAssetLoaded()`）。
    *
    * 保留这一行是因为它是兜底的兜底：万一玩家在模型到货前用别的方式
    * （`?autostart`、控制台）进了演示，这里至少还能把车换上。
@@ -1504,18 +1504,27 @@ class App {
       this.ui.showToast(t('objective_return'), 4200);
       return;
     }
+    // 完满评级（五座各去三次）是**可选**的另外一条路，仍然就地结算。
+    //
+    // ★ 它必须排在 `overdue` **前面**。
+    // `day = 1 + 3×圈数 + 打卡次数`，而刷满要五座各三次 = 15 次打卡：
+    //   圈数 4 → day 28（余 2 天，完满面板出得来）
+    //   圈数 5 → day 31 → 过期 → 走下面那条 toast，这一面评级墙永远到不了。
+    // 而"在碎片站之外多打一次卡"（驿铺、茶铺、灯铺都算 check-in）还会把
+    // 触发所需的圈数压得更低。也就是说**一条路走全了，就再也走不到尽头**——
+    // 而够不着的那面评级墙正是给这种人准备的。
+    // 完满是更强的状态，过期只该对还没刷满的人说。
+    if (game.allFragmentsMaxed()) {
+      this.phase = 'synthesis';
+      this.ui.showSynthesis('maxed');
+      return;
+    }
     // 过期。这一趟**不结束**，但目标换了。
     // `back_break` 那个结局是为它写好的，而在这之前它没有任何入口——
     // 一个写好了却到不了的结局，和没写是一样的。
     if (game.overdue) {
       this.toRoaming();
       this.ui.showToast(t('objective_overdue'), 5200);
-      return;
-    }
-    // 完满评级（五座各去三次）是**可选**的��一条路，仍然就地结算
-    if (game.allFragmentsMaxed()) {
-      this.phase = 'synthesis';
-      this.ui.showSynthesis('maxed');
       return;
     }
     this.toRoaming();

@@ -375,6 +375,9 @@ export class Hud {
     setText(this.seenEl, t('stations_seen', { 0: this.game.getSeenStationCount() }));
     setText(this.lvbiEl, t('lvbi_label', { 0: this.game.lvbi }));
     setText(this.moodEl, t('mood_label', { 0: this.game.mood, 1: ECON.MOOD_CEIL }));
+    // `chapter_label_2` 写的是「第二章 · 在路上」而不是光一个「第二章」：
+    // 第二章的存档闩锁是真的，可它背后没有内容——门后头还是同一批目的地。
+    // 顶栏是玩家每一眼都会读的一格，它说出口的每一个字都得兑现得了。
     setText(this.chapterEl, t(`chapter_label_${this.game.chapter}`, { 0: this.game.chapter }));
     // 期限。**它是顶栏第一件被读到的数**，不是角落里的一个提醒：
     // 律师函说三十日，玩家就得随时能看见"我还剩多少"。
