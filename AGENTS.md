@@ -130,6 +130,23 @@ npm run build       # tsc --noEmit && vite build
 npm run verify      # 59 条 / 841 断言
 ```
 
+### 暂存要逐个文件核对，不要整份 add 就完事
+
+**这个工作区会有并行的改动落进来。** 踩过的坑：修植被剔除时
+`git add src/verify/entry.ts` 整份暂存，而那份文件里同时出现了另一条
+正在进行的屋面判据——它引用的实现（`architecture.ts` 里的 `MeshBuilder.roofs`）
+**当时还没提交**。结果推上去的提交**编译不过**
+（`entry.ts:401 Property 'roofs' does not exist on type 'MeshBuilder'`），
+Pages 部署失败，线上停在旧版本。
+
+所以：
+
+- `git add` 之后**先看 `git diff --cached --stat` 的行数对不对得上你这次的改动**。
+  272 行而你只写了 150 行，那就是混进了别人的东西；
+- 提交前跑一次 `npm run typecheck`——它专治"只暂存了一半实现"这一类；
+- 暂存区里出现你没写过的文件，直接 `git restore --staged <file>` 退回去，
+  不要"反正是一起改的就一起提交"。
+
 三条都过再提交。`dist/` 与 `package-lock.json` 不进版本库；
 `public/models` 现在是 **16.84 MB**（22 个 GLB，全部已过 Meshopt），
 **其中 53% 压在三个文件上**：`motorcycle.glb` 4.82 / `bicycle.glb` 2.79 /
