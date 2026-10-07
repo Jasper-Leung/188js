@@ -249,6 +249,34 @@ check('verify_stations', () => {
     }
   }
 
+  /**
+   * 屋面不许浮空 —— 每一座屋面的下表面都要压在某个支撑上。
+   *
+   * 这不是假想：用户报"西谷岭台凭空多了一个顶"，根因是 `posts()` 这个
+   * helper 早先没有水平中心参数，岭台(`zc=3.4`)与神苑(`nicheZ=3.3`)的偏置小龛
+   * 于是把柱子**留在原点**——屋面在 3.3m 外，下面空无一物。
+   * 正视图因为投影重叠"像"是连着的，侧过来才看出是悬空的。
+   *
+   * 会红的做法：把 `posts` 的 `cz` 又去掉 → 立即复现，岭台实测悬空 3.67m。
+   *
+   * 判据用 `MeshBuilder.roofs` 的**解析**屋面参数算，不去网格里猜哪几条三角形
+   * 是屋面——柱头、瓦当、宝顶都落在"顶部高度带"里，靠猜必然误判。
+   * 采样时还要排除屋面自己的三角形：举折是凹曲面，平片小片的弦恒在曲面之下，
+   * 不排除就会把屋面底面当成自己的支撑，量出来永远是 0.00m 的假接触。
+   */
+  asserts++;
+  const worstRoofGap = Math.max(...archReport.flatMap((r) => r.roofGaps));
+  for (const r of archReport) {
+    for (const [i, gap] of r.roofGaps.entries()) {
+      if (gap > ROOF_SEAT_TOL) {
+        probs.push(`第 ${i + 1} 座屋面浮空 ${gap.toFixed(2)}m（判据上限 ${ROOF_SEAT_TOL}m），它下面没有支撑`);
+      }
+    }
+    if (r.roofGaps.length === 0) {
+      probs.push(`${r.name} 一座屋面都量不到支撑`);
+    }
+  }
+
   // 每座站的世界包围盒 Y 跨度必须等于它那一类本地几何的 Y 跨度。
   // 站会绕 Y 转向公路，绕 Y 的刚体变换**不改变 Y 跨度**——
   // 所以一旦对不上，就是模型被额外平移、缩放，或 attach 时出了问题。
@@ -277,7 +305,7 @@ check('verify_stations', () => {
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : `16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 程序化地标 ${archReport.length} 类 ${totalArchTris} 三角面 · 7 类全有真屋顶`,
+      : `16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 程序化地标 ${archReport.length} 类 ${totalArchTris} 三角面 · 7 类全有真屋顶且屋面全部落座（最差 ${worstRoofGap.toFixed(2)}m ≤ ${ROOF_SEAT_TOL}m）`,
     asserts,
   );
 });
@@ -296,6 +324,8 @@ function archGeometryReport() {
     roofVerts: number;
     /** 屋顶带的厚度。0.2m 那种是一排柱头，不是屋顶 */
     roofBand: number;
+    /** 每座屋面下表面到正下方支撑的最小间距（米）。判定"顶浮在空中" */
+    roofGaps: number[];
   }[] = [];
   for (const [idxStr, kind] of Object.entries(ARCH_BY_MODEL_IDX)) {
     const idx = Number(idxStr);
@@ -332,9 +362,93 @@ function archGeometryReport() {
       labelY,
       roofVerts,
       roofBand,
+      roofGaps: measureRoofGaps(mb, p),
     });
   }
   return out;
+}
+
+/**
+ * 屋面落座判据的容差（米）。
+ *
+ * 0.25m 是照着修好之后的实测值定的：七类全在 **0.009~0.143m**，
+ * 修复前的岭台是 3.67m。0.25m 既卡得住真悬空，又不会因为
+ * 某次把 `seg` 从 10 降到 6（低画质档）就让判据误红。
+ */
+const ROOF_SEAT_TOL = 0.25;
+
+/**
+ * 量每座屋面"下表面 ↔ 正下方支撑顶面"的最小间距。
+ *
+ * 两件事必须做对，否则量出来的数没有意义：
+ *
+ * 1. **屋面下表面用解析公式算**，不在网格里找"哪几条三角形是屋面"。
+ *    柱头、瓦当、宝顶都落在"顶部若干高度带"里，靠高度带分类必然误判。
+ * 2. **排除屋面自己的三角形**。举折是凹曲面，而网格是 `seg×seg` 个平面小片，
+ *    平片的弦恒定落在解析曲面**之下**——不排除的话每个屋面底面都会
+ *    被当成"它正下方的支撑"，量出来永远是 0.00m 的假接触。
+ *
+ * 采样取屋面足迹上的格点，逐点向下找最高的支撑面；
+ * 一座屋面的判据值 = 所有格点里**最小**的那个间距
+ * （即"最接近贴合的那一点"）。取最小而不是取最大：
+ * 一座屋面只要有一处实实在在压在支撑上就算落了座，
+ * 而檐口下方本来就是空的（出檐悬空是造型，不是 bug）。
+ */
+function measureRoofGaps(mb: ReturnType<typeof buildStationArch>, p: Float32Array): number[] {
+  const tri = p.length / 9;
+  const gaps: number[] = [];
+  const STEPS = 24;
+  for (const part of mb.roofs) {
+    const r = part.span;
+    let best = Infinity;
+    for (let i = 0; i <= STEPS; i++) {
+      for (let j = 0; j <= STEPS; j++) {
+        const u = (i / STEPS) * 2 - 1;
+        const v = (j / STEPS) * 2 - 1;
+        const x = r.cx + u * r.hw;
+        const z = r.cz + v * r.hd;
+        const soffit = r.soffitAt(u, v);
+        let below = -Infinity;
+        for (let t = 0; t < tri; t++) {
+          // 跳过屋面自身
+          if (t >= part.triFrom && t < part.triTo) continue;
+          const y = triSurfaceYAt(p, t, x, z);
+          if (y === null || y >= soffit - 1e-3) continue;
+          if (y > below) below = y;
+        }
+        if (below === -Infinity) continue;
+        const gap = soffit - below;
+        if (gap < best) best = gap;
+      }
+    }
+    gaps.push(best);
+  }
+  return gaps;
+}
+
+/**
+ * 竖直射线 (x,z) 穿过第 `t` 个三角形时的高度；不穿过返回 null。
+ *
+ * 重心坐标判据，留一点容差（-1e-6）：顶点恰好落在边上时浮点会差一两个 ulp，
+ * 而屋面足迹的格点经常正好压在支撑面的边界上。
+ */
+function triSurfaceYAt(p: Float32Array, t: number, x: number, z: number): number | null {
+  const ax = p[t * 9];
+  const ay = p[t * 9 + 1];
+  const az = p[t * 9 + 2];
+  const bx = p[t * 9 + 3];
+  const by = p[t * 9 + 4];
+  const bz = p[t * 9 + 5];
+  const cx = p[t * 9 + 6];
+  const cy = p[t * 9 + 7];
+  const cz = p[t * 9 + 8];
+  const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+  if (Math.abs(d) < 1e-12) return null; // 退化（竖直三角形）
+  const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
+  const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
+  const l3 = 1 - l1 - l2;
+  if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) return null;
+  return l1 * ay + l2 * by + l3 * cy;
 }
 
 /**

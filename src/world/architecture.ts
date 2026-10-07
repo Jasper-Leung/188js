@@ -90,6 +90,103 @@ const C = {
   plaster: [0.72, 0.69, 0.62],
 } as const;
 
+// ---------------------------------------------------------------- 屋面
+/**
+ * 一次 `upturnedRoof` 的解析记录。
+ *
+ * 判据「屋面不许浮空」要量的是"屋面下表面与正下方支撑顶面的最小间距"，
+ * 而在网格里靠"顶部若干高度带"找哪些三角形是屋面**必然误判**——
+ * 柱头、瓦当、宝顶都落在同一条带里（神苑四根石灯柱的柱头实测就在顶部 25% 带内）。
+ * 存下参数就能**解析地**算屋面底高度，不依赖任何网格分类。
+ *
+ * `triFrom/triTo` 是本屋面在三角形数组里的区间。**判据必须靠它把屋面自己排除掉**：
+ * 屋面底面是由 seg×seg 个**平面小片**拼出来的，而举折是凹曲面，
+ * 于是平片的弦恒定落在解析曲面**之下**——不排除的话，每片屋面底面都会
+ * 被当成"它正下方的支撑"，量出来永远是 0.002m 那样的假接触。
+ *
+ * 下面三个函数是 `upturnedRoof` 与本记录**共用**的同一份公式：
+ * 抄两份公式的判据，一定会在某次改参数后悄悄失效。
+ */
+export interface RoofSpan {
+  cx: number;
+  /** 檐口零平面（t=1 处的屋面顶高度）。`upturnedRoof` 的 `cy` 就是它 */
+  cy: number;
+  cz: number;
+  hw: number;
+  hd: number;
+  h: number;
+  lift: number;
+  thickness: number;
+  /** 屋面下表面（望板）在归一化平面坐标 (u,v) 处的高度。u/v ∈ [-1,1] */
+  soffitAt(u: number, v: number): number;
+}
+
+/** 一座屋面：解析参数 + 它在网格里占的三角形区间 */
+export interface RoofPart {
+  span: RoofSpan;
+  triFrom: number;
+  triTo: number;
+}
+
+/** 举折 + 角部起翘。t 是到檐口的切比雪夫距离，`corner` 是角部权重 */
+function roofRise(h: number, lift: number, t: number, corner: number): number {
+  const eave = ss(0.5, 1, t);
+  return h * Math.pow(1 - t, 1.7) + lift * eave * eave * corner;
+}
+
+/** 角部起翘权重：只在四角起作用，不让整条檐线一起翘成弧形 */
+function roofCornerWeight(u: number, v: number): number {
+  return ss(0.55, 1, Math.abs(u)) * ss(0.55, 1, Math.abs(v));
+}
+
+/** 檐口封边厚度：檐口那圈要厚一点，当封檐板看 */
+function roofShellThickness(thickness: number, t: number): number {
+  return thickness * (0.4 + 0.6 * t);
+}
+
+function makeRoofSpan(
+  cx: number, cy: number, cz: number,
+  hw: number, hd: number, h: number, lift: number, thickness: number,
+): RoofSpan {
+  return {
+    cx, cy, cz, hw, hd, h, lift, thickness,
+    soffitAt: (u, v) => {
+      const t = Math.max(Math.abs(u), Math.abs(v));
+      return cy + roofRise(h, lift, t, roofCornerWeight(u, v)) - roofShellThickness(thickness, t);
+    },
+  };
+}
+
+/**
+ * 求"让屋面坐在 `seatY` 上"的 `cy`。
+ *
+ * ## 为什么不能直接把 `cy` 写成柱高
+ *
+ * `upturnedRoof` 的 `cy` 是**檐口零平面**（t=1 处屋面顶的高度），不是脊高。
+ * 而支撑（柱子、额枋、墙顶）立在 t<1 的位置，那里屋面按 `(1−t)^1.7` 抬起来了。
+ * 于是"`cy = 柱顶`"会让屋面整体**浮在支撑上方**：
+ *
+ *     净空 = h·(1−t)^1.7 + lift·eave²·corner − thickness·(0.4+0.6·t)
+ *
+ * 岭台实测 t=0.435 时净空 **+0.32m** —— 一眼就能看出来的"顶凭空多了一个"。
+ * 这个函数把净空解掉，让屋面**下表面**正好压在支撑顶面上。
+ *
+ * `u,v` 是支撑所在位置的归一化屋面坐标（`支撑半宽 / 屋面半宽`）。
+ * 支撑是一圈柱子或一圈额枋，屋面对称，四个角上抬的量一样，取哪个角都一样。
+ */
+function roofCyToSeatOn(
+  h: number,
+  lift: number,
+  thickness: number,
+  u: number,
+  v: number,
+  seatY: number,
+): number {
+  const t = Math.max(Math.abs(u), Math.abs(v));
+  const clearance = roofRise(h, lift, t, roofCornerWeight(u, v)) - roofShellThickness(thickness, t);
+  return seatY - clearance;
+}
+
 // ---------------------------------------------------------------- 网格构建
 /**
  * 非索引、平面着色的网格构建器。
@@ -103,6 +200,9 @@ export class MeshBuilder {
   private pos: number[] = [];
   private nrm: number[] = [];
   private col: number[] = [];
+
+  /** 每次 `upturnedRoof` 的解析记录。判据靠它算屋面底高度，见 `RoofPart` */
+  readonly roofs: RoofPart[] = [];
 
   /**
    * 假环境光遮蔽：离地越近越暗。
@@ -291,6 +391,7 @@ export class MeshBuilder {
   ) {
     const thickness = opts?.thickness ?? 0.26;
     const soffit = opts?.soffit ?? C.soffit;
+    const triFrom = this.triangleCount;
 
     const px = (i: number) => cx + ((i / seg) * 2 - 1) * hw;
     const pz = (j: number) => cz + ((j / seg) * 2 - 1) * hd;
@@ -300,14 +401,12 @@ export class MeshBuilder {
       const u = (i / seg) * 2 - 1;
       const v = (j / seg) * 2 - 1;
       const t = Math.max(Math.abs(u), Math.abs(v));
-      const corner = ss(0.55, 1, Math.abs(u)) * ss(0.55, 1, Math.abs(v));
-      const eave = ss(0.5, 1, t);
-      return cy + h * Math.pow(1 - t, 1.7) + lift * eave * eave * corner;
+      return cy + roofRise(h, lift, t, roofCornerWeight(u, v));
     };
     /** 底面跟着顶面走，檐口处更厚（那圈要当封檐板看） */
     const yBot = (i: number, j: number) => {
       const t = Math.max(Math.abs((i / seg) * 2 - 1), Math.abs((j / seg) * 2 - 1));
-      return yTop(i, j) - thickness * (0.4 + 0.6 * t);
+      return yTop(i, j) - roofShellThickness(thickness, t);
     };
     /** 封边一段。`dir` 是这条边朝外的水平方向 */
     const rim = (i0: number, j0: number, i1: number, j1: number, dirX: number, dirZ: number) => {
@@ -353,6 +452,12 @@ export class MeshBuilder {
       rim(k, seg, k + 1, seg, 0, 1);
       rim(0, k, 0, k + 1, -1, 0);
     }
+
+    this.roofs.push({
+      span: makeRoofSpan(cx, cy, cz, hw, hd, h, lift, thickness),
+      triFrom,
+      triTo: this.triangleCount,
+    });
   }
 
   build() {
@@ -374,9 +479,20 @@ function ss(a: number, b: number, x: number): number {
 }
 
 // ---------------------------------------------------------------- 常用构件
-/** 一圈木柱。`nx × nz` 根，方形布置在 ±hx / ±hz 上 */
+/**
+ * 一圈木柱。`nx × nz` 根，方形布置在 `(cx,cz)` ± hx / ±hz 上。
+ *
+ * **`cx`/`cz` 是必须的，不是可选的。**
+ * 上一版这个 helper 没有水平中心，七座建筑里五座碰巧都在原点于是看不出来，
+ * 而岭台与神苑的小龛是偏置的（`zc=3.4` / `nicheZ=3.3`）——
+ * 于是柱子**留在原点**，屋面和碑却建在 3.3m 外：屋顶凭空多出来一个，
+ * 下面什么都没有。岭台那一眼就能看出来的"顶浮在空中"就是这个。
+ * 默认值给 0 反而会把这个坑重新埋回去，所以这里没有默认值。
+ */
 function posts(
   mb: MeshBuilder,
+  cx: number,
+  cz: number,
   y0: number,
   h: number,
   hx: number,
@@ -387,9 +503,9 @@ function posts(
   color: readonly number[],
 ) {
   for (let i = 0; i < nx; i++) {
-    const x = nx === 1 ? 0 : -hx + (i / (nx - 1)) * hx * 2;
+    const x = cx + (nx === 1 ? 0 : -hx + (i / (nx - 1)) * hx * 2);
     for (let j = 0; j < nz; j++) {
-      const z = nz === 1 ? 0 : -hz + (j / (nz - 1)) * hz * 2;
+      const z = cz + (nz === 1 ? 0 : -hz + (j / (nz - 1)) * hz * 2);
       mb.box([x, y0 + h / 2, z], [r * 2, h, r * 2], color);
     }
   }
@@ -493,7 +609,7 @@ function buildInn(mb: MeshBuilder, seg: number) {
   const f1y = plinthH;
   const f1h = 3.4;
   mb.boxOnGround(0, 0, f1y, 10.0, f1h, 7.0, C.plaster);
-  posts(mb, f1y, f1h, 4.9, 3.4, 4, 3, 0.17, C.wood);
+  posts(mb, 0, 0, f1y, f1h, 4.9, 3.4, 4, 3, 0.17, C.wood);
   // 门与窗：比墙暗一档的内凹板。零贴图下"开口"只能靠明暗做
   mb.box([0, f1y + 1.15, -3.52], [1.9, 2.3, 0.1], C.woodDark);
   for (const sx of [-3.1, 3.1]) {
@@ -505,7 +621,7 @@ function buildInn(mb: MeshBuilder, seg: number) {
   const f2y = f1y + f1h + 0.26;
   const f2h = 2.9;
   mb.boxOnGround(0, 0, f2y, 11.6, f2h, 8.0, C.plaster);
-  posts(mb, f2y, f2h, 5.7, 3.9, 5, 3, 0.17, C.wood);
+  posts(mb, 0, 0, f2y, f2h, 5.7, 3.9, 5, 3, 0.17, C.wood);
   railing(mb, f2y, 5.8, 4.0, 0.78, 1.5, C.wood);
   for (const sx of [-3.6, 0, 3.6]) {
     mb.box([sx, f2y + 1.7, -4.02], [1.5, 1.2, 0.1], C.woodDark);
@@ -529,7 +645,7 @@ function buildTeahut(mb: MeshBuilder, seg: number) {
   steps(mb, -3.5, 2.6, 2, 0.22, 0.5, C.stone);
   const postH = 5.2;
   const y0 = 0.45;
-  posts(mb, y0, postH, 3.5, 2.6, 2, 2, 0.19, C.wood);
+  posts(mb, 0, 0, y0, postH, 3.5, 2.6, 2, 2, 0.19, C.wood);
   // 座凳：三面围合，正面（朝路）留空——茶寮是坐下来喝东西的地方
   for (const [cx, cz, w, d] of [
     [0, 2.1, 7.0, 0.7],
@@ -559,11 +675,27 @@ function buildTerrace(mb: MeshBuilder, seg: number) {
   const zc = 3.4;
   const nicheH = 5.4;
   const ny = 0.85;
+  // 小龛的水平尺寸：柱心距柱心
+  const hx = 1.0;
+  const hz = 0.7;
+  // 屋面尺寸
+  const rw = 2.3;
+  const rd = 1.7;
+  const rh = 1.3;
+  const rlift = 0.85;
+  const rth = 0.26;
+  const postTop = ny + 0.4 + nicheH;
   mb.boxOnGround(0, zc, ny, 2.6, 0.4, 2.0, C.stoneDark);
-  posts(mb, ny + 0.4, nicheH, 1.0, 0.7, 2, 2, 0.15, C.wood);
+  // 柱子必须跟着 zc 走（见 posts 的注释）
+  posts(mb, 0, zc, ny + 0.4, nicheH, hx, hz, 2, 2, 0.15, C.wood);
   // 碑：一片立石
   mb.boxOnGround(0, zc, ny + 0.4, 0.85, 2.6, 0.28, C.stone);
-  mb.upturnedRoof(0, ny + 0.4 + nicheH, zc, 2.3, 1.7, 1.3, 0.85, seg);
+  // 屋面**坐在柱顶上**，不是浮在柱顶上方 0.32m
+  mb.upturnedRoof(
+    0,
+    roofCyToSeatOn(rh, rlift, rth, hx / rw, hz / rd, postTop),
+    zc, rw, rd, rh, rlift, seg,
+  );
 
   // 角上两块矮石，避免大面积空台读成一块灰板
   mb.box([-5.4, 1.1, -3.4], [1.3, 0.5, 1.3], C.stoneDark);
@@ -603,10 +735,16 @@ function buildShrine(mb: MeshBuilder, seg: number) {
    */
   const nicheZ = 3.3;
   const baseY = y + 0.36;  mb.boxOnGround(0, nicheZ, baseY, 2.6, 0.45, 1.9, C.stoneDark); // 台
-  posts(mb, baseY + 0.45, 2.4, 0.95, 0.6, 2, 2, 0.14, C.wood); // 四柱
+  // 柱子必须跟着 nicheZ 走（见 posts 的注释），神苑的碑龛同样偏置
+  posts(mb, 0, nicheZ, baseY + 0.45, 2.4, 0.95, 0.6, 2, 2, 0.14, C.wood); // 四柱
   mb.boxOnGround(0, nicheZ, baseY + 0.45, 1.9, 1.6, 0.24, C.stone); // 碑身
   mb.boxOnGround(0, nicheZ, baseY + 2.85, 2.2, 0.16, 1.5, C.woodDark); // 额枋
-  mb.upturnedRoof(0, baseY + 3.01, nicheZ, 1.9, 1.5, 1.15, 0.85, seg);
+  // 屋面坐在**额枋**顶面上（额枋 2.2×1.5，屋面 3.8×3.0）
+  mb.upturnedRoof(
+    0,
+    roofCyToSeatOn(1.15, 0.85, 0.26, 1.1 / 1.9, 0.75 / 1.5, baseY + 3.01),
+    nicheZ, 1.9, 1.5, 1.15, 0.85, seg,
+  );
 
   // 外圈散石：八个不等高的小方块，给圆形轮廓加一点手工感
   for (let i = 0; i < 8; i++) {
@@ -625,7 +763,7 @@ function buildPavilion(mb: MeshBuilder, seg: number) {
   for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as const) {
     mb.prism([sx * 2.6, y0 + 0.16, sz * 2.6], 0.44, 0.4, 0.32, 8, C.stoneDark);
   }
-  posts(mb, y0 + 0.32, postH, 2.6, 2.6, 2, 2, 0.17, C.wood);
+  posts(mb, 0, 0, y0 + 0.32, postH, 2.6, 2.6, 2, 2, 0.17, C.wood);
   // 美人靠：只在两个侧面，正面与背面留空
   for (const sz of [-1, 1]) {
     mb.boxOnGround(0, sz * 2.15, y0 + 0.32, 4.4, 0.42, 0.5, C.woodDark);
@@ -657,7 +795,7 @@ function buildCorridor(mb: MeshBuilder, seg: number) {
   const y0 = 0.4;
   const postH = 3.1;
   // 5 开间 = 每侧 6 根柱
-  posts(mb, y0, postH, 5.8, 1.9, 6, 2, 0.16, C.wood);
+  posts(mb, 0, 0, y0, postH, 5.8, 1.9, 6, 2, 0.16, C.wood);
   // 两侧座凳
   for (const sz of [-1.55, 1.55]) {
     mb.boxOnGround(0, sz, y0 + 0.4, 11.0, 0.4, 0.55, C.woodDark);
