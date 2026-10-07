@@ -24,13 +24,15 @@
 | `07-walkthrough.mp4` | 3:52 | 标题页 → 引导页 → 进世界 → 序章 → 第一视角 → **骑完整整一圈 1228.8m** → 4 号碎片站打卡 → 小游戏 → ESC 退出 → 跑完剩下的路回到起点 |
 | `07-walkthrough-web.mp4` | 3:52 | 同上，CRF 27 压缩版，体积约 1/4 |
 | `07-walkthrough-vo.mp4` | 3:52 | **英配解说版**：上面那条 + TTS 旁白轨（视频流零重编码） |
+| `07-walkthrough-vo-web.mp4` | 3:52 | **英配 + 烧字幕 + web 体积**，CRF 27 / faststart / 106.6 MB —— 对外发布用这条 |
 
 ### 英配解说
 
 | 文件 | 是什么 |
 |:---|:---|
-| `WALKTHROUGH-VO.en.md` | 逐句时间轴 + 画面节拍表 + 三个踩过的坑 + 验收数据 |
+| `WALKTHROUGH-VO.en.md` | 逐句时间轴 + 画面节拍表 + 四个踩过的坑 + 验收数据 |
 | `walkthrough-vo.en.srt` | **时间轴以这份为准**，42 条 cue / 425 词 |
+| `walkthrough-vo.ass` | 烧录用（PlayRes 1920×1080），由 srt2ass.py 从 srt 生成 |
 | `walkthrough-vo.wav` | 独立旁白轨，231.9s / 48kHz 立体声（重新混流或做字幕版用） |
 
 旁白用 `English_Gentle-voiced_man`，speed 0.92 / neutral。

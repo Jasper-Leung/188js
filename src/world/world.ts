@@ -24,6 +24,7 @@ import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
 import { WORLD, ECON, MINIGAMES } from '../data/raw';
 import { game, GameStateManager } from '../game/state';
+import { recheckGate } from '../game/phase';
 import { t, byLang, stationNameOf } from '../i18n';
 import { checkConsistency } from './basins';
 import { clamp } from '../core/math';
@@ -148,6 +149,15 @@ export class World {
 
   private interactCooldown = 0;
   private lastCheckInPos = new Vector3(1e9, 1e9, 1e9);
+  /**
+   * 反刷门是否已重新武装。
+   *
+   * **它由 `fixedUpdate()` 每帧用 `recheckGate()` 的返回值回写**，
+   * 所以"重新武装"是规则的推论而不是一件需要有人记得做的事。
+   * 打卡过场结束时把它按成 false，那之后骑开 `RECHECK_IN_MIN_DIST` 就自己回来。
+   * 见 `phase.ts:recheckGate` 的注释——这个布尔曾经只被写成 false 再没被写过，
+   * 于是第二、第三次到访永久按不动空格。
+   */
   private recheckArmed = true;
   private passInside = new Set<number>();
   private steleInside = new Set<number>();
@@ -270,6 +280,17 @@ export class World {
     this.time += dt;
     this.lastFixedDt = dt;
     this.interactCooldown = Math.max(0, this.interactCooldown - dt);
+
+    // **每帧重新武装那道门。**
+    //
+    // 原来 `recheckArmed` 只在打卡过场结束时被写成 `false`，全项目再没有第二处赋值，
+    // 于是它不是"骑开就重新武装"的闩锁而是一次性熔断：从此每一次打卡都退化成
+    // 「必须离上一次的**打卡位置** 8m」，而玩家每一圈都在同一个位置停——
+    // 第二、第三次到访于是永久按不动空格（而顶栏正写着「再访 · 还差 2 次」）。
+    //
+    // 现在重新武装是 `recheckGate()` 的推论而不是一件需要有人记得做的事：
+    // 骑开了就自己为真，并被这里回写；没骑开它就还是假，反刷门继续生效。
+    this.recheckArmed = recheckGate(this.recheckArmed, this.distToLastCheckIn(), WORLD.RECHECK_IN_MIN_DIST);
 
     // **只认 canRide 一个来源。** 曾经这里自己也判一遍
     // `narrativeBusy || checkInStage !== 'none'`，而 canRide 那边又判一遍——
@@ -503,32 +524,30 @@ export class World {
     return { titleKey: def.titleKey, textKey: def.textKey, index: i };
   }
 
+  /** 离上一次打卡的位置有多远。反刷门唯一的度量，只此一处。 */
+  private distToLastCheckIn(): number {
+    return Math.hypot(
+      this.ride.pos.x - this.lastCheckInPos.x,
+      this.ride.pos.z - this.lastCheckInPos.z,
+    );
+  }
+
   /** 玩家在打卡范围内吗？（够得着 + 不是冷却中 + 骑开了足够远） */
   canCheckIn(): { ok: boolean; reason: '' | 'cooldown' | 'recheck' | 'busy' } {
     if (this.checkInStage !== 'none') return { ok: false, reason: 'busy' };
+    // 打卡完必须骑开 8m 才能再来一次，否则站在圈里连按就能连刷。
+    // 判定问 `recheckGate()`，和 `fixedUpdate()` 里重新武装用的是同一个函数。
+    if (!recheckGate(this.recheckArmed, this.distToLastCheckIn(), WORLD.RECHECK_IN_MIN_DIST)) {
+      return { ok: false, reason: 'recheck' };
+    }
     // 回家是独立的一条路：0 号驿站没有碎片，`needsVisit` 恒假，
     // 所以必须在"还欠到访吗"这一关**之前**放行，否则回家永远触发不了。
     if (this.nearby.isHome) {
       if (this.interactCooldown > 0) return { ok: false, reason: 'cooldown' };
-      if (!this.recheckArmed) {
-        const d = Math.hypot(
-          this.ride.pos.x - this.lastCheckInPos.x,
-          this.ride.pos.z - this.lastCheckInPos.z,
-        );
-        if (d < WORLD.RECHECK_IN_MIN_DIST) return { ok: false, reason: 'recheck' };
-      }
       return { ok: true, reason: '' };
     }
     if (!this.nearby.needsVisit) return { ok: false, reason: 'busy' };
     if (this.interactCooldown > 0) return { ok: false, reason: 'cooldown' };
-    // 打卡完必须骑开 8m 才能再来一次，否则站在圈里连按就能连刷
-    if (!this.recheckArmed) {
-      const d = Math.hypot(
-        this.ride.pos.x - this.lastCheckInPos.x,
-        this.ride.pos.z - this.lastCheckInPos.z,
-      );
-      if (d < WORLD.RECHECK_IN_MIN_DIST) return { ok: false, reason: 'recheck' };
-    }
     if (this.nearby.distance > WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH) {
       return { ok: false, reason: 'busy' };
     }

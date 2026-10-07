@@ -159,6 +159,49 @@ export function settleMs(o: SettleOutcome): number {
  */
 export type InteractKind = 'shop' | 'home' | 'checkin' | 'none';
 
+/**
+ * 「打卡完必须骑开」这道门。
+ *
+ * ## 它挡的是什么
+ *
+ * 打卡是**用同一个键**（空格）触发的，而触发之后玩家往往还站在圈里。
+ * 没有这道门，站在圈里连按就能把一座驿站的十次到访在两秒内刷完——
+ * 于是「三次到访」这件事和「旅币 / 碎片 / 日期」全部一起失去意义。
+ *
+ * 所以：**打卡完必须离上一次打卡的位置 ≥ `minDist` 米，才能再打一次。**
+ *
+ * ## 为什么它是一个纯函数（这一条是修出来的）
+ *
+ * 原来这道门住在 `World.canCheckIn()` 里，配一个叫 `recheckArmed` 的布尔。
+ * 而那个布尔**在全项目里只被写成 `false`、从来没有被写回 `true`**——
+ * 它不是"骑开了就重新武装"的闩锁，而是一个一次性熔断：
+ *
+ * ```
+ * 打卡 → recheckArmed = false（且此后再无赋值）
+ *      → 之后每一次打卡都退化成「必须离上一次的**打卡位置** 8m」
+ * ```
+ *
+ * 症状：**第二、第三次到访按空格毫无反应。**
+ * 而这两次不是可选内容——`MAX_VISITS_PER_STATION = 3` 是完满评级的条件，
+ * 顶栏和脚下圈还会主动写「再访 · 还差 2 次」叫玩家回来。
+ *
+ * 为什么玩家一定会撞上：每一圈都在同一条路上经过同一座驿站，
+ * 而圈外能停车的位置就那么几个——**他第二次停的地方和第一次几乎重合**，
+ * 于是那个"上一次的打卡位置"离他只有一两米，门一直关着，
+ * 弹出来的只有一句 1.4 秒的 `blocked_recheck` toast。
+ *
+ * 修法不是加一句 `recheckArmed = true`（那要靠"谁负责重新武装"这个
+ * 不存在的人来维持），而是让这个函数**自己幂等**：
+ * 距离够了就是 `true`，而宿主每帧拿它的返回值回写那个布尔。
+ * 于是「重新武装」从一个需要有人记得做的事情，变成这条规则的推论。
+ *
+ * `armed` 是**已重新武装**的状态，`dist` 是到上一次打卡位置的距离。
+ * 两个入参缺一不可：站着不动（`dist` 小）要挡住，骑开了（`armed` 已真）要放行。
+ */
+export function recheckGate(armed: boolean, dist: number, minDist: number): boolean {
+  return armed || dist >= minDist;
+}
+
 export interface InteractInput {
   /** `world.nearby.shopName`：空串 = 面前这座驿站没有铺子 */
   shopName: string;

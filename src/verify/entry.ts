@@ -38,7 +38,7 @@ import { Terrain } from '../world/terrain';
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
 import { Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs, unwrapArc } from '../game/phase';
+import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs, unwrapArc, recheckGate } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
@@ -8272,6 +8272,162 @@ check('verify_ui_keys', () => {
     probs.length
       ? probs.join('；')
       : `空格归属随相位切换 · ${late.length} 座站点的对白长于过场（宿主会等） · 结算页有可点的「回到世界」`,
+    asserts,
+  );
+});
+
+/**
+ * **第二次、第三次到访必须还能打卡，而且脚下的圈仍然说「按空格」。**
+ *
+ * ## 它在还原什么
+ *
+ * 玩家报的症状：**「靠近那五座有小游戏的驿站，按空格没反应」**。
+ *
+ * 第一趟是好的——所以这不是"输入系统坏了"，而是一条只在**再访**时才闭合的路。
+ *
+ * ## 真正的成因：反刷门的闩锁从来没有被重新武装
+ *
+ * `World.canCheckIn()` 里有一道反刷门（"打卡完必须骑开 8m"），
+ * 配一个叫 `recheckArmed` 的布尔。而那个布尔**在全项目里只被写成 `false`**：
+ *
+ * ```
+ * advanceCheckIn(): this.recheckArmed = false;      ← 唯一一处赋值
+ * ```
+ *
+ * 于是它不是"骑开就重新武装"的闩锁，而是一次性熔断。
+ * 熔断之后，每次打卡都要满足「离**上一次打卡的位置** ≥ 8m」，
+ * 而玩家每一圈都在同一条路上、同一个位置停——**第二圈按空格必然被拒**，
+ * 弹出来的只有一句 1.4 秒的 toast（`blocked_recheck`）。
+ *
+ * 为什么这不是"少一个可选玩法"：`MAX_VISITS_PER_STATION = 3` 是完满评级的条件，
+ * 顶栏和小地图会主动写「再访 · 还差 2 次」把玩家叫回来。
+ * **界面在叫他回来，回来之后空格却是死的。**
+ *
+ * ## 它凭什么会红
+ *
+ * | 判据 | 怎么弄坏它 |
+ * |---|---|
+ * | `recheckGate` 骑开后放行 | 把它改回 `armed && ...`，或去掉距离那一半 |
+ * | `recheckGate` 站着时挡住 | 去掉 `armed` 那一半——于是站在圈里连按能刷满十次到访 |
+ * | `fixedUpdate` 每帧回写它 | 删掉那行回写——门退回一次性熔断，而这一条立刻红 |
+ * | 15 次到访全部放行 | `MAX_VISITS_PER_STATION` 或 `FRAGMENT_SLOT_STATION_IDX` 改动 |
+ *
+ * 最后两条是**结构断言**：纯函数是对的、但没人回写它，缺陷照样回来——
+ * 这正是原来那个 bug 的形状，所以这里必须同时钉住函数**和接线**。
+ */
+check('verify_revisit_gate', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const MIN = WORLD.RECHECK_IN_MIN_DIST;
+
+  // ---- 1. 反刷门本身：站着挡住，骑开放行 ----
+  asserts++;
+  if (recheckGate(false, 0, MIN)) {
+    probs.push(`打卡完站在原地（离上一次打卡 ${0}m）门却是开的——站在圈里连按就能刷满十次到访`);
+  }
+  asserts++;
+  if (recheckGate(false, MIN - 0.01, MIN)) {
+    probs.push(`离上一次打卡 ${(MIN - 0.01).toFixed(2)}m 就放行——反刷门形同虚设`);
+  }
+  asserts++;
+  if (!recheckGate(false, MIN, MIN)) {
+    probs.push(`骑到恰好 ${MIN}m 仍然被挡——门槛取的是严格大于`);
+  }
+  asserts++;
+  if (!recheckGate(false, MIN + 3, MIN)) {
+    probs.push('骑开了反刷门还是关的——第二、第三次到访会永久按不动空格');
+  }
+  // 重新武装之后必须**一直**开着，哪怕玩家又走回原点。
+  // 这一条是"重新武装是幂等的"这句话本身：不成立的话，
+  // 玩家绕一圈回来位置和上次重合，门会自己关回去。
+  asserts++;
+  if (!recheckGate(recheckGate(false, MIN + 3, MIN), 0, MIN)) {
+    probs.push('重新武装之后走回原点，门又关上了——重新武装不是幂等的');
+  }
+
+  // ---- 2. 模拟一整趟：五座驿站各去三次 ----
+  //
+  // 玩家模型刻意选**最不利**的那个：每一圈都在同一个位置停，
+  // 于是第 N 次到访时"离上一次打卡位置"的距离永远是 0。
+  // 这正是现实里发生的事，也是原来那条缺陷的触发条件。
+  const slots = ROAD.FRAGMENT_SLOT_STATION_IDX;
+  asserts++;
+  if (slots.length !== 5) {
+    probs.push(`碎片驿站是 ${slots.length} 座而不是 5 座——「五件乐事」的判据要跟着改`);
+  }
+  let armed = true;
+  let checkIns = 0;
+  for (let lap = 0; lap < 3; lap++) {
+    for (const _ of slots) {
+      // 骑到驿站：上一圈停的位置和这一圈重合，距离 0。
+      // 但玩家在**两站之间**骑了半圈，那半圈足够把门重新武装。
+      armed = recheckGate(armed, 120, MIN);   // 途中经过路面
+      armed = recheckGate(armed, 0, MIN);     // 抵达：停在上次那个点
+      const open = recheckGate(armed, 0, MIN);
+      asserts++;
+      if (!open) {
+        probs.push(
+          `第 ${lap + 1} 次到访按不动空格——反刷门没重新武装，` +
+            `而这一趟的打卡数直接决定完满评级能不能拿到`,
+        );
+        lap = 3;
+        break;
+      }
+      armed = false;                          // 打卡过场结束时熔断
+      checkIns++;
+    }
+  }
+  asserts++;
+  if (checkIns !== 15) {
+    probs.push(`一整趟只打成了 ${checkIns} 次卡，而完满评级要求 ${slots.length * ECON.MAX_VISITS_PER_STATION} 次`);
+  }
+
+  // ---- 3. 接线：`recheckArmed` 必须每帧被回写 ----
+  //
+  // 纯函数是对的、但没人回写它，缺陷照样回来——原来那个 bug 就是这个形状。
+  // `World` 要 WebGL，无头环境起不来，所以读源码钉住那一次赋值。
+  // 读的是 `fixedUpdate()`，因为重新武装必须**每帧**发生：
+  // 玩家停下来不再移动时，距离不再变，也就没有"下一帧会自己好"这回事。
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'world', 'world.ts'), 'utf8');
+    const fnStart = src.indexOf('fixedUpdate(dt: number, input: RideInput, canRide: boolean)');
+    const fnEnd = src.indexOf('\n  private ', fnStart + 1);
+    asserts++;
+    if (fnStart < 0 || fnEnd < 0) {
+      probs.push('world.ts 里找不到 fixedUpdate 的函数边界 —— 判据要跟着改');
+    } else {
+      const body = src.slice(fnStart, fnEnd);
+      const write = /this\.recheckArmed\s*=\s*recheckGate\(/.test(body);
+      asserts++;
+      if (!write) {
+        probs.push(
+          '`fixedUpdate()` 里没有用 `recheckGate()` 的返回值回写 `recheckArmed`——' +
+            '反刷门退回一次性熔断，第二、第三次到访按空格没反应',
+        );
+      }
+    }
+  }
+
+  // ---- 4. 熔断那一处必须仍然在 ----
+  //
+  // 修好"骑不开就永远进不去"的同时，不能顺手把反刷门整个删掉：
+  // 那道门挡的是"站在圈里连按把十次到访刷完"。
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'world', 'world.ts'), 'utf8');
+    asserts++;
+    if (!/this\.recheckArmed = false;/.test(src)) {
+      probs.push('打卡过场结束时不再熔断——站在圈里连按空格就能把一座驿站刷满十次到访');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `五座驿站各 ${ECON.MAX_VISITS_PER_STATION} 次到访全部放行（共 ${checkIns} 次） · ` +
+        `站着连按仍被反刷门挡住（${MIN}m） · 重新武装由 fixedUpdate 每帧回写`,
     asserts,
   );
 });
