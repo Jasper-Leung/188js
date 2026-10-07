@@ -28,7 +28,7 @@ import { RELICS, Relics, relicSite, distToCenterline, RELIC_REACH, RELIC_FROM_RO
 import { BambooBeats, BEAT_ARM_RADIUS, BEAT_CUE_RADIUS, BEAT_WINDOW, BEAT_GOAL } from '../game/beat';
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
-import { groundOffsetFor, bottomOf, Vegetation } from '../world/vegetation';
+import { groundOffsetFor, bottomOf, Vegetation, chunkVisibility } from '../world/vegetation';
 import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone, Scene } from 'three';
 import { Sky } from '../world/sky';
 import { Stations } from '../world/stations';
@@ -2571,6 +2571,160 @@ check('verify_veg_density', () => {
   const summary = counts
     .map((c) => `档${c.tier} ${c.tree}株/起点${c.nearTree}/变体${c.variants}/最近${c.minRoad.toFixed(1)}m`)
     .join(' · ');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+});
+
+// ---------------------------------------------------------------- 植被剔除
+/**
+ * 剔除必须按**几何距离**判，不能拿弧长差当距离。
+ *
+ * ## 原来错在哪
+ *
+ * `Vegetation.update` 原来是 `|块号 − 玩家块号| × CHUNK_LEN <= 半径`。
+ * 这只在"路是一条不自交的曲线"时成立，而这个世界是 **8 字**：
+ * 中心线被自己穿过 4 次，两条支路在交叉口**物理重合**
+ * （实测中心线 #0 与 #480 相距 0.0m），弧长上却隔着整整半个环。
+ *
+ * 玩家实机看到的症状是：**在十字路口原地转圈，树木（以及路边的建筑）
+ * 不断隐藏又显示。** 两条原因都在下面各占一条断言：
+ *
+ *   1. 站在路口时，`cur` 落在其中一条支路上，于是**另一条支路上贴脸的树
+ *      被判成 612m 外**而剔掉 —— 半径内出现一个"树洞"。
+ *   2. 原地转圈时车身会漂，`nearestChunkT` 在两条支路之间反复跳，
+ *      `cur` 在 #0 与 #51 之间来回翻，**整片树线一帧一变**。
+ *
+ * 两条都是"同一条判据在自交环线上失效"的症状，所以守它要守**两遍**：
+ * 只守洞，守不住闪；只守闪，守不住停在那儿就不动的洞。
+ *
+ * `chunkVisibility` 是从 `update()` 里抽出来的纯函数（判定本身不依赖
+ * GLB，无头环境直接能调），回归守的就是它。
+ */
+check('verify_veg_cull', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  const terrain = new Terrain();
+  type P = { x: number; z: number };
+  type C = { index: number; cx: number; cz: number; treeOuter: number; bushOuter: number; tree: P[]; bush: P[] };
+  const veg = new Vegetation(PRESETS[2], terrain);
+  const chunks = (veg as unknown as { chunks: C[] }).chunks;
+
+  // 找路口：中心线上每个点，看它离"线上其它点"最近有多近——
+  // 两条支路互相靠近的地方，那个最近距离就小（自交处为 0）。
+  const crossings: { i: number; d: number; x: number; z: number }[] = [];
+  for (let i = 0; i < CENTERLINE.length; i += 4) {
+    const p = CENTERLINE[i];
+    let best = Infinity;
+    for (let j = 0; j < CENTERLINE.length; j += 4) {
+      if (Math.abs(i - j) < 60) continue;
+      best = Math.min(best, Math.hypot(p.x - CENTERLINE[j].x, p.z - CENTERLINE[j].z));
+    }
+    if (best < 30) crossings.push({ i, d: best, x: p.x, z: p.z });
+  }
+
+  // 0. 8 字必须真的自交，否则下面两条断言守的是一个不存在的场景。
+  asserts++;
+  if (!crossings.length) probs.push('中心线上找不到自交点，判据的前提不成立');
+
+  const R = PRESETS[2].treeRadius;
+  const B = PRESETS[2].bushRadius;
+
+  // 1. **路口不许出现"树洞"**：半径内的每一株都必须可见。
+  //
+  //    原实现在路口会把另一条支路上 6~49m 的块整片剔掉，
+  //    所以这条在改动前必然红（实测最坏一处 8 块在 60m 内被剔）。
+  asserts++;
+  {
+    let worstTree = 0;
+    let worstBush = 0;
+    let at = '';
+    for (const c of crossings) {
+      const vis = chunkVisibility(chunks, c.x, c.z, R, B);
+      for (let k = 0; k < chunks.length; k++) {
+        if (vis.tree[k]) continue;
+        for (const p of chunks[k].tree) {
+          const d = Math.hypot(p.x - c.x, p.z - c.z);
+          if (d <= R && d > worstTree) { worstTree = d; at = `树@${d.toFixed(0)}m`; }
+        }
+        if (vis.bush[k]) continue;
+        for (const p of chunks[k].bush) {
+          const d = Math.hypot(p.x - c.x, p.z - c.z);
+          if (d <= B && d > worstBush) worstBush = d;
+        }
+      }
+    }
+    if (worstTree > 0) probs.push(`路口有 ${at} 的树被剔掉（树半径 ${R}m）`);
+    if (worstBush > 0) probs.push(`路口有 ${worstBush.toFixed(0)}m 的灌木被剔掉（灌木半径 ${B}m）`);
+  }
+
+  // 1b. **全线**同一判据：不许在任何地方剔掉半径内的树。
+  //     路口只是最容易犯的地方，但整条线上每一处都得过。
+  asserts++;
+  {
+    let worst = 0;
+    let worstAt = '';
+    for (let f = 0; f < 400; f++) {
+      const p = CENTERLINE[Math.round((f / 400) * (CENTERLINE.length - 1))];
+      const vis = chunkVisibility(chunks, p.x, p.z, R, B);
+      for (let k = 0; k < chunks.length; k++) {
+        if (vis.tree[k]) continue;
+        for (const q of chunks[k].tree) {
+          const d = Math.hypot(q.x - p.x, q.z - p.z);
+          if (d <= R && d > worst) { worst = d; worstAt = `#${f}`; }
+        }
+      }
+    }
+    if (worst > 0) probs.push(`全线采样 400 点，${worstAt} 处有 ${worst.toFixed(0)}m 的树被剔掉`);
+  }
+
+  // 2. **原地转圈不得让可见集跳动**。
+  //
+  //    这是用户报的那条：路口站定后小幅漂移（转向时的横向位移量级），
+  //    可见块集合必须完全不变。原来会在两条支路之间翻，整片树线一帧一变。
+  asserts++;
+  {
+    let flips = 0;
+    let lost = 0;
+    for (const c of crossings) {
+      const ref = chunkVisibility(chunks, c.x, c.z, R, B);
+      // 1.5m 圈上取 24 个采样点 = 转向时车身的横向漂移量级
+      for (let k = 0; k < 24; k++) {
+        const a = (k / 24) * Math.PI * 2;
+        const v = chunkVisibility(chunks, c.x + Math.cos(a) * 1.5, c.z + Math.sin(a) * 1.5, R, B);
+        for (let j = 0; j < chunks.length; j++) {
+          if (ref.tree[j] && !v.tree[j]) lost++;
+          if (ref.tree[j] !== v.tree[j]) flips++;
+        }
+      }
+    }
+    if (flips > 0) probs.push(`路口 ±1.5m 漂移让可见集翻转了 ${flips} 次（转圈时树线会闪）`);
+    if (lost > 0) probs.push(`路口 ±1.5m 漂移让 ${lost} 块原本可见的树消失`);
+  }
+
+  // 3. **判定必须随位置连续**：沿中心线每米走一步，
+  //     新点亮的树数不许超过一小步能解释的量（一步只可能多出相邻块）。
+  //     这条守的是"半径判定本身没写反"，与路口无关。
+  asserts++;
+  {
+    let worstStep = 0;
+    let worstAt = '';
+    for (let f = 0; f < 400; f++) {
+      const p = CENTERLINE[Math.round((f / 400) * (CENTERLINE.length - 1))];
+      const q = CENTERLINE[Math.round((f / 400) * (CENTERLINE.length - 1)) + 1] ?? p;
+      const a = chunkVisibility(chunks, p.x, p.z, R, B);
+      const b = chunkVisibility(chunks, q.x, q.z, R, B);
+      let added = 0;
+      for (let j = 0; j < chunks.length; j++) if (!a.tree[j] && b.tree[j]) added++;
+      // 中心线相邻两点约 1.28m（1228.8m / 961 点），
+      // 一步能跨进的块数上界 = 步长/CHUNK_LEN + 1
+      const cap = Math.ceil(Math.hypot(q.x - p.x, q.z - p.z) / 12) + 1;
+      if (added > worstStep) { worstStep = added; worstAt = `#${f}`; }
+      if (added > cap) probs.push(`${worstAt} 一步点亮了 ${added} 块，超过上限 ${cap}`);
+    }
+    void worstStep;
+  }
+
+  const summary = `路口 ${crossings.length} 处，半径内无死树，±1.5m 漂移可见集不变`;
   return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
 });
 

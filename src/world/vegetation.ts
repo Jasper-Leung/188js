@@ -34,7 +34,6 @@ import {
 } from 'three';
 import { CENTERLINE, TOTAL_ARCLENGTH, distToCenterline, type Vec3Flat } from '../data/route';
 import { hashGrid } from '../core/noise';
-import { clamp } from '../core/math';
 import type { Terrain } from './terrain';
 import type { QualityPreset } from '../core/settings';
 
@@ -196,9 +195,91 @@ interface Chunk {
   /** 该块的中心（用于粗判距离） */
   cx: number;
   cz: number;
+  /**
+   * 这一块的**内容**离块心最远多远（米），树/灌木各一份。
+   *
+   * 剔除要判"内容离玩家多远"，而不是"块心离玩家多远"——
+   * 一块 12m 加上 16m 的横向偏移，边缘的树能离块心 26m。
+   * 少了这一项，块心刚出半径时里面最近的那株树其实还在半径里，
+   * 于是它在玩家眼前凭空消失。见 `measureOuters`。
+   */
+  treeOuter: number;
+  bushOuter: number;
   tree: Placement[];
   bush: Placement[];
   grass: Placement[];
+}
+
+/** 剔除判定需要的最小块信息。导出来是为了回归能在无头环境里直接调。 */
+export interface CullChunk {
+  cx: number;
+  cz: number;
+  treeOuter: number;
+  bushOuter: number;
+}
+
+/**
+ * 剔除余量（米）。
+ *
+ * 判的是**树干落点**到玩家的距离，而树冠比树干宽：拆分后单棵最宽 0.261
+ * 模型单位，缩放上限 31 → 冠幅半径约 8m。所以树心刚进半径时，
+ * 树冠还有几米在外面。6m 盖住冠幅与株距抖动。
+ *
+ * **它不是防抖。** 防抖在 `update()` 的重算门槛上（`RECULL_MOVE`）：
+ * 块只在玩家真的走过 `RECULL_MOVE` 米之后才换一次可见性，
+ * 于是边界上不会一帧一变。
+ */
+const CULL_MARGIN = 6;
+
+/**
+ * 重算门槛：玩家走过这么多米才换一次可见集（米）。
+ *
+ * 原来是"跨过块边界"（12m）。换成几何距离之后**不能沿用块号当门槛**，
+ * 因为块号是"最近中心线点"推出来的，玩家横着开离路时它几乎不动，
+ * 而画面里的树早该换了。4m 是取舍：一轮 103 块的判定不到 0.05ms，
+ * 换来的重算粒度比原来的 12m 细三倍，边界上树的弹出位置也更贴近半径。
+ */
+const RECULL_MOVE = 4;
+/** 心神系数变化超过这个数才重算（0.02 ≈ 半径变 4m 上下）。 */
+const RECULL_VIS = 0.02;
+
+/**
+ * 哪些块该显示。**纯函数**，方便无头回归直接调。
+ *
+ * ## 为什么必须按几何距离判
+ *
+ * 原实现是 `|块号 − 玩家块号| × CHUNK_LEN <= 半径`，
+ * 也就是**拿弧长差当距离**。这只在"路是一条不自交的曲线"时成立。
+ *
+ * 而这个世界是 **8 字**：中心线被自己穿过 4 次，两条支路在交叉口
+ * **物理上重合**（实测中心线 #0 与 #480 相距 0.0m），
+ * 弧长上却隔着整整半个环 —— 块号差 51，换算成 612m。
+ *
+ * 后果是：站在十字路口时，玩家**贴脸**的那一片树落在"612m 之外"的块上，
+ * 于是被剔掉；而原地转圈时车身一漂，`nearestChunkT` 在两条支路之间
+ * 反复跳，`cur` 在 #0 与 #51 之间来回翻，**整片树线一帧一帧地换**——
+ * 症状就是"转圈时树和建筑在不断隐藏显示"。
+ *
+ * 几何距离没有这个问题：重合的两条支路本来就是同一个点。
+ */
+export function chunkVisibility(
+  chunks: readonly CullChunk[],
+  px: number,
+  pz: number,
+  treeR: number,
+  bushR: number,
+): { tree: boolean[]; bush: boolean[] } {
+  const tree = new Array<boolean>(chunks.length);
+  const bush = new Array<boolean>(chunks.length);
+  const treeLimit = treeR + CULL_MARGIN;
+  const bushLimit = bushR + CULL_MARGIN;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    const d = Math.hypot(c.cx - px, c.cz - pz);
+    tree[i] = d - c.treeOuter <= treeLimit;
+    bush[i] = d - c.bushOuter <= bushLimit;
+  }
+  return { tree, bush };
 }
 
 export class Vegetation {
@@ -207,7 +288,15 @@ export class Vegetation {
   readonly groupBushes = new Group();
   private chunks: Chunk[] = [];
   private bushMesh: InstancedMesh | null = null;
-  private lastChunkIndex = -1;
+  /**
+   * 上一次重算可见集时的玩家位置与心神系数。`null` = 还没算过。
+   *
+   * **原来是"上一次算的是哪一块"。** 那是弧长口径的配套写法，
+   * 换成几何距离之后它就多余了：块号是"最近中心线点"推出来的，
+   * 玩家横着开离路时它几乎不动，而画面里的东西早该换了。
+   * 见 `RECULL_MOVE`。
+   */
+  private lastAt: { x: number; z: number; vis: number } | null = null;
   private preset: QualityPreset;
 
   /**
@@ -281,6 +370,8 @@ export class Vegetation {
         t1: ci === CHUNK_COUNT - 1 ? 1 : ((ci + 1) * CHUNK_LEN) / TOTAL_ARCLENGTH,
         cx: 0,
         cz: 0,
+        treeOuter: 0,
+        bushOuter: 0,
         tree: [],
         bush: [],
         grass: [],
@@ -398,6 +489,29 @@ export class Vegetation {
     // 同样的信息量，**0 个额外三角形**、0 次 alphaTest、0 个 draw call，
     // 而且不会在近处变成纸片——那才是零贴图路线上该有的做法。
     void 0;
+
+    this.measureOuters();
+  }
+
+  /**
+   * 量出每块的"内容半径"（见 `Chunk.treeOuter`）。
+   *
+   * 必须在所有落点都进桶之后跑——落点是边摆边分桶的，
+   * 边摆边量只会量到当时已经摆进去的那几株。
+   *
+   * 12m 的块 + 16m 的横向偏移，最边缘那株树能离块心 26m；
+   * 而剔除判的是"内容离玩家多远"，所以这个 26m 得减掉，
+   * 否则树会在自己还在半径里的时候被剔掉。
+   */
+  private measureOuters() {
+    for (const c of this.chunks) {
+      let t = 0;
+      let b = 0;
+      for (const p of c.tree) t = Math.max(t, Math.hypot(p.x - c.cx, p.z - c.cz));
+      for (const p of c.bush) b = Math.max(b, Math.hypot(p.x - c.cx, p.z - c.cz));
+      c.treeOuter = t;
+      c.bushOuter = b;
+    }
   }
 
   /**
@@ -433,10 +547,10 @@ export class Vegetation {
       }
       this.treeOfChunk[c.index] = made;
     }
-    // **必须重算一次可见集**：`update()` 只在玩家跨块时才跑，
+    // **必须重算一次可见集**：`update()` 只在玩家真的走过一段才跑，
     // 而模型是异步到达的 —— 到达时那些网格的 `visible` 是默认的 true，
     // 于是全场 103 块的树会在同一帧全亮出来（一次几十万三角面）。
-    this.lastChunkIndex = -1;
+    this.lastAt = null;
   }
 
   /** 装上灌木的模型网格。 */
@@ -453,7 +567,7 @@ export class Vegetation {
       this.bushOfChunk[c.index] = m;
       this.groupBushes.add(m);
     }
-    this.lastChunkIndex = -1;
+    this.lastAt = null;
   }
 
   private makeInstanced(
@@ -496,16 +610,23 @@ export class Vegetation {
   /**
    * 每帧更新可见块。
    *
-   * 只有当玩家跨过块边界时才重算可见集——每帧重算是纯粹的浪费。
+   * ## 判的是几何距离（`chunkVisibility`），不是弧长差
+   *
+   * 原实现是 `|块号 − 玩家块号| × CHUNK_LEN`，也就是拿弧长差当距离。
+   * 在 8 字交叉口上，两条支路**物理重合而弧长隔半个环**（612m），
+   * 于是玩家贴脸的树被判成"612m 外"剔掉；原地转圈时车身一漂，
+   * `cur` 在两个支路之间来回跳，整片树线一帧一变。
+   * 判据见 `verify_veg_cull`。
+   *
+   * ## 什么时候重算
+   *
+   * 每帧重算是浪费，但门槛必须是**位置**而不是块号：
+   * 块号来自"最近中心线点"，玩家横着开离路时它几乎不动。
+   * 所以按走过多少米（`RECULL_MOVE`）与心神系数变化来卡。
+   *
    * 半径由画质档给，再乘以心神带来的可见系数。
    */
   update(playerX: number, playerZ: number, visibilityFactor: number) {
-    // 找到玩家所在的块
-    const t = nearestChunkT(playerX, playerZ);
-    const cur = clamp(Math.floor(t * CHUNK_COUNT), 0, CHUNK_COUNT - 1);
-    if (cur === this.lastChunkIndex) return;
-    this.lastChunkIndex = cur;
-
     // 心神系数**必须真的进半径**。它原来是算了 treeR/bushR 之后
     // 直接 `void` 掉，判定仍用 `preset.*Radius`——于是"心神低→看得更短"
     // 这条在整个游戏里从来没有生效过：灯笼、香囊、遮罩三样都在给一个
@@ -513,22 +634,30 @@ export class Vegetation {
     const treeR = Math.max(this.preset.treeRadius * visibilityFactor, 1);
     const bushR = Math.max(this.preset.bushRadius * visibilityFactor, 1);
 
+    const at = this.lastAt;
+    if (
+      at &&
+      Math.hypot(playerX - at.x, playerZ - at.z) < RECULL_MOVE &&
+      Math.abs(visibilityFactor - at.vis) < RECULL_VIS
+    ) {
+      return;
+    }
+    this.lastAt = { x: playerX, z: playerZ, vis: visibilityFactor };
+
+    const vis = chunkVisibility(this.chunks, playerX, playerZ, treeR, bushR);
+
     let visibleChunks = 0;
     let treeCount = 0;
     let bushCount = 0;
     let calls = 0;
 
-    for (const c of this.chunks) {
-      // 环线是闭合的，索引要绕圈
-      let d = Math.abs(c.index - cur);
-      d = Math.min(d, CHUNK_COUNT - d);
-      const tTree = (d * CHUNK_LEN) / treeR;
-      const showTree = tTree <= 1.12;
-      const tBush = (d * CHUNK_LEN) / bushR;
-      const showBush = tBush <= 1.12;
+    for (let i = 0; i < this.chunks.length; i++) {
+      const c = this.chunks[i];
+      const showTree = vis.tree[i];
+      const showBush = vis.bush[i];
 
-      const iTree = this.treeOfChunk[c.index];
-      const iBush = this.bushOfChunk[c.index];
+      const iTree = this.treeOfChunk[i];
+      const iBush = this.bushOfChunk[i];
       // 一块可能有多个变体网格，逐个开关
       if (iTree) for (const m of iTree) m.visible = showTree;
       if (iBush) iBush.visible = showBush;
@@ -553,7 +682,7 @@ export class Vegetation {
 
   /** 换档之后强制重算可见集 */
   invalidate() {
-    this.lastChunkIndex = -1;
+    this.lastAt = null;
   }
 
   dispose() {
@@ -651,19 +780,4 @@ export function bottomOf(geo: BufferGeometry): number {
   }
   // 全被剔掉说明判据用错了，退回绝对最小值（返回 0 会让模型沉进地里，更糟）
   return kept > 0 && Number.isFinite(lo) ? lo : minY;
-}
-
-function nearestChunkT(x: number, z: number): number {
-  let best = 0;
-  let bestD = Infinity;
-  // 每 4 个点采一次，够用了：块是 12m，960/4=240 个采样点对应约 5m 精度
-  for (let i = 0; i < CENTERLINE.length; i += 4) {
-    const p = CENTERLINE[i];
-    const d = (p.x - x) * (p.x - x) + (p.z - z) * (p.z - z);
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  }
-  return best / (CENTERLINE.length - 1);
 }
