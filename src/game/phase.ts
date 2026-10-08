@@ -202,6 +202,47 @@ export function recheckGate(armed: boolean, dist: number, minDist: number): bool
   return armed || dist >= minDist;
 }
 
+/** 结算屏落幕之后继续流程时走的那一条。 */
+export type AfterCheckIn = 'return-home' | 'maxed' | 'overdue' | 'roaming';
+
+export interface AfterCheckInState {
+  /** 五件碎片集齐了没有 */
+  allCollected: boolean;
+  /** 第一章结算过了没有（集齐之后要回十八驿把它领掉） */
+  chapter1Done: boolean;
+  /** 五座碎片驿站是否各到访三次 */
+  allFragmentsMaxed: boolean;
+  /** 日期过没过期 */
+  overdue: boolean;
+}
+
+/**
+ * 小游戏结算屏落幕之后，下一步是哪一条。
+ *
+ * ## 顺序是这里的活契约
+ *
+ * `maxed` **必须排在 `overdue` 前面**，而这条以前只活在一段注释里——
+ * 论证本身没错，但没有任何东西守着它。把它写成一个能返回答案的纯函数，
+ * "那面完满评级墙到底到不到得了"就从一句推理变成一条断言
+ * （`verify_after_checkin_route`）。
+ *
+ * ## 为什么它承重
+ *
+ * `day = 1 + 3×圈数 + 打卡次数`，刷满五座要 15 次打卡，于是认真玩到第五圈
+ * 就已经 `day 31 > 30`：**过期是刷满的必然结果，不是玩家失误**。
+ * 所以反过来只要刷满了就一定已经过期——两者不是互斥的两个 if，
+ * `maxed` 放在后面的话，那面墙对最该拿到它的人永远关着门。
+ *
+ * `return-home` 在最前面是另一回事：集齐之后第一章还没结算完，
+ * 那时玩家手上什么都还没领，弹什么评级都是空的。
+ */
+export function afterCheckInRoute(s: AfterCheckInState): AfterCheckIn {
+  if (s.allCollected && !s.chapter1Done) return 'return-home';
+  if (s.allFragmentsMaxed) return 'maxed';
+  if (s.overdue) return 'overdue';
+  return 'roaming';
+}
+
 export interface InteractInput {
   /** `world.nearby.shopName`：空串 = 面前这座驿站没有铺子 */
   shopName: string;

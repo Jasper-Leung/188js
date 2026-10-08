@@ -111,7 +111,7 @@
     "fragment_obtained": "获得碎片：",
     "revisit_2nd_here": "第二次来了。坐一会儿，看看远处的山。",
     "revisit_2nd_round": "绕了一整圈又回到这儿，山还是那几座。",
-    "revisit_3rd_here": "第三回走这条路。这件乐事你还有一趟。",
+    "revisit_3rd_here": "第三回走这条路。过了这一趟，这座驿站就记满了。",
     "revisit_3rd_round": "又一整圈。到这里是最后一趟，慢慢来。",
     "mg_played": "这一趟：",
     "collecting_message": "五件乐事已集齐，礼物成形了。",
@@ -414,7 +414,8 @@
     "beat_miss": "早了或晚了",
     "beat_cue": "前面有竹",
     "beat_done": "竹：一段路，五个节拍，一口气骑完。",
-    "cap_reason_restored": "沿用你上次选的画质档（本次探测：%s）"
+    "cap_reason_restored": "沿用你上次选的画质档（本次探测：%s）",
+    "hud_home_target_visits": "回十八驿 %s 刷满还差 %d 次 · %dm"
   },
   "en": {
     "game_title": "Gift No.188",
@@ -528,7 +529,7 @@
     "fragment_obtained": "Fragment obtained: ",
     "revisit_2nd_here": "Second time here. Sit a while and watch the hills.",
     "revisit_2nd_round": "A whole loop later, and the hills are the same ones.",
-    "revisit_3rd_here": "Third time down this road. One more run of this joy.",
+    "revisit_3rd_here": "Third time down this road. After this one, this station is full.",
     "revisit_3rd_round": "Another full loop. Last call here — take your time.",
     "mg_played": "This round: ",
     "collecting_message": "All five joys collected. The gift is formed.",
@@ -831,6 +832,7 @@
     "beat_miss": "Too early or too late",
     "beat_cue": "Bamboo ahead",
     "beat_done": "Bamboo: one stretch of road, five beats, ridden without stopping.",
-    "cap_reason_restored": "Keeping your saved quality — this machine reports %s"
+    "cap_reason_restored": "Keeping your saved quality — this machine reports %s",
+    "hud_home_target_visits": "Eighteenth Station %s %d to go · %dm"
   }
 }

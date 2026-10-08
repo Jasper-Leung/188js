@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：62 条 / 963 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：65 条 / 982 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 62 / FAIL 0 / 没跑成 0`，
-断言 963 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 65 / FAIL 0 / 没跑成 0`，
+断言 982 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -127,7 +127,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 62 条 / 963 断言
+npm run verify      # 65 条 / 982 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事

@@ -38,7 +38,7 @@ import { Terrain } from '../world/terrain';
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
 import { Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs, unwrapArc, recheckGate } from '../game/phase';
+import { afterCheckInRoute, canRide, isInWorld, interactAt, WorldVisibility, settleTextKey, settleMs, unwrapArc, recheckGate } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, FOOT_LATERAL_OFFSET, autoScaleToHeight, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
@@ -51,13 +51,13 @@ import { exportFileName } from '../game/postcard/export';
 import { buildInputFromState, fragmentMapDot, layoutMap, type PostcardInput } from '../game/postcard';
 import { MAP_BAND_FRAC } from '../game/postcard/layout';
 import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
-import { splitNextTarget } from '../ui/hud';
+import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS, clampTier } from '../core/settings';
 import { DEFAULT_LANG, getLang, setLang, t } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
 import type { UIHooks } from '../ui';
-import type { Toast } from '../ui/toast';
+import { Toast } from '../ui/toast';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from '../core/capability';
 
 export interface Check {
@@ -854,6 +854,7 @@ check('verify_hud_next_split', () => {
     'hud_next_target',
     'hud_revisit_target',
     'hud_home_target',
+    'hud_home_target_visits',
     'hud_all_done',
   ];
 
@@ -910,6 +911,329 @@ check('verify_hud_next_split', () => {
     probs.length
       ? probs.join('；')
       : `${TEMPLATES.length} 个模板 × 中英 全部恰好一个分隔点 · 拼回原句 · 距离格带数字`,
+    asserts,
+  );
+});
+
+/**
+ * 集齐五件之后，「还欠多少次到访」不许从屏幕上消失。
+ *
+ * ## 它挡的是什么
+ *
+ * 第一章的收尾动作是"回十八驿"，所以顶栏「下一处」那一格要指向十八驿——
+ * 那一格是玩家屏幕上唯一会持续指示"我该去哪"的地方，它说了算。
+ * 但**完满评级要的是五座各去三次**，也就是集齐之后还欠 10 次到访。
+ *
+ * 原来的代码是：
+ *
+ * ```
+ * if (this.game.objective === 'return') { …setNext(回十八驿); return; }
+ * … 后面那三支（hud_revisit_target「再访 · 还差 N 次」）再也执行不到
+ * ```
+ *
+ * 于是从第 5 次打卡那一帧起，「再访」这一档**整章都不再出现**。
+ * 玩家看到的顶栏是"回十八驿 · NNNm"，脚下的圈还写着「再访 · 还差 2 次」，
+ * 两边对不上，而**没有一边告诉他还有 10 次没做**。
+ * 他于是骑回家，把这一趟收掉——那面评级墙是给这类人准备的。
+ *
+ * 各自会红的做法：
+ *   · 把 `homeNextLine()` 里的 `left > 0` 改成 `left > 99` → 「还欠 10 次」不再上屏，红。
+ *   · 把 `hud.ts` 那一支改回裸的 `t('hud_home_target', …)`（不调 `homeNextLine`）→ 接线红。
+ *   · 把 `fragmentVisitsRemaining()` 的 `MAX_VISITS_PER_STATION` 写死成 2 → 算术红。
+ */
+check('verify_revisit_guidance', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ---- 1. 算术：还欠几次必须真的等于「15 − 已打卡数」 ----
+  // 与 `allFragmentsMaxed()` 同一个 `MAX_VISITS_PER_STATION`，
+  // 所以这一条同时钉住"还欠几次"和"刷满了几次"不会各走各的。
+  asserts++;
+  {
+    const g = new GameStateManager();
+    const FRAG = ROAD.FRAGMENT_SLOT_STATION_IDX;
+    const MAX = ECON.MAX_VISITS_PER_STATION;
+    if (g.fragmentVisitsRemaining() !== FRAG.length * MAX) {
+      probs.push(`开局还欠 ${g.fragmentVisitsRemaining()} 次，应为 ${FRAG.length * MAX}`);
+    }
+    // 五座各打一次 = 集齐，正好进入 objective === 'return'
+    FRAG.forEach((i, k) => {
+      g.checkIn(i);
+      const want = FRAG.length * MAX - (k + 1);
+      if (g.fragmentVisitsRemaining() !== want) {
+        probs.push(`第 ${k + 1} 座到访后还欠 ${g.fragmentVisitsRemaining()}，应为 ${want}`);
+      }
+    });
+    if (!(g.allCollected() && !g.chapter1Done)) {
+      probs.push('五座各去一次之后不满足「集齐且第一章未完」——这条判据的前提不成立');
+    }
+    // 每座再补 MAX−1 次到「刷满」
+    for (const i of FRAG) for (let v = 1; v < MAX; v++) g.checkIn(i);
+    if (g.fragmentVisitsRemaining() !== 0 || !g.allFragmentsMaxed()) {
+      probs.push(`刷满之后还欠 ${g.fragmentVisitsRemaining()}，应为 0`);
+    }
+  }
+
+  // ---- 2. 那一行：欠着就要说出来，不欠就说干净 ----
+  asserts++;
+  {
+    const withLeft = homeNextLine('↙', 139, 10);
+    if (!withLeft.includes('10')) probs.push(`还欠 10 次时那一行里没有「10」：「${withLeft}」`);
+    const [name, meta] = splitNextTarget(withLeft);
+    if (!/\d/.test(meta)) probs.push(`距离格「${meta}」里没有数字`);
+    if (name.trim() === '') probs.push('那一行的前半段是空的');
+  }
+  asserts++;
+  {
+    const none = homeNextLine('↙', 139, 0);
+    if (none !== t('hud_home_target', { 0: '↙', 1: 139 })) {
+      probs.push(`不欠到访时多说了「${none}」——刷满之后不该再提这件事`);
+    }
+  }
+
+  // ---- 3. 接线：`hud.ts` 那一支必须真的走这个函数 ----
+  // 纯函数对了而没人调用，是这个项目栽过的形状（`recheckArmed`）。
+  //
+  // ⚠ 这里必须数**出现次数**，不能只问"有没有"。只问有没有的话，
+  // 函数自己的定义就能满足它——把调用点删掉，这条判据照样绿。
+  // （这条断言就是这么被自己骗过一次：写完第一版，用"删掉调用点"去试红，
+  //   结果它绿着。）一次定义 + 一次调用，少一个都红。
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'ui', 'hud.ts'), 'utf8');
+    const uses = (re: RegExp) => (src.match(re) ?? []).length;
+    if (uses(/homeNextLine\(/g) < 2) {
+      probs.push('`hud.ts` 里 `homeNextLine(` 只出现了一次（只有定义、没有调用）——顶栏那一格没走上这个判据');
+    }
+    if (uses(/fragmentVisitsRemaining\(\)/g) < 1) {
+      probs.push('`hud.ts` 里没有调 `fragmentVisitsRemaining()`——那一格拿不到还欠几次');
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `刷满还欠多少次一直算得对 · 集齐之后那一行仍报「刷满还差 N 次」 · 接线在`,
+    asserts,
+  );
+});
+
+/**
+ * 打卡被拒时，那一下**必须有话说**。
+ *
+ * ## 它挡的是什么
+ *
+ * 打卡和"打卡被拒"用的是同一个键（空格），而两者之间的差别只有一句话。
+ * `recheckGate` 要求打卡后骑离 8m 才准再打——小游戏刚打完，人还站在圈里，
+ * 脚下那一圈写着「再访 · 还差 2 次」。这时候按空格：
+ *
+ * ```
+ * 第 1 下 → toast「先骑开一点再来」（1.4s）
+ * 第 2 下 → 什么都没有（REPEAT_GAP_SEC = 3.0 > 1.4s，被去重吃掉）
+ * ```
+ *
+ * 屏幕上一个字都不出，唯一会动的还是那个写着「再访」的圈。
+ * 玩家的读法只有一个：**空格键坏了**。
+ *
+ * 去重本身没有错——它挡的是竹丛连着三条「前面有竹」把该读的埋掉。
+ * 错的是它**不区分**环境提示与"回答玩家刚才那一下"。
+ * 所以分级：回答类一律上屏，且不去动环境类的去重锚点。
+ *
+ * 各自会红的做法：
+ *   · 把 `Toast.show()` 里的 `kind === 'reply'` 短路删掉 → 回答类又被去重，红。
+ *   · 把 `main.ts` 那个 blocked 分支的 `'reply'` 去掉 → 接线红。
+ *   · 让 `reply` 也去写锚点 → 「前面有竹」被一句「刚刚才结束」挤掉，红。
+ */
+check('verify_toast_reply', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ⚠ 两个坑，两个都得绕开。
+  //
+  // 1. 必须走 `globalThis` 的间接属性——esbuild 会把 `typeof document`
+  //    折叠成常量，折叠的方向猜不得（见 `verify_story_cards` 那段）。
+  // 2. **必须自己装自己收。** 判据按注册顺序跑，`verify_story_cards` 用的是
+  //    一个**更完整**的桩（带 classList / click / querySelector）。
+  //    谁先装上桩，后面那条就会因为「已经有 document 了」而跳过自己的，
+  //    于是拿到我这个残桩——症状是三条毫不相干的判据集体变红。
+  const g = globalThis as { document?: Document };
+  const prevDocument = g.document;
+  {
+    g.document = {
+      createElement() {
+        const kids: unknown[] = [];
+        return {
+          tagName: 'DIV',
+          className: '',
+          style: {} as Record<string, string>,
+          children: kids,
+          textContent: '',
+          classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} },
+          appendChild: (n: unknown) => {
+            kids.push(n);
+            return n;
+          },
+          remove: () => {},
+          addEventListener: () => {},
+          setAttribute: () => {},
+          getAttribute: () => null,
+          querySelector: () => null,
+        };
+      },
+    } as unknown as Document;
+  }
+  try {
+    asserts += runToastReplyAssertions(probs);
+  } finally {
+    g.document = prevDocument;
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `环境提示仍去重 · 回答类每次都上屏 · 两类互不顶锚点 · 接线在`,
+    asserts,
+  );
+});
+
+/** `verify_toast_reply` 的正文。装桩的部分在调用方，好让 `finally` 能收回去。 */
+function runToastReplyAssertions(probs: string[]): number {
+  let asserts = 0;
+  const g = globalThis as { document?: Document };
+  const parent = g.document!.createElement('div');
+  (parent as unknown as { children: unknown[] }).children = [];
+  const toast = new Toast(parent as unknown as HTMLElement);
+  const onScreen = () => (toast as unknown as { items: unknown[] }).items.length;
+
+  // ---- 1. 环境提示仍然去重（这条不能被顺手改坏）----
+  asserts++;
+  toast.show('前面有竹');
+  toast.show('前面有竹');
+  if (onScreen() !== 1) probs.push(`同一句环境提示连发两次，屏上有 ${onScreen()} 条，应为 1`);
+
+  // ---- 2. 回答类一律上屏 ----
+  asserts++;
+  toast.update(0.2);
+  toast.show('先骑开一点再来', 1400, 'reply');
+  toast.show('先骑开一点再来', 1400, 'reply');
+  if (onScreen() !== 3) probs.push(`连按两次空格，屏上有 ${onScreen()} 条，应为 3（被拒必须每次都说话）`);
+
+  // ---- 3. 回答类不许顶掉环境类的去重锚点 ----
+  asserts++;
+  toast.update(0.2);
+  toast.show('前面有竹'); // 距上一条同文的环境提示 0.4s → 应被压掉
+  if (onScreen() !== 3) probs.push(`一句「刚刚才结束」把环境提示的去重锚点顶掉了（屏上 ${onScreen()} 条）`);
+
+  // ---- 4. 接线：被拒那一支必须传 `'reply'` ----
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    if (!/showToast\(t\(key\),\s*1400,\s*'reply'\)/.test(src)) {
+      probs.push("`main.ts` 的打卡被拒那一支没有传 `'reply'`——分级做好了没接上");
+    }
+  }
+  return asserts;
+}
+
+/**
+ * 完满评级那面墙**到不到得了**——不是算术，是真的走到那一步。
+ *
+ * ## 它挡的是什么
+ *
+ * `day = 1 + 3×圈数 + 打卡次数`，刷满五座要 15 次打卡，认真玩到第五圈就已经
+ * `day 31 > 30`。也就是说**过期是刷满的必然结果**：一个把这条路走全的人，
+ * 在触发完满面板的那一刻一定已经过期了。
+ *
+ * 所以 `main.afterMiniGame()` 里 `allFragmentsMaxed()` 和 `overdue` 不是互斥的两个
+ * `if`，而是**必然同真**的一对。顺序反过来，那面墙就对最该拿到它的人永远关着门——
+ * 而这段推理以前只写在注释里，谁把两个 `if` 换位置都没有东西会响。
+ *
+ * ## 为什么不能只验纯函数
+ *
+ * `afterCheckInRoute()` 判对了而没人调，一样是死代码——这个项目栽过
+ * （`recheckArmed`、以及本轮 `homeNextLine` 写完第一版时的自查）。
+ * 所以第 3 条数出现次数：定义 + 调用，少一个都红。
+ *
+ * 各自会红的做法：
+ *   · 把 `phase.ts` 里的 `maxed` 挪到 `overdue` 后面 → 第 2 条红。
+ *   · 把 `main.ts` 的 `switch` 换成调用这个函数之前的内联 `if` → 第 3 条红。
+ *   · 让 `claimChapter1Complete()` 不置 `chapter1Done` → 第 1 条就停在
+ *     `'return-home'`，红。
+ */
+check('verify_after_checkin_route', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const FRAG = ROAD.FRAGMENT_SLOT_STATION_IDX;
+  const MAX = ECON.MAX_VISITS_PER_STATION;
+
+  /** 真 `GameStateManager` 摊平成 `afterCheckInRoute` 的入参形状 */
+  const routeOf = (g: GameStateManager) =>
+    afterCheckInRoute({
+      allCollected: g.allCollected(),
+      chapter1Done: g.chapter1Done,
+      allFragmentsMaxed: g.allFragmentsMaxed(),
+      overdue: g.overdue,
+    });
+
+  // ---- 1. 走完全程：集齐 → 回十八驿 → 再骑一圈 → 补完剩下 10 次 ----
+  asserts++;
+  {
+    const g = new GameStateManager();
+    for (const i of FRAG) g.checkIn(i);
+    if (!g.allCollected()) {
+      probs.push('五座各去一次之后居然没集齐——这条判据的前提不成立');
+    }
+    if (routeOf(g) !== 'return-home') {
+      probs.push(`集齐之后第一章未结算，应走「回十八驿」，实走「${routeOf(g)}」`);
+    }
+    if (!g.claimChapter1Complete()) probs.push('回十八驿领第一章结算，没领成');
+    if (g.chapter1Done !== true) probs.push('`claimChapter1Complete()` 之后 `chapter1Done` 仍是假——目标换不掉');
+
+    // 补完剩下的到访
+    for (const i of FRAG) for (let v = 1; v < MAX; v++) g.checkIn(i);
+    if (!g.allFragmentsMaxed()) probs.push(`补到第 ${g.checkIns} 次打卡还没刷满——算术本身有问题`);
+    if (routeOf(g) !== 'maxed') {
+      probs.push(`第 15 次打卡之后走的是「${routeOf(g)}」，应为「maxed」`);
+    }
+  }
+
+  // ---- 2. 刷满与过期必然同真，顺序一换这面墙就关上了 ----
+  asserts++;
+  {
+    const g = new GameStateManager();
+    for (const i of FRAG) for (let v = 0; v < MAX; v++) g.checkIn(i);
+    g.claimChapter1Complete();
+    // 把圈数推到过期，但不动打卡数
+    while (!g.overdue) g.noteLap();
+    if (!g.overdue) {
+      probs.push('一直加圈也没过期——日期算术变了，这条判据的前提不成立');
+    }
+    if (!g.allFragmentsMaxed()) probs.push('过期之后刷满状态被弄丢了');
+    if (afterCheckInRoute({ allCollected: true, chapter1Done: true, allFragmentsMaxed: true, overdue: true }) !== 'maxed') {
+      probs.push('「已刷满且已过期」判成了过期——完满排在过期后面的话，那面墙永远出不来');
+    }
+  }
+
+  // ---- 3. 接线：`main.ts` 必须真的走这个判据（数出现次数，见文件里 `homeNextLine` 那条）----
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    const uses = (re: RegExp) => (src.match(re) ?? []).length;
+    if (uses(/afterCheckInRoute\(/g) < 2) {
+      probs.push('`main.ts` 里 `afterCheckInRoute(` 只出现了一次（只有导入、没有调用）——结算屏落幕那条分支没走这个判据');
+    }
+    if (!/case\s+'maxed':[\s\S]{0,200}showSynthesis\('maxed'\)/.test(src)) {
+      probs.push("`main.ts` 的 `case 'maxed'` 那一支没有调 `showSynthesis('maxed')`");
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : `第 15 次打卡之后走的是「完满」不是「过期」 · 刷满必然已过期，顺序一换这面墙就关上 · 接线在`,
     asserts,
   );
 });

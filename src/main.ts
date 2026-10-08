@@ -43,7 +43,7 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportFileName, exportPostcardPng, seededBackText, type EndingId } from './game/postcard';
 
-import { canRide as canRideNow, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
+import { afterCheckInRoute, canRide as canRideNow, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
 import type { BeatEvent } from './game/beat';
 import type { RideInput } from './world/ride';
 import { MODE_TUNE } from './world/vehicle';
@@ -1323,7 +1323,10 @@ class App {
     const can = this.world.canCheckIn();
     if (!can.ok) {
       const key = can.reason === 'cooldown' ? 'blocked_cooldown' : can.reason === 'recheck' ? 'blocked_recheck' : 'blocked_busy';
-      this.ui.showToast(t(key), 1400);
+      // `'reply'`：这一条是**回答玩家刚才那一下**的，不是环境提示。
+      // 按成 `'ambient'` 的话 3 秒去重会把它吃掉——而站着不动连按，
+      // 说的都是同一句，于是第二下开始屏幕上什么都不出。
+      this.ui.showToast(t(key), 1400, 'reply');
       return;
     }
     // 回家这一条走独立分支：0 号驿站没有碎片，
@@ -1487,6 +1490,8 @@ class App {
   /**
    * 结算屏落幕之后才继续流程——否则面板和下一步会同时在屏幕上。
    *
+   * 走哪一条由 `afterCheckInRoute()` 判，顺序的理由写在那里。
+   *
    * @param stationIdx 刚打完的那座驿站
    * @param visit **打卡前**已经来过几次（0 = 第一次来）。用它挑"第几圈"那一句。
    *        原来第二个参数是 `_win` 且被显式 void 掉了——胜负在这一步已经
@@ -1494,41 +1499,40 @@ class App {
    *        那个数只有这里拿得到。
    */
   private afterMiniGame(stationIdx: number, visit: number) {
-    // 集齐五件之后**不结算**。原来这里是直接弹合成面板，
-    // 于是"这一趟结束了"是游戏替玩家做的决定，中间没有任何过渡。
-    // 现在改成把目标换成"回十八驿"——188 号环线自闭合，
-    // 起点就是终点，骑回出发的地方是这一章最自然的结尾，
-    // 而 demo 也有了一个干净的边界（一章 = 一趟 188）。
-    if (game.allCollected() && !game.chapter1Done) {
-      this.toRoaming();
-      this.ui.showToast(t('objective_return'), 4200);
-      return;
+    switch (
+      afterCheckInRoute({
+        allCollected: game.allCollected(),
+        chapter1Done: game.chapter1Done,
+        allFragmentsMaxed: game.allFragmentsMaxed(),
+        overdue: game.overdue,
+      })
+    ) {
+      // 集齐五件之后**不结算**。原来这里是直接弹合成面板，
+      // 于是"这一趟结束了"是游戏替玩家做的决定，中间没有任何过渡。
+      // 现在改成把目标换成"回十八驿"——188 号环线自闭合，
+      // 起点就是终点，骑回出发的地方是这一章最自然的结尾，
+      // 而 demo 也有了一个干净的边界（一章 = 一趟 188）。
+      case 'return-home':
+        this.toRoaming();
+        this.ui.showToast(t('objective_return'), 4200);
+        return;
+      // 完满评级（五座各去三次）就地结算。
+      // 顺序是 `afterCheckInRoute` 里的活契约，理由写在那里。
+      case 'maxed':
+        this.phase = 'synthesis';
+        this.ui.showSynthesis('maxed');
+        return;
+      // 过期。这一趟**不结束**，但目标换了。
+      // `back_break` 那个结局是为它写好的，而在这之前它没有任何入口——
+      // 一个写好了却到不了的结局，和没写是一样的。
+      case 'overdue':
+        this.toRoaming();
+        this.ui.showToast(t('objective_overdue'), 5200);
+        return;
+      default:
+        this.toRoaming();
+        this.showRevisitLine(stationIdx, visit);
     }
-    // 完满评级（五座各去三次）是**可选**的另外一条路，仍然就地结算。
-    //
-    // ★ 它必须排在 `overdue` **前面**。
-    // `day = 1 + 3×圈数 + 打卡次数`，而刷满要五座各三次 = 15 次打卡：
-    //   圈数 4 → day 28（余 2 天，完满面板出得来）
-    //   圈数 5 → day 31 → 过期 → 走下面那条 toast，这一面评级墙永远到不了。
-    // 而"在碎片站之外多打一次卡"（驿铺、茶铺、灯铺都算 check-in）还会把
-    // 触发所需的圈数压得更低。也就是说**一条路走全了，就再也走不到尽头**——
-    // 而够不着的那面评级墙正是给这种人准备的。
-    // 完满是更强的状态，过期只该对还没刷满的人说。
-    if (game.allFragmentsMaxed()) {
-      this.phase = 'synthesis';
-      this.ui.showSynthesis('maxed');
-      return;
-    }
-    // 过期。这一趟**不结束**，但目标换了。
-    // `back_break` 那个结局是为它写好的，而在这之前它没有任何入口——
-    // 一个写好了却到不了的结局，和没写是一样的。
-    if (game.overdue) {
-      this.toRoaming();
-      this.ui.showToast(t('objective_overdue'), 5200);
-      return;
-    }
-    this.toRoaming();
-    this.showRevisitLine(stationIdx, visit);
   }
 
   /**

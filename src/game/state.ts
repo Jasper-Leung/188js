@@ -194,9 +194,27 @@ export class GameStateManager {
   // 这样玩家没法"顺便"推进它（没有地方能点），
   // 而**迷路真的会花掉日期**——这一趟里唯一不推进任何事的行为。
   //
-  // 一天的口径（`DAYS_PER_LAP` / `DAYS_PER_CHECKIN`）定成
-  // "一遍完整的活儿大概要 15 天"：15 次打卡 + 5 圈 × 3 天 = 30 天。
-  // 于是**认真玩刚好用完 thirty 天，磨蹭就会过期**。
+  // ## 这三个常数定的到底是什么期限（**别再按"刚好用完"读它**）
+  //
+  // 一天的口径是 `DAYS_PER_LAP = 3` / `DAYS_PER_CHECKIN = 1`，而
+  // `day = 1 + 3×圈数 + 打卡次数`——注意开头的那个 `1 +`。
+  // 刷满五座要 15 次打卡，于是认真玩一圈的实际账是：
+  //
+  // | 圈数 | day | 状态 |
+  // |-----:|-----:|:-----|
+  // | 3 | 25 | 宽裕 |
+  // | 4 | 28 | 余 2 天 |
+  // | **5** | **31** | **过期**（`DAYS_LIMIT = 30`） |
+  //
+  // 也就是说**门槛不是"磨蹭"，是第五圈**——而刷满评级（五座各三次）要的
+  // 恰恰是第五圈。**认真玩到底的人一定过期**：这不是失误，是路线本身的长度。
+  //
+  // 那条路径上"过期"与"完满"必然同时成立，所以 `afterCheckInRoute()`
+  // 必须让完满先判（`phase.ts` 里写着理由，`verify_after_checkin_route` 守着）。
+  // 两件事的处理是分开且都不吃亏的：完满面板照弹，目标换成 `back_break` 那个留白结局。
+  //
+  // 要不要把 `DAYS_LIMIT` 调成 31 让认真玩刚好不超时，是**产品取舍**，
+  // 不是这里该顺手改的常数——改它会同时动到 `verify_days` 的基线。
 
   /** 骑完一圈花几天。 */
   static readonly DAYS_PER_LAP = 3;
@@ -369,6 +387,25 @@ export class GameStateManager {
   fragmentStationNeedsVisit(stationIdx: number): boolean {
     if (!ROAD.FRAGMENT_SLOT_STATION_IDX.includes(stationIdx)) return false;
     return this.getStationCount(stationIdx) < ECON.MAX_VISITS_PER_STATION;
+  }
+
+  /**
+   * 刷满五座各三次**还欠多少次到访**。
+   *
+   * 与 `fragmentStationNeedsVisit` 同源：同一个 `MAX_VISITS_PER_STATION`，
+   * 所以「哪一座还欠」和「一共欠几次」不可能对不上。
+   *
+   * 它存在的原因是**可达性**：集齐五件之后 `objective` 变成 `'return'`，
+   * 顶栏「下一处」那一格改为指向十八驿（`hud.ts` 那一支的 `return`），
+   * 于是「再访 · 还差 N 次」这一档**在整章剩下的时间里都不会再出现**——
+   * 而完满评级要的正是那 10 次到访。玩家看不到还欠多少，就只会一路骑回家
+   * 把这一趟收掉。把这个数算出来放进那一格，缺的那句话才有着落。
+   */
+  fragmentVisitsRemaining(): number {
+    return ROAD.FRAGMENT_SLOT_STATION_IDX.reduce(
+      (sum, i) => sum + Math.max(0, ECON.MAX_VISITS_PER_STATION - this.getStationCount(i)),
+      0,
+    );
   }
 
   allCollected(): boolean {

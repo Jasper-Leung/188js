@@ -97,6 +97,28 @@ export function splitNextTarget(rendered: string): [string, string] {
 }
 
 /**
+ * 「下一处」在**该回十八驿**时的那一行。`left` 是刷满还欠多少次到访。
+ *
+ * ## 为什么它必须是两句而不是一句
+ *
+ * 回十八驿与刷到完满是两条**可以并行**的路：第一章的收尾动作是前者，
+ * 而完满评级要的是后者。原来的写法是这一支直接 `return`，
+ * 于是顶栏从集齐那一刻起整章都不再提还欠几次——玩家于是看不到"还有事没做"，
+ * 只会一路骑回家把这一趟收掉，而那面评级墙是给这类人准备的。
+ *
+ * ## 为什么导出成纯函数
+ *
+ * `World` 在无头环境里构造不出来，所以整个 HUD 在 `npm run verify` 里
+ * 建不起来。与其让这条判据退化成注释，不如把这一格**怎么决定**拆出来单独验——
+ * 和上面那个 `splitNextTarget` 是同一个手法。
+ */
+export function homeNextLine(arrow: string, dist: number, left: number): string {
+  return left > 0
+    ? t('hud_home_target_visits', { 0: arrow, 1: left, 2: dist })
+    : t('hud_home_target', { 0: arrow, 1: dist });
+}
+
+/**
  * 「下一处」：最近的、**还欠一次到访**的碎片驿站。没有就返回 null。
  *
  * 距离用**世界坐标的直线距离**，不是沿中心线的弧长。原作也是直线距离，
@@ -396,13 +418,21 @@ export class Hud {
     // 集齐五件之后，导航指向**十八驿**而不是任何一座碎片驿站。
     // 这是第一章唯一的收尾动作，所以它必须占住「下一处」这一格——
     // 那一格是玩家屏幕上唯一会持续指示"我该去哪"的地方。
+    //
+    // ★ 但它**不能连"还欠多少次"一起吞掉**。
+    // 这一支原来直接 `return`，于是 `hud_revisit_target`（「再访 · 还差 N 次」）
+    // 从集齐那一刻起整章都不会再出现——而完满评级要的正是剩下那 10 次到访。
+    // 玩家于是看不到"还有事没做"，只会一路骑回家把这一趟收掉。
+    // 回十八驿与刷到完满是两条可以并行的路，这一格要把后者说清楚，
+    // 而不是把后者当成不存在。
     if (this.game.objective === 'return') {
       const home = STATIONS[GameStateManager.HOME_STATION];
       const p = this.world.ride.pos;
       const f = this.world.ride.forward;
       const arrow = arrowGlyph(home.x - p.x, home.z - p.z, f.x, f.z);
       const dist = Math.floor(Math.hypot(home.x - p.x, home.z - p.z));
-      this.setNext(t('hud_home_target', { 0: arrow, 1: dist }));
+      const left = this.game.fragmentVisitsRemaining();
+      this.setNext(homeNextLine(arrow, dist, left));
       setFlag(this.nextEl, 'is-home', true);
       return;
     }

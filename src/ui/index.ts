@@ -52,7 +52,7 @@ import { PostcardPanel } from './postcardPanel';
 import { SynthesisPanel } from './synthesisPanel';
 import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
-import { Toast } from './toast';
+import { Toast, type ToastKind } from './toast';
 import { ItemBar } from './itemBar';
 import { StoryCards, ResultCard, setNarrativeQuiet, type SettleOutcome } from './storyCard';
 import { WorldVisibility } from '../game/phase';
@@ -696,8 +696,8 @@ export class UI {
     return this.dialogueIdle;
   }
 
-  showToast(text: string, ms?: number): void {
-    this.toast.show(text, ms);
+  showToast(text: string, ms?: number, kind?: ToastKind): void {
+    this.toast.show(text, ms, kind);
   }
 
   // ---------------------------------------------------------------- 同步

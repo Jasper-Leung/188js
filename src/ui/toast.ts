@@ -55,6 +55,22 @@ interface Item {
   life: number;
 }
 
+/**
+ * 一条提示是**环境在说话**还是**在回答玩家刚才那一下**。
+ *
+ * 去重只该管前者。3 秒窗口对「前面有竹」是对的——竹丛挨着竹丛时十几秒里
+ * 会来三条一模一样的字，摞在一起把真正要读的那一条埋掉。
+ *
+ * 但「刚刚才结束 · 稍等一下」是**被拒的唯一反馈**。打卡被 `recheckGate`
+ * 挡住时（打卡完要骑离 8m 外才准再打），玩家按了空格，屏幕上一个字都不出，
+ * 唯一会动的只有那个写着「再访」的圈——于是那一下读起来就是空格键坏了。
+ * 而这条恰恰是最容易连着出现的那一条：站着不动连按，说的都是同一句话。
+ *
+ * 所以：回答类一律上屏，且**不去动环境类的去重锚点**——
+ * 一句「刚刚才结束」不该把一条真实的「前面有竹」挤掉。
+ */
+export type ToastKind = 'ambient' | 'reply';
+
 export class Toast {
   readonly root: HTMLDivElement;
   private items: Item[] = [];
@@ -80,12 +96,16 @@ export class Toast {
    * 弹一条。`ms` 传 0 表示不自动消失（配合调用方自己 sync 掉）——
    * 实际上没有调用方需要，保留是为了「已保存」这类要给玩家时间读完的场景。
    */
-  show(text: string, ms = DEFAULT_MS): void {
+  show(text: string, ms = DEFAULT_MS, kind: ToastKind = 'ambient'): void {
     if (!text) return;
-    // 被压掉的那一条**不**刷新时间戳：锚点永远是最近一次真的上屏的那条。
-    if (text === this.repeatText && this.clock - this.repeatAt < REPEAT_GAP_SEC) return;
-    this.repeatText = text;
-    this.repeatAt = this.clock;
+    if (kind === 'reply') {
+      // 直接上屏，但**不碰锚点**（见 `ToastKind`）
+    } else {
+      // 被压掉的那一条**不**刷新时间戳：锚点永远是最近一次真的上屏的那条。
+      if (text === this.repeatText && this.clock - this.repeatAt < REPEAT_GAP_SEC) return;
+      this.repeatText = text;
+      this.repeatAt = this.clock;
+    }
     const node = el('div', 'g-toast g-fade', text);
     this.root.appendChild(node);
     this.items.push({ node, life: ms / 1000 });
