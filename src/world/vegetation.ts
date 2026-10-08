@@ -32,7 +32,7 @@ import {
   Group,
   type Material,
 } from 'three';
-import { CENTERLINE, TOTAL_ARCLENGTH, distToCenterline, type Vec3Flat } from '../data/route';
+import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, distToCenterline, type Vec3Flat } from '../data/route';
 import { hashGrid } from '../core/noise';
 import type { Terrain } from './terrain';
 import type { QualityPreset } from '../core/settings';
@@ -136,6 +136,42 @@ const TREE_SIDE_OFFSET = 16;
  * 由 verify_veg_density 量实测值守住。
  */
 const TREE_ROAD_CLEAR = 16;
+/**
+ * 驿站的**树冠让位半径**（米）。落在这个圈里的行道树直接不种。
+ *
+ * ## 为什么需要它
+ *
+ * 驿站落在中心线外 18m，而行道树的横向偏移下限是 16m——
+ * **两者在同一条带上**。实测琴音林（station 13）最近的一株行道树
+ * 离站中心只有 **5.7m**：树是种在林冠地块**里面**的。
+ *
+ * 画面的后果不是"树多了"，而是**那株树读不出是树**：
+ * 它从一大片航拍林冠里穿出来，比例对不上、体量对不上，
+ * 读作"林子里戳了一根杆子"。而琴音林的模型拉高到 23.4m 之后更明显——
+ * 一根 12m 的行道树站在 23m 的林冠旁边，矮了一截。
+ *
+ * 20m 盖住的是"站脚半宽 8m + 树冠半径最坏 8.1m + 余量"，
+ * 与 `TREE_ROAD_CLEAR` 那条路肩约束同一个量级。
+ *
+ * **只减株数，不改株距。** 株距是"路两边一排树的节奏"，
+ * 在让位圈里挖空一圈，读出来是"驿站前面有个院子"；
+ * 而把株距整体拉大，读出来是"这一段路不一样"，那是另一种错。
+ */
+const STATION_TREE_CLEAR = 20;
+/**
+ * 导出给回归用。判据要守的正是这个数本身——
+ * "让位圈半径被改成 0"会立刻让最近树距离那条红，
+ * 而中间值（比如被人调到 8m）只有直接比对这个常量才抓得住。
+ */
+export const STATION_TREE_CLEAR_R = STATION_TREE_CLEAR;
+
+/** 世界坐标是否落在任意一座驿站的让位圈里。 */
+function insideStationClear(x: number, z: number): boolean {
+  for (const s of STATIONS) {
+    if (Math.hypot(x - s.x, z - s.z) < STATION_TREE_CLEAR) return true;
+  }
+  return false;
+}
 /**
  * 灌木也埋一点，但比树浅。
  *
@@ -432,6 +468,8 @@ export class Vegetation {
       // 可能离**另一段**只有 4m——树就长在沥青上了（实测过 4.2m）。
       // 所以这里必须量整条线，不够就丢弃这一株。
       if (distToCenterline(x, z) < TREE_ROAD_CLEAR) continue;
+      // **驿站的让位圈**：不种在驿站身上。见 `STATION_TREE_CLEAR`。
+      if (insideStationClear(x, z)) continue;
       const y = terrain.getHeightAt(x, z);
       chunks[chunkAt(x, z)].tree.push({
         x, y, z,

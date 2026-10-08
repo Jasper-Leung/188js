@@ -11,7 +11,7 @@
  */
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, FRAGMENT_STATIONS, shapeReport, nearestArcParam, pointAtArcLength } from '../data/route';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, sep } from 'node:path';
+import { basename, extname, join, sep } from 'node:path';
 import { ROAD, ROADMESH, ECON, SHOPS, MINIGAMES, I18N, TERRAIN, WORLD } from '../data/raw';
 import {
   createMiniGame,
@@ -21,15 +21,15 @@ import {
   type MiniGameId,
   type MiniGameResult,
 } from '../game/minigames';
-import { ARCH_BY_MODEL_IDX, archKindFor, buildStationArch, type ArchKind } from '../world/architecture';
+import { labelYFor, stationStretch } from '../world/stations';
 import { auditSummary } from '../debug/probe';
 import { planBasins, naturalHeightAt, naturalHeightRaw, basinDepthAt, getBasins, checkConsistency, NATURAL_FLOOR, WATER_LEVEL } from '../world/basins';
 import { RELICS, Relics, relicSite, distToCenterline, RELIC_REACH, RELIC_FROM_ROAD, type RelicKind } from '../world/relics';
 import { BambooBeats, BEAT_ARM_RADIUS, BEAT_CUE_RADIUS, BEAT_WINDOW, BEAT_GOAL } from '../game/beat';
 import { stickVector, keyToVec } from '../core/stick';
 import { decideTouch } from '../core/touch';
-import { groundOffsetFor, bottomOf, Vegetation, chunkVisibility } from '../world/vegetation';
-import { Box3, BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone, Scene } from 'three';
+import { groundOffsetFor, bottomOf, Vegetation, chunkVisibility, STATION_TREE_CLEAR_R } from '../world/vegetation';
+import { BoxGeometry, CylinderGeometry, BufferAttribute, BufferGeometry, InterleavedBuffer, InterleavedBufferAttribute, Mesh, Object3D, Vector3, Quaternion, Group, AnimationClip, KeyframeTrack, Bone, Scene } from 'three';
 import { Sky } from '../world/sky';
 import { Stations } from '../world/stations';
 import { Scenery, sceneryPlacements, scenerySpec, distToRoad, type SceneryKind } from '../world/scenery';
@@ -131,9 +131,27 @@ check('verify_8_shape', () => {
 });
 
 // ---------------------------------------------------------------- 驿站
+/**
+ * 琴音林在 16 座驿站里的下标，以及它用的模型下标。
+ *
+ * 这两个数**不写死在判据里**：碎片槽位表已经钉住"琴 = 槽位 2"，
+ * 判据自己按名字找一遍——站名被改、或者它在环线上的次序变了，
+ * 立刻报"找不到琴音林"，而不是**悄悄量错一座站然后绿着**。
+ */
+const ZITHER_MODEL_IDX = 2;
+const ZITHER_STATION_IDX = STATIONS.findIndex((s) => s.def.fragment === '琴');
+
 check('verify_stations', () => {
   let asserts = 0;
   const probs: string[] = [];
+
+  // 找得到琴音林本身。上面那行 findIndex 若是 −1，下面所有量它的断言
+  // 都在量 `STATIONS[-1]`（undefined）——那会抛，而这里先把它变成一条红。
+  asserts++;
+  if (ZITHER_STATION_IDX < 0) probs.push('找不到碎片「琴」对应的驿站（琴音林）');
+  if (ZITHER_STATION_IDX >= 0 && STATIONS[ZITHER_STATION_IDX].def.model_idx !== ZITHER_MODEL_IDX) {
+    probs.push(`琴音林用的是模型 #${STATIONS[ZITHER_STATION_IDX].def.model_idx}，判据按 #${ZITHER_MODEL_IDX} 在量`);
+  }
 
   asserts++;
   if (STATIONS.length !== 16) probs.push(`驿站 ${STATIONS.length} 座，应为 16`);
@@ -186,291 +204,365 @@ check('verify_stations', () => {
     }
   }
 
-  // ---- 程序化地标的几何硬约束 ----
+  // ---- 琴音林：林冠地块必须拉成"高的树"，且标签浮在它上面 ----
   //
-  // 这几条守的是"建筑会不会压到路上 / 会不会长到标签里 / 会不会一个都没生成"。
-  // 三条各自会红的理由：
-  //   · 半宽：把 `inn` 的台基从 12.0 改成 20.0 → 半宽 10 > 8，红。
-  //   · 高度：把 `lantern` 的竿从 3.1 改成 30 → 远高于 label_y，红。
-  //   · 覆盖：`ARCH_BY_MODEL_IDX` 少映射一个下标 → 该站没有几何，红。
+  // `station_2.glb` 的贴图是**从空中俯拍的一整片林冠**，不是亭子，
+  // 所以它天然是 10.0m 宽 × 9.0m 高的地块（高宽比 0.903），摆出来
+  // 是一块扁平绿毯。见 `stations.ts` 的 `STATION_STRETCH`。
   //
-  // 还有一个反向判据：**必须比灰盒更矮更省**。不守这条的话，
-  // 将来有人把"程序化"改成"更精细"，很容易顺手把 7 座建筑膨胀到
-  // 几十万个三角形，而这件事在画面上完全看不出来——只有这个数会红。
-  const archReport = archGeometryReport();
+  // 两条各自会红的做法：
+  //   · 把 `[1, 2.6]` 改回 `[1, 1]` → 高宽比 0.903 < 1.6，红。
+  //   · 拉高了却不抬 `labelY` → 标签挂在 26m 而树只有 9m，
+  //     或者反过来标签埋进 23.4m 的树冠里，红。
   asserts++;
-  for (const r of archReport) {
-    if (r.halfWidth > ROAD.STATION_FOOT_HALF) {
-      probs.push(`${r.name} 半宽 ${r.halfWidth.toFixed(1)}m > ${ROAD.STATION_FOOT_HALF}m，会压到路面上`);
-      break;
+  if (ZITHER_STATION_IDX >= 0) {
+    const [sx, sy] = stationStretch(ZITHER_MODEL_IDX);
+    if (sx !== 1) {
+      probs.push(`琴音林的水平倍率是 ${sx}，拉高不许动占地（18−5=13m，只剩 0.7m 余量到 13.7m 判据）`);
     }
-  }
-  asserts++;
-  for (const r of archReport) {
-    if (r.minY < -0.01) {
-      probs.push(`${r.name} 有 ${(-r.minY).toFixed(2)}m 埋在地面以下`);
-      break;
+    // 模型实测尺寸（模型单位，贴图与顶点量出来的）
+    const MODEL_W = 1.0;
+    const MODEL_H = 0.903;
+    const scale = WORLD.STATION_GLB_CONFIG[ZITHER_MODEL_IDX].scale;
+    const ratio = (MODEL_H * scale * sy) / (MODEL_W * scale * sx);
+    if (ratio < 1.6) {
+      probs.push(`琴音林拉高后高宽比只有 ${ratio.toFixed(2)}，读不成"高的树"（应 ≥1.6）`);
     }
-  }
-  asserts++;
-  for (const r of archReport) {
-    if (r.height > r.labelY + 0.5) {
-      probs.push(`${r.name} 高 ${r.height.toFixed(1)}m，而站名标签挂在 ${r.labelY}m，会插进屋顶`);
-      break;
+    // 站名标签必须浮在树冠之上
+    const labelY = labelYFor(ZITHER_MODEL_IDX, WORLD.STATION_GLB_CONFIG[ZITHER_MODEL_IDX].label_y);
+    const top = MODEL_H * scale * sy;
+    if (labelY < top) {
+      probs.push(`琴音林标签挂在 ${labelY}m，而树冠高 ${top.toFixed(1)}m，标签会埋进树里`);
     }
-  }
-  asserts++;
-  const totalArchTris = archReport.reduce((n, r) => n + r.triangles, 0);
-  if (totalArchTris > 60000) {
-    probs.push(`7 座程序化地标合计 ${totalArchTris} 三角面，超出 6 万的预算（灰盒总量不到 200）`);
+    if (labelY > top + 8) {
+      probs.push(`琴音林标签挂在 ${labelY}m，树冠只有 ${top.toFixed(1)}m，标签飘得太高脱开了`);
+    }
   }
 
-  // 每类地标都要有对应的驿站真的在用它，且数量对得上
+  // ---- 建筑的几何硬约束搬去 verify_station_models ----
+  //
+  // 半宽 8m、高度不许插进站名标签，这两条以前判的是 `architecture.ts`
+  // 程序化生成的几何体。七座换成 Tripo 真模型之后那个模块已经删了，
+  // 判据跟着换成直接读 `public/models/*.glb` 的包围盒——
+  // **约束没变，只是终于判在真正会出现在屏幕上的那个东西上了**。
+  // 详见同文件里的 `verify_station_models`。
+
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : `16 座 / 5 碎片 / 槽位 云茶琴竹禽`,
+    asserts,
+  );
+});
+
+/** `public/models` —— 站模型、Tripo 建筑、载具都在这儿。 */
+const MODEL_DIR = join(process.cwd(), 'public', 'models');
+
+// `meshopt` 的 wasm 解码器要先 `ready` 才同步可用，而 `check()` 只收同步返回值，
+// 所以在模块顶层 await 一次：`runAll()` 在这之后才跑，判据里要用的就是它。
+const { MeshoptDecoder } = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+await MeshoptDecoder.ready;
+
+/**
+ * 九座 Tripo 建筑的资源判据。
+ *
+ * ## 这条判据是从哪来的
+ *
+ * 半宽 ≤ `STATION_FOOT_HALF`、高度 < `label_y`、"必须比灰盒精细"这三条，
+ * 原来判在 `architecture.ts` 程序化生成的几何体上。2026-10 七座换成 Tripo 真模型，
+ * 那个模块连同它的判据一起删了——**约束没跟着删**，只是换了被量的对象：
+ * 现在直接量 `public/models/*.glb` 里真正会出现在屏幕上的那份几何体。
+ *
+ * 各自会红的做法：
+ *   · 把 `tools/tripo-station.mjs` 里某座的 `half` 从 0.80 改成 1.2 → 半宽 9.6m > 8，红。
+ *   · 把 `inn` 的目标高从 1.05 改成 1.4 → 14m 高过 `label_y` 11m，红。
+ *   · 把烘顶点色那一步跳过 → 九座带回 3 张贴图，"零贴图"红。
+ *   · 直接拿灰盒顶回来 → 三角面掉到 24，"不是灰盒"红。
+ *
+ * ## 为什么包围盒要解压缩才算
+ *
+ * 九座都过了 `meshopt()`，POSITION 是 16 位定点压在 meshopt 的 buffer 里。
+ * 直接读 bufferView 拿到的是量化后的整数，量出来的是一个 65534m 宽的亭子；
+ * 而且读到的是**导出器写下的 accessor**，不是解码器还原出来的顶点。
+ * 所以这里照 `GLTFLoader` 的做法把 buffer 解开，再乘回节点缩放。
+ * 顺带这也是这条判据比旧那条更实的地方：**它量的是压缩之后的那个文件**，
+ * 而不是压缩之前内存里的那份几何体。
+ */
+check('verify_station_models', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ---- 站模型：逐站读 STATION_GLB_CONFIG 指向的那个文件 ----
+  const stats = new Map<number, GlbStats & { file: string; cfg: (typeof WORLD.STATION_GLB_CONFIG)[number] }>();
+  for (const idx of new Set(STATIONS.map((s) => s.def.model_idx))) {
+    const cfg = WORLD.STATION_GLB_CONFIG[idx];
+    const file = cfg?.path ? join(MODEL_DIR, cfg.path.split('/').pop() ?? cfg.path) : '';
+    if (!file) {
+      probs.push(`model_idx ${idx} 在 STATION_GLB_CONFIG 里没有条目`);
+      continue;
+    }
+    if (!existsSync(file)) {
+      probs.push(`#${idx} 的模型文件不存在：${file}`);
+      continue;
+    }
+    const st = readGlbGeometry(file);
+    if (!st) {
+      probs.push(`#${idx} 的 ${basename(file)} 读不出几何体`);
+      continue;
+    }
+    stats.set(idx, { ...st, file: basename(file), cfg });
+  }
+
+  // ---- 逐站：半宽不许压路面，高度不许插进站名标签 ----
   asserts++;
-  const wantByKind = new Map<ArchKind, number>();
+  let worstHalf = 0;
   for (const s of STATIONS) {
-    const k = archKindFor(s.def.model_idx);
-    if (k) wantByKind.set(k, (wantByKind.get(k) ?? 0) + 1);
-  }
-  if (wantByKind.size !== Object.keys(ARCH_BY_MODEL_IDX).length) {
-    probs.push(`定义了 ${Object.keys(ARCH_BY_MODEL_IDX).length} 类程序化地标，实际被用到的只有 ${wantByKind.size} 类`);
-  }
-
-  // 每类都必须有**真屋顶**。
-  // 会红的做法：把神苑的碑龛整段删掉——它的最高点就变成四根石灯柱的柱头
-  // （实测屋顶带厚度只剩 0.2m），屏幕上读作"这站没有屋顶"。
-  // 这不是假想：上一版的神苑真的漏了屋顶，是用户看出来的。
-  asserts++;
-  for (const r of archReport) {
-    if (r.roofVerts < 12) {
-      probs.push(`${r.name} 顶部几乎没有任何顶点（${r.roofVerts} 个），没有屋顶`);
-    } else if (r.roofBand < 0.8) {
-      probs.push(`${r.name} 屋顶带只有 ${r.roofBand.toFixed(2)}m 厚，那是一排柱头而不是屋顶`);
+    const st = stats.get(s.def.model_idx);
+    if (!st) continue;
+    // 琴音林是唯一被竖直拉高的一座，站宽没动——所以两个倍率都要乘回去，
+    // 否则量出来的是"拉高之前"的世界尺寸。
+    const [sx, sy] = stationStretch(s.def.model_idx);
+    const half = (Math.max(st.size[0], st.size[2]) / 2) * st.cfg.scale * sx;
+    const h = st.size[1] * st.cfg.scale * sy;
+    worstHalf = Math.max(worstHalf, half);
+    if (half > ROAD.STATION_FOOT_HALF + 1e-3) {
+      probs.push(`${s.def.name} 脚底半宽 ${half.toFixed(2)}m > ${ROAD.STATION_FOOT_HALF}m，会压到路面上`);
+      break;
+    }
+    const labelY = labelYFor(s.def.model_idx, st.cfg.label_y ?? 10);
+    if (h > labelY + 0.5) {
+      probs.push(`${s.def.name} 高 ${h.toFixed(2)}m，而站名标签挂在 ${labelY}m，会插进屋顶`);
+      break;
     }
   }
 
-  /**
-   * 屋面不许浮空 —— 每一座屋面的下表面都要压在某个支撑上。
-   *
-   * 这不是假想：用户报"西谷岭台凭空多了一个顶"，根因是 `posts()` 这个
-   * helper 早先没有水平中心参数，岭台(`zc=3.4`)与神苑(`nicheZ=3.3`)的偏置小龛
-   * 于是把柱子**留在原点**——屋面在 3.3m 外，下面空无一物。
-   * 正视图因为投影重叠"像"是连着的，侧过来才看出是悬空的。
-   *
-   * 会红的做法：把 `posts` 的 `cz` 又去掉 → 立即复现，岭台实测悬空 3.67m。
-   *
-   * 判据用 `MeshBuilder.roofs` 的**解析**屋面参数算，不去网格里猜哪几条三角形
-   * 是屋面——柱头、瓦当、宝顶都落在"顶部高度带"里，靠猜必然误判。
-   * 采样时还要排除屋面自己的三角形：举折是凹曲面，平片小片的弦恒在曲面之下，
-   * 不排除就会把屋面底面当成自己的支撑，量出来永远是 0.00m 的假接触。
-   */
+  // ---- 底面必须贴 y=0 ----
+  // `stations.ts` 会用包围盒把底面抬到地面，所以这一条不是必需的安全网，
+  // 但它抓的是另一类问题：模型自带一张地基圆盘时，底下会浮出一圈边。
   asserts++;
-  const worstRoofGap = Math.max(...archReport.flatMap((r) => r.roofGaps));
-  for (const r of archReport) {
-    for (const [i, gap] of r.roofGaps.entries()) {
-      if (gap > ROOF_SEAT_TOL) {
-        probs.push(`第 ${i + 1} 座屋面浮空 ${gap.toFixed(2)}m（判据上限 ${ROOF_SEAT_TOL}m），它下面没有支撑`);
+  for (const [idx, st] of stats) {
+    if (Math.abs(st.min[1]) > 0.01) {
+      probs.push(`#${idx} ${st.file} 的底面在 y=${st.min[1].toFixed(3)}，不是 0`);
+      break;
+    }
+  }
+
+  // ---- 三角面：下限防"退回灰盒"，上限防"膨胀" ----
+  // 下限那条是老判据的反向版本：原来守的是"程序化几何别膨胀到几万面"，
+  // 现在要守的是"别退回去"。24~84 个顶点、8~28 个三角面的灰盒一眼就能认出。
+  asserts++;
+  let stationTris = 0;
+  for (const [idx, st] of stats) {
+    stationTris += st.tris;
+    if (st.tris < 1000) {
+      probs.push(`#${idx} ${st.file} 只有 ${st.tris} 个三角面，那不是灰盒就是没生成出来`);
+      break;
+    }
+  }
+  asserts++;
+  if (stationTris > 600000) probs.push(`16 座站模型合计 ${stationTris} 个三角面，超出 60 万的预算`);
+
+  // ---- 九座 Tripo 建筑：文件对得上、零贴图、顶点色在、压过 ----
+  asserts++;
+  let tripoTris = 0;
+  for (const job of TRIPO_MODELS) {
+    const file = join(MODEL_DIR, job.file);
+    const st = existsSync(file) ? readGlbGeometry(file) : null;
+    if (!st) {
+      probs.push(`${job.file} 读不出几何体（文件不在，或 meshopt 没解出来）`);
+      continue;
+    }
+    tripoTris += st.tris;
+    // 这七座是**站**用的：文件名必须就是 `STATION_GLB_CONFIG` 里写着的那个，
+    // 否则改名的结果是一堆没人加载的文件，而游戏去加载一个已经被改掉的。
+    if (job.stationIdx !== undefined) {
+      const cfgPath = WORLD.STATION_GLB_CONFIG[job.stationIdx]?.path ?? '';
+      if (cfgPath.split('/').pop() !== job.file) {
+        probs.push(`model_idx ${job.stationIdx} 现在加载的是 ${cfgPath}，而新建筑叫 ${job.file}`);
       }
     }
-    if (r.roofGaps.length === 0) {
-      probs.push(`${r.name} 一座屋面都量不到支撑`);
+    if (st.images > 0) {
+      probs.push(`${job.file} 还带着 ${st.images} 张贴图，零贴图是一等约束（配色要烘进顶点色）`);
     }
+    // 贴图删了、顶点色没烘进去的话，它会退成一块单色体积——
+    // 而"同一个 Tripo 家族的不同颜色"正是九座之间唯一的区分。
+    if (!st.vertexColors) probs.push(`${job.file} 没有 COLOR_0，丢掉贴图之后它会是一块单色体积`);
+    if (!st.meshopt) probs.push(`${job.file} 没有 EXT_meshopt_compression`);
   }
-
-  // 每座站的世界包围盒 Y 跨度必须等于它那一类本地几何的 Y 跨度。
-  // 站会绕 Y 转向公路，绕 Y 的刚体变换**不改变 Y 跨度**——
-  // 所以一旦对不上，就是模型被额外平移、缩放，或 attach 时出了问题。
-  // 这一条专治"屋顶位置不对"：屋顶被抬歪/被埋，Y 跨度立刻就不对了。
   asserts++;
-  {
-    const terrain = new Terrain();
-    const road = new Road(terrain);
-    const stations = new Stations(PRESETS[1], terrain);
-    for (const st of stations.list) {
-      const kind = archKindFor(st.modelIdx);
-      if (!kind || !st.object) continue;
-      const local = archReport.find((r) => r.kind === kind);
-      if (!local) continue;
-      const box = new Box3().setFromObject(st.object);
-      const worldH = box.max.y - box.min.y;
-      if (Math.abs(worldH - local.height) > 0.05) {
-        probs.push(`#${st.index} ${st.placement.def.name}（${kind}）世界高度 ${worldH.toFixed(2)}m ≠ 本地 ${local.height.toFixed(2)}m，屋顶位置不对`);
-        break;
-      }
-    }
-    void road;
-  }
+  if (tripoTris > 300000) probs.push(`九座 Tripo 建筑合计 ${tripoTris} 个三角面，超出 30 万的预算`);
 
   return expect(
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : `16 座 / 5 碎片 / 槽位 云茶琴竹禽 / 程序化地标 ${archReport.length} 类 ${totalArchTris} 三角面 · 7 类全有真屋顶且屋面全部落座（最差 ${worstRoofGap.toFixed(2)}m ≤ ${ROOF_SEAT_TOL}m）`,
+      : `9 座 Tripo 建筑 ${tripoTris} 面 · 最宽脚底 ${worstHalf.toFixed(2)}m ≤ ${ROAD.STATION_FOOT_HALF}m · 全站 ${stationTris} 面 · 零贴图 + 顶点色 + meshopt`,
     asserts,
   );
 });
 
-/** 每类程序化地标的实测尺寸。取自真实生成的几何体，不是设计意图里的数 */
-function archGeometryReport() {
-  const out: {
-    name: string;
-    kind: ArchKind;
-    halfWidth: number;
-    height: number;
-    minY: number;
-    triangles: number;
-    labelY: number;
-    /** 顶部 30% 高度带里的顶点：屋顶 */
-    roofVerts: number;
-    /** 屋顶带的厚度。0.2m 那种是一排柱头，不是屋顶 */
-    roofBand: number;
-    /** 每座屋面下表面到正下方支撑的最小间距（米）。判定"顶浮在空中" */
-    roofGaps: number[];
-  }[] = [];
-  for (const [idxStr, kind] of Object.entries(ARCH_BY_MODEL_IDX)) {
-    const idx = Number(idxStr);
-    // 用这一类的站，取它们里最低的 label_y 当高度上限（最严的那座）
-    const labelY = Math.min(
-      ...STATIONS.filter((s) => s.def.model_idx === idx).map((s) => WORLD.STATION_GLB_CONFIG[s.def.model_idx]?.label_y ?? 10),
-    );
-    // seg 取 10：高档位才是最终画面，低档细分更少
-    const mb = buildStationArch(kind, 10);
-    const p = mb.build().positions;
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minZ = Infinity;
-    let maxZ = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-    for (let i = 0; i < p.length; i += 3) {
-      minX = Math.min(minX, p[i]);
-      maxX = Math.max(maxX, p[i]);
-      minZ = Math.min(minZ, p[i + 2]);
-      maxZ = Math.max(maxZ, p[i + 2]);
-      minY = Math.min(minY, p[i + 1]);
-      maxY = Math.max(maxY, p[i + 1]);
+/**
+ * `npm run assets:tripo` 写出来的九座建筑。
+ *
+ * 前七座是 16 座驿站里的地标（`model_idx` 6~12），文件名就是
+ * `STATION_GLB_CONFIG[i].path` 的末段；后两座是散布在路边的远景，
+ * 它们不在 `STATIONS` 里，所以单列——**它们同样要过"零贴图 + 顶点色"**，
+ * 九座里放过两张贴图的话，draw call 和显存预算就在这里悄悄漏出去了。
+ */
+const TRIPO_MODELS: readonly { file: string; stationIdx?: number }[] = [
+  { file: 'station_驿楼.glb', stationIdx: 6 },
+  { file: 'station_茶寮.glb', stationIdx: 7 },
+  { file: 'station_岭台.glb', stationIdx: 8 },
+  { file: 'station_神苑.glb', stationIdx: 9 },
+  { file: 'station_凉亭.glb', stationIdx: 10 },
+  { file: 'station_廊.glb', stationIdx: 11 },
+  { file: 'station_亭灯.glb', stationIdx: 12 },
+  { file: 'mod_house.glb' },
+  { file: 'mod_tower.glb' },
+];
+
+interface GlbAcc {
+  type: string;
+  componentType: number;
+  count: number;
+  normalized?: boolean;
+  /** 只读 POSITION 时用得到；indices 那一支走别的字段 */
+  bufferView?: number;
+}
+
+interface GlbBv {
+  byteOffset?: number;
+  byteLength: number;
+  byteStride?: number;
+  extensions?: {
+    EXT_meshopt_compression?: {
+      byteOffset?: number;
+      byteLength: number;
+      byteStride: number;
+      count: number;
+      mode: string;
+      filter?: string;
+    };
+  };
+}
+
+interface GlbStats {
+  /** 局部尺寸（已乘回节点缩放），单位是"模型单位"——乘 `cfg.scale` 才是米 */
+  size: [number, number, number];
+  min: [number, number, number];
+  tris: number;
+  images: number;
+  vertexColors: boolean;
+  meshopt: boolean;
+}
+
+/**
+ * 从 GLB 里量几何体：解 meshopt、乘节点变换、算包围盒与三角面数。
+ *
+ * 只支持"平移 + 等比缩放"的节点变换，这不是假设而是 `assets:tripo` 的实际产物：
+ * 九座 GLB 每个都只有一个节点，gltf-transform 量化后写下的是
+ * `scale: [s, s, s]` + `translation`。真混进旋转来时这里会算错——
+ * 宁肯算错也不能悄悄放过，因为下面每条断言量的是"世界里有多大"。
+ */
+function readGlbGeometry(file: string): GlbStats | null {
+  const buf = readFileSync(file);
+  if (buf.readUInt32LE(0) !== 0x46546c67) return null;
+  const jsonLen = buf.readUInt32LE(12);
+  const json = JSON.parse(buf.subarray(20, 20 + jsonLen).toString('utf8'));
+  const bin = buf.subarray(20 + jsonLen + 8, 20 + jsonLen + 8 + buf.readUInt32LE(20 + jsonLen));
+
+  const nodeOfMesh = new Map<number, number>();
+  json.nodes.forEach((nd: { mesh?: number }, i: number) => {
+    if (nd.mesh !== undefined) nodeOfMesh.set(nd.mesh, i);
+  });
+
+  let tris = 0;
+  let vertexColors = false;
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+
+  for (let mi = 0; mi < json.meshes.length; mi++) {
+    for (const prim of json.meshes[mi].primitives) {
+      if (prim.attributes?.POSITION === undefined) continue;
+      if (prim.attributes?.COLOR_0 !== undefined) vertexColors = true;
+      const acc: GlbAcc = json.accessors[prim.attributes.POSITION];
+      const p = readPosAccessor(bin, json.bufferViews[acc.bufferView ?? -1], acc);
+      if (!p) return null;
+
+      const node = json.nodes[nodeOfMesh.get(mi) ?? -1];
+      const m: number[] = node?.matrix ?? columnMajorOf(node);
+      for (let v = 0; v < acc.count; v++) {
+        for (let k = 0; k < 3; k++) {
+          const x = p[v * 3 + k] * m[k * 5] + m[12 + k];
+          if (x < min[k]) min[k] = x;
+          if (x > max[k]) max[k] = x;
+        }
+      }
+      const idxAcc = prim.indices !== undefined ? json.accessors[prim.indices] : acc;
+      tris += idxAcc.count / 3;
     }
-    const { roofVerts, roofBand } = measureRoofBand(p, minY, maxY);
-    out.push({
-      name: kind,
-      kind,
-      // 站会绕 Y 转向公路，两向都可能变成"横向"，所以取两向里更大的
-      halfWidth: Math.max(maxX - minX, maxZ - minZ) / 2,
-      height: maxY,
-      minY,
-      triangles: mb.triangleCount,
-      labelY,
-      roofVerts,
-      roofBand,
-      roofGaps: measureRoofGaps(mb, p),
-    });
+  }
+  if (!Number.isFinite(min[0]) || tris === 0) return null;
+  return {
+    size: [max[0] - min[0], max[1] - min[1], max[2] - min[2]],
+    min,
+    tris,
+    images: json.images?.length ?? 0,
+    vertexColors,
+    meshopt: (json.extensionsRequired ?? []).includes('EXT_meshopt_compression'),
+  };
+}
+
+/** 没有 `matrix` 就用 `scale` / `translation` 拼一个列主序的。 */
+function columnMajorOf(node: { scale?: number[]; translation?: number[] } | undefined): number[] {
+  const s = node?.scale ?? [1, 1, 1];
+  const t = node?.translation ?? [0, 0, 0];
+  return [s[0], 0, 0, 0, 0, s[1], 0, 0, 0, 0, s[2], 0, t[0], t[1], t[2], 1];
+}
+
+/**
+ * 读一个 POSITION accessor，返回 `count × 3` 的浮点。
+ *
+ * meshopt 那一支有两个坑，踩过两个：
+ *   · 解码结果是**定点原值**，不是浮点，忘了除 32767 会量出几万米。
+ *   · 解出来的行距是 `byteStride`（向量分量会被补齐到 4 字节），按 12 字节
+ *     一条顶点读，第二条开始就全错位——头几条看着正常，包围盒已经废了。
+ * 没压缩的那一支按分量类型直读。
+ */
+function readPosAccessor(bin: Uint8Array, bv: GlbBv, acc: GlbAcc): Float32Array | null {
+  const out = new Float32Array(acc.count * 3);
+  const ext = bv.extensions?.EXT_meshopt_compression;
+  if (!ext) {
+    const start = bv.byteOffset ?? 0;
+    const bytes = bin.subarray(start, start + bv.byteLength);
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const q = acc.normalized ? 1 / 32767 : 1;
+    for (let i = 0; i < out.length; i++) {
+      out[i] =
+        acc.componentType === 5126
+          ? dv.getFloat32(i * 4, true)
+          : acc.componentType === 5125
+            ? dv.getUint32(i * 4, true) * q
+            : (acc.componentType === 5123 ? dv.getUint16(i * 2, true) : dv.getInt16(i * 2, true)) * q;
+    }
+    return out;
+  }
+  const src = bin.subarray(ext.byteOffset ?? 0, (ext.byteOffset ?? 0) + ext.byteLength);
+  const stride = ext.byteStride;
+  if (stride < 6) return null;
+  const target = new Uint8Array(ext.count * stride);
+  MeshoptDecoder.decodeGltfBuffer(target, ext.count, stride, src, ext.mode, ext.filter);
+  const dv = new DataView(target.buffer);
+  const q = acc.normalized ? 1 / 32767 : 1;
+  for (let v = 0; v < acc.count; v++) {
+    for (let k = 0; k < 3; k++) {
+      const o = v * stride + k * 2;
+      out[v * 3 + k] =
+        acc.componentType === 5126
+          ? dv.getFloat32(o, true)
+          : (acc.componentType === 5123 ? dv.getUint16(o, true) : dv.getInt16(o, true)) * q;
+    }
   }
   return out;
-}
-
-/**
- * 屋面落座判据的容差（米）。
- *
- * 0.25m 是照着修好之后的实测值定的：七类全在 **0.009~0.143m**，
- * 修复前的岭台是 3.67m。0.25m 既卡得住真悬空，又不会因为
- * 某次把 `seg` 从 10 降到 6（低画质档）就让判据误红。
- */
-const ROOF_SEAT_TOL = 0.25;
-
-/**
- * 量每座屋面"下表面 ↔ 正下方支撑顶面"的最小间距。
- *
- * 两件事必须做对，否则量出来的数没有意义：
- *
- * 1. **屋面下表面用解析公式算**，不在网格里找"哪几条三角形是屋面"。
- *    柱头、瓦当、宝顶都落在"顶部若干高度带"里，靠高度带分类必然误判。
- * 2. **排除屋面自己的三角形**。举折是凹曲面，而网格是 `seg×seg` 个平面小片，
- *    平片的弦恒定落在解析曲面**之下**——不排除的话每个屋面底面都会
- *    被当成"它正下方的支撑"，量出来永远是 0.00m 的假接触。
- *
- * 采样取屋面足迹上的格点，逐点向下找最高的支撑面；
- * 一座屋面的判据值 = 所有格点里**最小**的那个间距
- * （即"最接近贴合的那一点"）。取最小而不是取最大：
- * 一座屋面只要有一处实实在在压在支撑上就算落了座，
- * 而檐口下方本来就是空的（出檐悬空是造型，不是 bug）。
- */
-function measureRoofGaps(mb: ReturnType<typeof buildStationArch>, p: Float32Array): number[] {
-  const tri = p.length / 9;
-  const gaps: number[] = [];
-  const STEPS = 24;
-  for (const part of mb.roofs) {
-    const r = part.span;
-    let best = Infinity;
-    for (let i = 0; i <= STEPS; i++) {
-      for (let j = 0; j <= STEPS; j++) {
-        const u = (i / STEPS) * 2 - 1;
-        const v = (j / STEPS) * 2 - 1;
-        const x = r.cx + u * r.hw;
-        const z = r.cz + v * r.hd;
-        const soffit = r.soffitAt(u, v);
-        let below = -Infinity;
-        for (let t = 0; t < tri; t++) {
-          // 跳过屋面自身
-          if (t >= part.triFrom && t < part.triTo) continue;
-          const y = triSurfaceYAt(p, t, x, z);
-          if (y === null || y >= soffit - 1e-3) continue;
-          if (y > below) below = y;
-        }
-        if (below === -Infinity) continue;
-        const gap = soffit - below;
-        if (gap < best) best = gap;
-      }
-    }
-    gaps.push(best);
-  }
-  return gaps;
-}
-
-/**
- * 竖直射线 (x,z) 穿过第 `t` 个三角形时的高度；不穿过返回 null。
- *
- * 重心坐标判据，留一点容差（-1e-6）：顶点恰好落在边上时浮点会差一两个 ulp，
- * 而屋面足迹的格点经常正好压在支撑面的边界上。
- */
-function triSurfaceYAt(p: Float32Array, t: number, x: number, z: number): number | null {
-  const ax = p[t * 9];
-  const ay = p[t * 9 + 1];
-  const az = p[t * 9 + 2];
-  const bx = p[t * 9 + 3];
-  const by = p[t * 9 + 4];
-  const bz = p[t * 9 + 5];
-  const cx = p[t * 9 + 6];
-  const cy = p[t * 9 + 7];
-  const cz = p[t * 9 + 8];
-  const d = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
-  if (Math.abs(d) < 1e-12) return null; // 退化（竖直三角形）
-  const l1 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / d;
-  const l2 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / d;
-  const l3 = 1 - l1 - l2;
-  if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) return null;
-  return l1 * ay + l2 * by + l3 * cy;
-}
-
-/**
- * 屋顶带 = 顶部 30% 高度里的顶点。
- *
- * 为什么要单独量：起翘屋顶的**檐口低于脊**，所以这一带的厚度正好是
- * 「檐底到脊」的高度差。而**一排柱头**（比如某次漏掉屋顶的神苑）
- * 也会落在这条带子里——它的高度差只有 0.2m。
- * 于是"有没有屋顶"和"那到底是屋顶还是柱头"可以用同一个数分开。
- */
-function measureRoofBand(p: Float32Array, minY: number, maxY: number) {
-  const bandLo = minY + (maxY - minY) * 0.7;
-  let bandHi = -Infinity;
-  let bandLoY = Infinity;
-  let n = 0;
-  for (let i = 0; i < p.length; i += 3) {
-    if (p[i + 1] < bandLo) continue;
-    n++;
-    bandHi = Math.max(bandHi, p[i + 1]);
-    bandLoY = Math.min(bandLoY, p[i + 1]);
-  }
-  return { roofVerts: n, roofBand: n > 0 ? bandHi - bandLoY : 0 };
 }
 
 function minDistToCenterline(x: number, z: number): number {
@@ -758,7 +850,12 @@ check('verify_hud_next_split', () => {
   let asserts = 0;
   const probs: string[] = [];
 
-  const TEMPLATES = ['hud_next_target', 'hud_revisit_target', 'hud_home_target', 'hud_all_done'];
+  const TEMPLATES = [
+    'hud_next_target',
+    'hud_revisit_target',
+    'hud_home_target',
+    'hud_all_done',
+  ];
 
   for (const key of TEMPLATES) {
     for (const lang of ['zh', 'en'] as const) {
@@ -2566,6 +2663,62 @@ check('verify_veg_density', () => {
   const high = counts[2];
   if (low.tree * 2 < high.tree) {
     probs.push(`低档 ${low.tree} 株不足高档 ${high.tree} 株的一半：密度与半径被重复扣了一次`);
+  }
+
+  // 8. **树不许种在驿站身上** ——「琴音林让位圈」那条。
+  //
+  //    这条不是审美数字。驿站在中心线外 18m，行道树横向偏移下限 16m，
+  //    **两者在同一条带上**：让位圈加进来之前，琴音林最近的一株树
+  //    离站中心只有 5.7m——树是从林冠地块里穿出来的，
+  //    读作"林子里戳了一根杆子"，而不是一棵树。
+  //
+  //    会红的做法：把 `STATION_TREE_CLEAR` 调到 0 / 去掉 `insideStationClear`
+  //    那一行 → 琴音林立刻回到 5.7m，红。
+  asserts++;
+  for (const tier of [0, 1, 2] as Tier[]) {
+    const veg = new Vegetation(PRESETS[tier], terrain);
+    const chunks = (veg as unknown as { chunks: { tree: P[] }[] }).chunks;
+    for (const s of STATIONS) {
+      let worst = Infinity;
+      for (const c of chunks) {
+        for (const p of c.tree) worst = Math.min(worst, Math.hypot(p.x - s.x, p.z - s.z));
+      }
+      if (worst < 14) {
+        probs.push(`第 ${tier} 档 ${s.def.name} 最近的树离站只有 ${worst.toFixed(1)}m，树种在站上了`);
+      }
+    }
+  }
+
+  // 9. **让位圈半径不许被改小** + 琴音林那圈确实空出来了。
+  //
+  //    为什么不写"40m 内 ≤N 株"：那个 N 得拍，而株数还受株距、
+  //    档位、hash 落点影响，改一次别处它就漂——一条会漂的断言
+  //    要么被人放宽到没意义，要么半夜自己红了。这里直接守**半径**
+  //    （被改小 → 红），再守一个**实测得到**的最近距离。
+  //
+  //    实测：让位圈加进来之前琴音林最近的一株树离站 5.7m（种在模型里），
+  //    之后是 24.5m。判据卡在 14m —— 站脚半宽 8 + 树冠半径最坏 8.1 ≈ 16，
+  //    取 14 留一点余量，同时仍高于"零让位"时的 5.7m 足够多。
+  asserts++;
+  if (STATION_TREE_CLEAR_R < 16) {
+    probs.push(`驿站让位半径只有 ${STATION_TREE_CLEAR_R}m，应 ≥16m（站脚半宽 8 + 树冠半径最坏 8.1）`);
+  }
+  {
+    const zither = STATIONS[ZITHER_STATION_IDX];
+    const veg = new Vegetation(PRESETS[2], terrain);
+    const chunks = (veg as unknown as { chunks: { tree: P[] }[] }).chunks;
+    let nearest = Infinity;
+    let near40 = 0;
+    for (const c of chunks) {
+      for (const p of c.tree) {
+        const d = Math.hypot(p.x - zither.x, p.z - zither.z);
+        if (d < 40) near40++;
+        nearest = Math.min(nearest, d);
+      }
+    }
+    if (nearest < 14) {
+      probs.push(`琴音林最近的行道树离站只有 ${nearest.toFixed(1)}m（让位前是 5.7m），让位圈没生效`);
+    }
   }
 
   const summary = counts
@@ -4511,19 +4664,16 @@ check('verify_buildings', () => {
   asserts++;
   if (sum.warns > 0) probs.push(`建筑体检有 ${sum.warns} 个 warn：\n${sum.text}`);
 
-  // 4. 程序化地标必须真的建出几何体。
-  //    `loaded = true` 但 `object = null` 是"表看着正常、路上什么都没有"，
-  //    而上面三条判据里没有一条能抓到它——它们查的是位置，不是"有没有东西"。
+  // 4. 每一站都必须有可加载的模型配置。
+  //    `loadOne()` 里 `cfg` 取不到就 `st.loaded = true; return;`——
+  //    "表看着正常、路上什么都没有"，而上面三条判据查的是位置，抓不到它。
+  //    模型文件本身在不在、包围盒合不合规，由 `verify_station_models` 判。
   asserts++;
-  const archStations = stations.list.filter((s) => archKindFor(s.modelIdx) !== null);
-  if (archStations.length === 0) {
-    probs.push('一站程序化地标都没有，ARCH_BY_MODEL_IDX 的映射全丢了');
-  } else {
-    for (const s of archStations) {
-      if (!s.object) {
-        probs.push(`#${s.index} ${s.placement.def.name} 是程序化地标却没有几何体`);
-        break;
-      }
+  for (const s of stations.list) {
+    const cfg = WORLD.STATION_GLB_CONFIG[s.modelIdx];
+    if (!cfg?.path) {
+      probs.push(`#${s.index} ${s.placement.def.name}（model_idx ${s.modelIdx}）在 STATION_GLB_CONFIG 里没有条目`);
+      break;
     }
   }
 

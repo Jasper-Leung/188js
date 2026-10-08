@@ -31,7 +31,6 @@ import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, nearestArcParam, nearestStation 
 import { ROADMESH, WORLD } from '../data/raw';
 import { getBasins } from '../world/basins';
 import { JUNCTION } from '../world/road';
-import { archKindFor } from '../world/architecture';
 import { horizontalFromVertical } from '../core/fov';
 import { game } from '../game/state';
 import type { World } from '../world/world';
@@ -191,10 +190,9 @@ function nearbyBuildings(world: World, x: number, z: number, radius: number): st
 
 /** 一座驿站的一句话状态——「建筑是否正常」最直接的答案 */
 function describeStation(st: StationRuntime): string {
-  const kind = archKindFor(st.modelIdx);
-  const src = kind ? `程序化 ${kind}` : st.loaded ? 'GLB 已加载' : st.loaded ? '' : 'GLB 未加载';
+  const src = st.loaded ? 'GLB 已加载' : 'GLB 未加载';
   const frag = st.placement.hasFragment ? `碎片「${st.placement.def.fragment}」` : '无碎片';
-  return `${frag}  模型=${kind ? `arch/${kind}` : `#${st.modelIdx}`} ${src}  半径=${f1(st.radius)}m  锚点高=${f1(st.glowY)}m`;
+  return `${frag}  模型=#${st.modelIdx} ${src}  半径=${f1(st.radius)}m  锚点高=${f1(st.glowY)}m`;
 }
 
 const pad = (s: string, n: number) => {
@@ -475,8 +473,7 @@ export function buildingTable(ctx: AuditContext): string {
     '  #  站名      碎片  模型来源        世界坐标            离中心线  尺寸(宽×高×深)   底离地  离沥青  加载',
   );
   for (const st of ctx.stations.list) {
-    const kind = archKindFor(st.modelIdx);
-    const src = kind ? `程序化/${kind}` : `GLB#${st.modelIdx}`;
+    const src = `GLB#${st.modelIdx}`;
     const frag = st.placement.hasFragment ? st.placement.def.fragment : '·';
     let size = '—';
     let gap = '—';

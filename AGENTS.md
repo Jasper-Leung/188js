@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：59 条 / 841 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：62 条 / 963 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 59 / FAIL 0 / 没跑成 0`，
-断言 841 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 62 / FAIL 0 / 没跑成 0`，
+断言 963 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -127,7 +127,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 59 条 / 841 断言
+npm run verify      # 62 条 / 963 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事
@@ -148,7 +148,7 @@ Pages 部署失败，线上停在旧版本。
   不要"反正是一起改的就一起提交"。
 
 三条都过再提交。`dist/` 与 `package-lock.json` 不进版本库；
-`public/models` 现在是 **16.84 MB**（22 个 GLB，全部已过 Meshopt），
+`public/models` 现在是 **17.47 MB**（22 个 GLB，全部已过 Meshopt），
 **其中 53% 压在三个文件上**：`motorcycle.glb` 4.82 / `bicycle.glb` 2.79 /
 `survivor.glb` 1.33 MB。`bicycle.glb` 在首屏关键路径上。
 
@@ -162,10 +162,27 @@ Pages 部署失败，线上停在旧版本。
 >   以及摩托车 / 角色 / 松树 / 竹 / 现代建筑。可用 `GIFT188_SRC_MODELS` /
 >   `GIFT188_SRC_BIKE` / `GIFT188_SRC_EXTRA` 覆盖。
 >
+> 九座 Tripo 建筑（7 座驿站地标 + `mod_house` / `mod_tower`）走
+> `npm run assets:tripo`，输入 `assets-src/tripo/*.glb` **同样不在版本库里**
+> （58MB 高模）；进库的是参考图 `ref_*.jpg` 与 `PROMPTS.md`——
+> 那是"重新生成"的说明书。产物已经是 `public/models/*.glb`，
+> 硬约束由 `verify_station_models` 守（半宽、高度、零贴图、顶点色、Meshopt）。
+>
 > 中间产物落在被 gitignore 的 `.cache/tex/`。判据只有一个：**有没有活可干**。
 > `jobs.length === 0` 时 `exit(1)`；缺的族逐条告警并跳过。
 > 它不会"成功"地产出一个空缓存——那是上一版的行为（空数组 + `exit(0)`），
 > 也是 README 里 `8.6MB` / `5.0MB` 那些数字能一直错的原因。
+>
+> ⚠ **改 `tools/tripo-bake.mjs` 之前先知道这件事：`sharp` 和
+> `@gltf-transform/functions` 不能待在同一个进程里。**
+> `node_modules` 底下躺着一个坏掉的 `sharp@0.35.5`（嵌在 `ndarray-pixels` 里面），
+> 它一被 require 就把**顶层那个能用的 `sharp@0.33.5`** 一起弄坏——
+> 症状是 `sharp is not a function`，而 `npm ls sharp` 看着一切正常。
+> 所以管线拆成两个进程：`tripo-station.mjs`（JOBS 表、调度）用子进程调
+> `tripo-bake.mjs`，**烘焙那一侧只 require `sharp`、绝不 require
+> `@gltf-transform/functions`**。
+> 症状一样但原因不同的还有一种：两者在同一个进程里被**先后**require，顺序反过来
+> 就好——所以别靠"我这儿能跑"来判断，改完要另起一个干净的 `node` 试。
 
 ---
 

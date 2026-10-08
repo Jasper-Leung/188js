@@ -24,9 +24,10 @@
     "assets:tex": "node tools/compress-textures.mjs",
     "assets:geo": "node tools/optimize-assets.mjs",
     "assets:retax": "node tools/retax.mjs",
+    "assets:tripo": "node tools/tripo-station.mjs",
     "assets:title": "node tools/make-titleart.mjs --write",
     "assets:font": "node tools/subset-font.mjs",
-    "assets:all": "npm run assets:font && npm run assets:tex && npm run assets:geo",
+    "assets:all": "npm run assets:font && npm run assets:tex && npm run assets:geo && npm run assets:tripo",
     "promo:wt-probe": "node tools/wt-probe.mjs",
     "promo:walkthrough": "node tools/walkthrough.mjs",
     "verify": "node tools/verify-all.mjs"

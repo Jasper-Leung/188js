@@ -44,6 +44,12 @@ shots/
 # 游戏本体不依赖这里的任何一个字节：Pages 构建只读 `public/`。
 promo/
 
+# Tripo 的高模源文件（`assets-src/tripo/*.glb`），九座合计 58MB。
+# 它们能按 `assets-src/tripo/PROMPTS.md` 里的提示词重新生成，
+# 而进版本库的是 `npm run assets:tripo` 的产物 `public/models/*.glb`。
+# 参考图（ref_*.jpg）与提示词文档留在库里——那是"重新生成"的说明书。
+assets-src/tripo/*.glb
+
 # 编辑器
 .vscode/
 .idea/

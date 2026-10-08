@@ -10,17 +10,17 @@
  * 要看清它长什么样的。如果一直用替身，驿站就变成了几个色块，
  * 整个"收集与合成"的情绪线就没有落点。
  *
- * ## 七类地标不走 GLB
+ * ## 16 座现在全部走同一条路
  *
  * 源项目 13 个站模型里有 7 个是作者搭的灰盒（驿楼/茶寮/岭台/神苑/凉亭/廊/亭灯，
- * 每个部件就是一个长方体）。这 7 类改由 `architecture.ts` **程序化生成**，
- * 构造时就建好，不进网络、不占 draw call 之外的任何预算。
- * 详见 `architecture.ts` 开头关于"为什么不找美术补模型"的说明。
+ * 每个部件就是一个长方体，整站 24~84 个顶点）。这 7 座曾经由
+ * `architecture.ts` 程序化生成，2026-10 换成了 Tripo 生成的真模型——
+ * 那个模块连同它的判据已经删掉了，这里是**唯一**一条加载路径。
  *
- * 生成的几何体**已经以米为单位**，所以这里不给它乘 `cfg.scale`——
- * 灰盒是"小模型 × 大缩放"（驿楼 ×10、凉亭 ×12、亭灯 ×14），
- * 两套缩放同时生效会把站撑到两倍宽，直接顶穿
- * `verify_stations` 的"离中心线 ≥ 路宽 + 0.9×foot_half"判据。
+ * 模型单位 × `cfg.scale` = 场景米数（驿楼 ×10、凉亭 ×12、亭灯 ×14），
+ * 所以 `assets-src/tripo/` 里那份低模已经按这个表归一化过，
+ * 改的时候别改 `world.json` 的 `scale`——那是 `extract-data.mjs` 的产物，
+ * 手改会被下一次提取覆盖掉。硬约束由 `verify_station_models` 守着。
  */
 import {
   Group,
@@ -29,16 +29,12 @@ import {
   Vector3,
   Mesh,
   MeshBasicMaterial,
-  MeshStandardMaterial,
   Color,
   OctahedronGeometry,
-  BufferGeometry,
-  BufferAttribute,
 } from 'three';
 import { WORLD } from '../data/raw';
 import { STATIONS, type StationPlacement, CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 import { loadModel, modelUrl, tintModel, type LoadedModel } from './assets';
-import { archKindFor, buildStationArch, type ArchKind } from './architecture';
 import type { Terrain } from './terrain';
 import type { QualityPreset } from '../core/settings';
 
@@ -58,13 +54,79 @@ export interface StationRuntime {
   labelY: number;
 }
 
+// ---------------------------------------------------------------- 比例修正
+/**
+ * **非等比缩放**修正表。键是 `model_idx`，值是 `[水平倍率, 竖直倍率]`。
+ *
+ * ## 为什么需要它
+ *
+ * 琴音林（`model_idx = 2`，`station_2.glb`）**不是一个亭子**——
+ * 把它的贴图导出来看就清楚了：那是**从空中俯拍的一整片林冠**
+ * （树冠、树下的地面、间杂的石头，全在一张 1024² 里）。
+ * 所以它天然是一个 **10.0m 宽 × 9.0m 高的地块**，高宽比只有 0.903：
+ * 摆在地上读出来是**一块扁平的绿毯**，而不是"林子"。
+ *
+ * 而"琴音林"这个名字、它那三句旁白（"林子里没有舞台，风一经过，
+ * 树影就开始合奏"）要的恰恰是**站得高、遮得住人的树**。
+ * 比例就是这里唯一对不上的地方。
+ *
+ * ## 为什么只拉 Y，不缩 XZ
+ *
+ * **水平尺寸是硬约束，不是审美数字**：驿站落在中心线外 18m，
+ * `verify_stations` 钉着"离中心线 ≥ 路宽 6.5 + 0.9 × 站脚半宽 8 = 13.7m"。
+ * 现在这块林冠地块半宽 5.0m（18 − 5.0 = 13.0m，**只剩 0.7m 余量**），
+ * 所以 XZ 一动就顶穿那条判据。拉高不动占地，是唯一安全的自由度。
+ *
+ * ## 2.6 这个数怎么来的
+ *
+ * 目标是"读得出是高树"。`tree.glb`（榕树下那座地标）实测高宽比 **2.18**，
+ * 是这个项目里已经被认成"树"的那一个；取 **2.6** 比它更瘦，
+ * 因为琴音林是一整片林冠而不是单株，读成细高杆反而假。
+ * 换算下来 9.0m → **23.4m**，与林冠的航拍尺度（俯视一片树梢）是自洽的。
+ *
+ * **`label_y` 必须跟着抬**：站名标签挂在 14m，而地块原本只有 9.0m 高；
+ * 不抬的话标签会埋进树冠里——那正是 `verify_stations`
+ * 对程序化地标那条"不许插进屋顶"要防的事，这里对 GLB 站同理。
+ * 抬到 26m 之后标签浮在树冠之上 2.6m。
+ */
+const STATION_STRETCH: Record<number, readonly [number, number]> = {
+  2: [1, 2.6],
+};
+/** 站名标签要跟着竖直倍率一起抬，否则会埋进被拉高的树冠里。 */
+const STATION_LABEL_LIFT = 26;
+
+/**
+ * 竖直拉伸后站名锚点该挂多高。
+ *
+ * 导出成纯函数是为了能无头验：回归要守的正是"琴音林被拉高之后，
+ * 标签仍然浮在它上面"，而这件事在无头环境里没有 GLB 可加载，
+ * 只能靠这张表 + 这条公式解析地算。
+ */
+export function labelYFor(modelIdx: number, baseLabelY: number): number {
+  const sy = STATION_STRETCH[modelIdx]?.[1] ?? 1;
+  return sy > 1 ? STATION_LABEL_LIFT : baseLabelY;
+}
+
+/** 水平倍率。拉高不占地，所以恒为 1；留着是为了 XZ 真要调时有落点。 */
+export function stationStretch(modelIdx: number): readonly [number, number] {
+  return STATION_STRETCH[modelIdx] ?? [1, 1];
+}
+
+/**
+ * 本地 -Z 是正面、朝向由 `yawFacingRoad` 现场算的模型下标。
+ *
+ * 就是 Tripo 换上的那七座地标（`model_idx` 6~12）。`world.json` 给它们的
+ * `rot_y` 全是 0，而这七座分布在整个 8 字上——不转向的话，
+ * 七座里有大半把背面和山墙对着路，玩家看到的读不出来是什么。
+ * 有 `rot_y` 的站不受影响，那是从源项目原样搬过来的数据。
+ */
+const FRONT_FACING_MODEL_IDX = new Set([6, 7, 8, 9, 10, 11, 12]);
+
 export class Stations {
   readonly group = new Group();
   readonly list: StationRuntime[] = [];
   private preset: QualityPreset;
   private silhouetteGroup = new Group();
-  /** 7 类程序化地标共用一份材质：7 次 draw call，1 个 program */
-  private archMaterial: MeshStandardMaterial | null = null;
 
   constructor(preset: QualityPreset, terrain: Terrain) {
     this.preset = preset;
@@ -85,70 +147,12 @@ export class Stations {
         object: null,
         glowY: cfg?.glow_y ?? 6,
         glowRange: cfg?.glow_range ?? 10,
-        labelY: cfg?.label_y ?? 10,
+        labelY: labelYFor(placement.def.model_idx, cfg?.label_y ?? 10),
       };
       this.list.push(entry);
       // 剪影替身先摆上，玩家一进场就能看见路边的"东西在那儿"
       this.addSilhouette(i, placement, groundY, cfg);
-
-      // 程序化地标：构造时一次建完，不进 `update()` 的渐进加载。
-      // 灰盒只有 8~13KB，渐进加载那点"省"完全没有意义，
-      // 而"建筑凭空冒出来"是玩家一眼就能看见的廉价感。
-      const kind = archKindFor(entry.modelIdx);
-      if (kind) this.buildArch(entry, kind, preset);
     }
-  }
-
-  /**
-   * 屋顶细分。跟着渲染分辨率走而不是给每档单开一个字段：
-   * 起翘屋面的价值全在曲率上，6 段已经读得出角部上扬，
-   * 而这 7 座建筑加起来还不到 1 万个三角形，省这点细分不划算多一个旋钮。
-   */
-  private static archSeg(preset: QualityPreset): number {
-    return preset.renderScale >= 1 ? 10 : preset.renderScale >= 0.8 ? 8 : 6;
-  }
-
-  private archMaterialFor(): MeshStandardMaterial {
-    if (!this.archMaterial) {
-      this.archMaterial = new MeshStandardMaterial({
-        vertexColors: true,
-        roughness: 0.88,
-        metalness: 0,
-      });
-    }
-    return this.archMaterial;
-  }
-
-  private buildArch(entry: StationRuntime, kind: ArchKind, preset: QualityPreset) {
-    const mb = buildStationArch(kind, Stations.archSeg(preset));
-    const data = mb.build();
-    const geo = new BufferGeometry();
-    geo.setAttribute('position', new BufferAttribute(data.positions, 3));
-    geo.setAttribute('normal', new BufferAttribute(data.normals, 3));
-    geo.setAttribute('color', new BufferAttribute(data.colors, 3));
-    geo.computeBoundingSphere();
-
-    const mesh = new Mesh(geo, this.archMaterialFor());
-    mesh.name = `station-arch-${entry.index}`;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    const g = new Group();
-    g.add(mesh);
-    g.position.set(entry.placement.x, entry.worldPos.y, entry.placement.z);
-    // 正面朝路。见 buildStationArch 的约定：本地 -Z 是正面。
-    g.rotation.y = yawFacingRoad(entry.placement.x, entry.placement.z);
-    g.updateMatrixWorld(true);
-
-    // 半径按实际生成的几何量，而不是 cfg.scale——keepout 用它判"玩家撞进站里了"
-    const box = new Box3().setFromObject(g);
-    entry.radius = horizontalRadius(box);
-    entry.object = g;
-    entry.loaded = true;
-    this.group.add(g);
-
-    const sil = this.silhouetteGroup.getObjectByName(`station-silhouette-${entry.index}`);
-    if (sil) sil.visible = false;
   }
 
   private addSilhouette(i: number, p: StationPlacement, groundY: number, cfg: { scale: number } | undefined) {
@@ -157,7 +161,10 @@ export class Stations {
     // （station_岭台 @ scale 10），所以按 7.8m 取半径不会显得瘦。
     const s = cfg?.scale ?? 10;
     const halfW = 7.8;
-    const height = 13 * (s / 10);
+    // **竖直倍率必须跟真模型一致**：琴音林被拉高 2.6 倍后是 23.4m，
+    // 替身还按 13m 摆就变成"树还没长出来先换了替身"——高度会跳。
+    const [, sy] = stationStretch(p.def.model_idx);
+    const height = 13 * (s / 10) * sy;
     // MeshBasicMaterial：不吃光照、不吃阴影、不吃贴图。
     // 200m 外的亭子只需要一个"在那儿挡着"的形状，它不需要被照亮。
     const mat = new MeshBasicMaterial({
@@ -203,13 +210,27 @@ export class Stations {
     const g = new Group();
     g.add(model.root);
     const scale = cfg.scale;
-    g.scale.setScalar(scale);
-    g.rotation.y = ((cfg.rot_y ?? 0) * Math.PI) / 180;
+    // **非等比缩放**：琴音林那片林冠要拉高成"高的树"（见 STATION_STRETCH）。
+    // 水平倍率恒为 1，所以 keepout 半径仍然是 `horizontalRadius(box) * scale`。
+    const [sx, sy] = stationStretch(st.modelIdx);
+    g.scale.set(scale * sx, scale * sy, scale * sx);
+    // 朝向有两种来源。`world.json` 里显式给了 `rot_y` 的站（五座图集模型 +
+    // 榕树下）用它；Tripo 换上的七座地标数据里 `rot_y` 都是 0，
+    // 那等于七座建筑全部朝正北——环线上哪个方向都有站，
+    // 于是大半座建筑把**背面**对着路。按本地 -Z 是正面的约定转向路。
+    g.rotation.y = FRONT_FACING_MODEL_IDX.has(st.modelIdx)
+      ? yawFacingRoad(st.placement.x, st.placement.z)
+      : ((cfg.rot_y ?? 0) * Math.PI) / 180;
     g.position.set(st.placement.x, 0, st.placement.z);
     // 用包围盒把底面贴到地面。Blender 导出的模型原点在底面中心，
     // 但不同导出器不保证，所以这里量一次。
+    //
+    // **`box.min.y` 要乘竖直倍率**，不是 `scale`：等比缩放时两者相同，
+    // 拉高之后按 `scale` 算会少抬 `min.y × (scale × (sy−1))`，
+    // 症状是"树冠地块沉进地里一截"——而琴音林的模型原点恰好在底面，
+    // 差值小到几乎看不出来，只在斜坡上露缝。
     const box = new Box3().setFromObject(model.root);
-    g.position.y = st.worldPos.y - box.min.y * scale;
+    g.position.y = st.worldPos.y - box.min.y * scale * sy;
     g.updateMatrixWorld(true);
 
     // 运行时染色：把七个手工地标压成一片"驻留在同一片阴翳里"的深色，

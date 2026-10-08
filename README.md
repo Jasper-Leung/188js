@@ -47,7 +47,7 @@ anyway". Building it yourself is covered in [Deployment](#deployment).
 ```bash
 npm install
 npm run data:extract     # mechanically extract data tables from the Godot source project (output is committed, so skippable)
-npm run assets:all       # font subsetting + GLB compression
+npm run assets:all       # font subsetting + GLB compression + Tripo building pipeline
 npm run dev              # http://127.0.0.1:5180
 npm run verify           # headless regression suite
 npm run build            # output lands in dist/
@@ -147,6 +147,7 @@ across with them. Ten hard invariants are guarded by `npm run verify`:
 ```
 verify_8_shape     961 points / 1228.8 m / 4 crossings of the midline / both loops mirror-symmetric
 verify_stations    16 stations / 5 fragments / slots cloud-tea-qin-bamboo-bird / all outside the shoulder and all reachable
+verify_station_models  9 Tripo buildings: half-width <= 8 m / below the name label / zero textures, colour baked into COLOR_0, meshopt
 verify_economy     all-clear 799 / all-buy 1010 / shortfall 211 / riding only 424
 verify_water       3 bowls / water level -3.4 always below the terrain floor / shoreline ≥ 16 m from the road
 verify_mini_game   15 sessions × 3 tries each / first visit = your own item / never two of the same in a row
@@ -354,7 +355,7 @@ site exclusion list, or turn off its browser integration.
 
 | | Source | Output | How |
 |:---|:---|:---|:---|
-| 3D models | 22.3 MB | **16.84 MB** ⚠ | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression. All 22 GLBs carry `EXT_meshopt_compression`. ⚠ *Not* the 5.0 MB this table used to promise — see below |
+| 3D models | 22.3 MB | **17.47 MB** ⚠ | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression. All 22 GLBs carry `EXT_meshopt_compression`. ⚠ *Not* the 5.0 MB this table used to promise — see below |
 | Textures | 3.9 MB | 1.3 MB | as above |
 | Font | 24.4 MB | **181 KB** (first screen) | subset to the 880 characters that actually appear in the game + WOFF2 |
 | Font (handwritten) | 24.4 MB | 404 KB (lazy) | the ~3500 most common Chinese characters, loaded only when the back of the postcard is opened |
@@ -674,11 +675,12 @@ bytes.
 
 **Unverified**
 
-- **How the crossings and the procedural buildings actually look.** The numbers
+- **How the crossings and the Tripo buildings actually look.** The numbers
   are already guarded by regression (crossing coplanar deviation 0.3 cm, 0/97
-  sample points off-road within 48 m of either crossing, all 7 procedural
-  landmarks half-width ≤ 8 m), but regression cannot answer "does it look
-  right" — that needs a look on your machine.
+  sample points off-road within 48 m of either crossing, all 9 Tripo buildings
+  half-width ≤ 8 m, zero textures, base colour baked into vertex colours), but
+  regression cannot answer "does it look right" — that needs a look on your
+  machine.
 - The actual size and glyphs of the postcard PNG. The export path waits on
   `document.fonts.load` for the handwritten font; it's logically correct, but it
   needs one real browser clicking export to confirm.
@@ -720,7 +722,7 @@ aren't".
     渲染 draw=58 三角面=627768 程序=9 贴图=4
 附近（40m 内）
   驿站/建筑
-    驿站 #00 起程驿楼 距 18.0m  无碎片  模型=arch/inn 程序化 inn  半径=7.7m  锚点高=7m
+    驿站 #00 起程驿楼 距 18.0m  无碎片  模型=#0 GLB 已加载  半径=5.0m  锚点高=7m
   植被 本帧可见：块=29 树=14 灌木=30 草=164 draw=56
 ```
 
