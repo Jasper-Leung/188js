@@ -23,7 +23,7 @@ Godot 没有可控的内部渲染分辨率，开缩放反而更慢。
 
 不想装环境的话，直接拿装好的版本，Windows / macOS / Linux 都有：
 **[Releases](https://github.com/Jasper-Leung/188js/releases)**
-（浏览器直接玩：<https://jasper-leung.github.io/no188-gift-web/>）
+（浏览器直接玩：<https://jasper-leung.github.io/188js/> —— 末尾那个 `?` 是缓存开关，见 [GitHub Pages](#github-pages)）
 
 | 你的系统 | 认哪个后缀 | 怎么装 |
 |:---|:---|:---|
@@ -115,7 +115,7 @@ npm run package:web        # 打一个可离线分发的网页包（release/）
 遇到函数调用或表达式就报错退出——宁可失败也不能猜。
 
 搬完之后中文模型文件名（`station_亭灯.glb`）也完整保留，
-文案表 234 条 key 中英两侧集合严格一致。
+文案表 416 条 key 中英两侧集合严格一致。
 
 ### 二、几何逐点对译
 
@@ -132,7 +132,7 @@ verify_mini_game   15 局每件 3 次 / 首次到访 = 自己那件 / 相邻两�
 verify_quality     三档单调 / 雾远 ≥ 植被半径 / 低档关阴影关草皮
 verify_mood        遮罩 0→0.34 永不满屏 / 有上行口 / 视野有下限
 verify_checkin     "已收过"与"不用再去"是两件事
-verify_i18n        234 条中英一致 / 文案里不许出现里程 / 驿数不带分母
+verify_i18n        416 条中英一致 / 文案里不许出现里程 / 驿数不带分母
 verify_terrain     800m / 128 格 / 6.25m 一格
 ```
 

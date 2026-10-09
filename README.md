@@ -29,7 +29,8 @@ conversion of the Godot one; it is a second implementation of the same game.
 If you would rather not set anything up, grab a built version — Windows, macOS
 and Linux are all covered:
 **[Releases](https://github.com/Jasper-Leung/188js/releases)**
-(or play in the browser: <https://jasper-leung.github.io/no188-gift-web/>)
+(or play in the browser: <https://jasper-leung.github.io/188js/> —
+the trailing `?` is a cache-buster, see [GitHub Pages](#github-pages))
 
 | Your system | Which one to take | How to install |
 |:---|:---|:---|
@@ -136,7 +137,7 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 234-key string table match exactly.
+and both sides of the 416-key string table match exactly.
 
 ### Two: translate geometry point by point
 
@@ -155,9 +156,11 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        234 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        416 strings consistent across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
+verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise
+verify_docs_numbers  the string count in the docs still matches the table / no doc points the browser link back at the old landing page
 verify_terrain     800 m / 128 cells / 6.25 m per cell
 ```
 

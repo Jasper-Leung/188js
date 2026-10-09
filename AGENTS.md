@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：65 条 / 982 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：67 条 / 1012 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 65 / FAIL 0 / 没跑成 0`，
-断言 982 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 67 / FAIL 0 / 没跑成 0`，
+断言 1012 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -120,6 +120,24 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 - 资源管线（`assets:*`）会就地改写 `public/models`、`public/textures`，
   缓存写在 `.cache/`。**只有真的要重新生成资源时才跑**，别拿它当体检命令。
 
+### 拆 `src/verify/entry.ts`：必须保序，形状已经定好了
+
+`entry.ts` 连着四轮只涨不跌，现已把最大的一族（车辆 / 骨骼 / 骑姿，约 1,300 行）
+搬进 `src/verify/vehicle.ts`。**要拆第二块的话，照抄这个形状：**
+
+- 拆出去的模块导出 **`registerXxxChecks(check)`**，由 `entry.ts`
+  **在原来的位置调用一次**。
+- **绝对不要**写成模块顶层直接 `check(...)`，也**不要**只加一句 `import './xxx'`：
+  ESM 的 import 会被提升，那一族会排到 `entry.ts` 的任何一行之前，
+  **注册顺序就变了**——而顺序在这个项目里是有语义的
+  （`verify_toast_reply` 的注释写死了"谁先装上 DOM 桩后面那条就会拿到残桩"）。
+- 注册表（`results` / `check` / `runAll` / `checkNames`）**留在 `entry.ts`**，
+  拆出去的族只拿得到 `CheckFn`，碰不到 `results`。
+- `expect` 在 `src/verify/harness.ts`，两边共用。
+
+**验收口径只有一条：`npm run verify` 的条数与断言数一条都不许变。**
+少一条就是漏搬了——这是唯一能证伪"机械搬移"的东西。
+
 ---
 
 ## 4. 提交前
@@ -127,7 +145,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 65 条 / 982 断言
+npm run verify      # 67 条 / 1012 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事

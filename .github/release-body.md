@@ -27,7 +27,7 @@ After that it launches normally, with sound.
 
 ## Rather not install anything?
 
-Play it in the browser: <https://jasper-leung.github.io/no188-gift-web/>
+Play it in the browser: <https://jasper-leung.github.io/188js/>
 
 ## Notes
 
