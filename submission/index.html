@@ -68,7 +68,7 @@
         </ul>
 
         <p class="hero-cta">
-          <a class="btn btn-primary" data-cfg="demoUrl" data-demo data-todo="demoUrl">
+          <a class="btn btn-primary" data-cfg="demoUrl" data-demo href="https://jasper-leung.github.io/188js/?">
             <span class="zh">在线试玩</span><span class="en">Play online</span>
           </a>
           <a class="btn" href="#deliverables">
@@ -208,7 +208,9 @@
         </article>
 
         <!-- ---------- 02 在线 Demo ---------- -->
-        <!-- data-demo：在线 Demo 还没开放，`site.json` 的 demoHidden 为 true 时构建会把这一整块收起来 -->
+        <!-- data-demo：整块的开关。`site.json` 的 demoHidden 为 true 时构建会把这一块连同抬头那颗
+             试玩按钮、页脚那条链接一起收起来——页面上不留一个点不开的按钮。
+             现在 demoHidden 已经是 false，三处都必须是**带 href 的真链接**（`verify_submission` 断言）。 -->
         <article class="card" id="demo" data-demo>
           <header class="card-head">
             <span class="num">02</span>
@@ -222,13 +224,13 @@
           </header>
 
           <p class="cta-big">
-            <a class="btn btn-primary btn-big" data-cfg="demoUrl" data-todo="demoUrl">
+            <a class="btn btn-primary btn-big" data-cfg="demoUrl" href="https://jasper-leung.github.io/188js/?">
               <span class="zh">打开在线 Demo</span><span class="en">Open the live demo</span>
             </a>
           </p>
 
           <p class="url-row">
-            <code data-cfg="demoUrl" data-todo="demoUrl">待填 / TBD</code>
+            <code data-cfg="demoUrl">https://jasper-leung.github.io/188js/?</code>
             <button class="copy" type="button" data-copy="[data-cfg='demoUrl']">
               <span class="zh">复制</span><span class="en">Copy</span>
             </button>
@@ -389,11 +391,15 @@
               </li>
               <li>
                 <span class="zh"
-                  >13 个驿站模型里，7 座是代码生成的（屋檐、柱、基座、栏杆，每座 0.01 MB，零图片字节）；
-                  另外 5 座碎片驿站由 Tripo 生成，自带贴图。</span
+                  >七座驿站地标——驿楼、茶寮、岭台、亭灯、凉亭、廊、神苑——全部换成了 Tripo 生成的
+                  真建筑，屋脊、挑檐、台基都在；程序化生成的占位版本已整段删掉。
+                  判据 `verify_station_models` 直接量压缩之后那个 .glb 的包围盒。</span
                 ><span class="en"
-                  >Of 13 station models, 7 are generated in code at 0.01 MB each with zero image bytes; the 5 fragment
-                  stations come from Tripo and do carry their own textures.</span
+                  >All seven station landmarks — the inn, the tea stall, the ridge terrace, the lantern,
+                  the pavilion, the corridor, the shrine — are now real Tripo buildings with actual
+                  ridgelines, eaves and plinths; the procedural stand-ins were deleted outright.
+                  <code>verify_station_models</code> measures the bounding box of the compressed .glb
+                  that actually ships.</span
                 >
               </li>
               <li>
@@ -413,11 +419,12 @@
             <ul class="notes">
               <li>
                 <span class="zh"
-                  >22 个 3D 资产里 14 个来自 Tripo：摩托车的 69 个零件、自行车的 19 个、滑板的 5 个，
-                  外加 5 座碎片驿站、松树、竹丛、灌木与两栋现代建筑。</span
+                  >22 个 3D 资产里 9 座建筑来自 Tripo：上面那七座驿站地标，外加两栋现代楼；
+                  另有摩托车的 69 个零件、自行车的 19 个、滑板的 5 个，以及松树、竹丛与灌木。</span
                 ><span class="en"
-                  >14 of 22 3D assets came out of Tripo: 69 motorcycle parts, 19 bicycle parts, 5 skateboard parts,
-                  plus 5 fragment stations, pines, bamboo, shrubs and two modern buildings.</span
+                  >9 of the 22 3D assets are Tripo buildings: the seven station landmarks above plus two modern
+                  blocks. The rest are the motorcycle's 69 parts, the bicycle's 19, the skateboard's 5, and the pines,
+                  bamboo and shrubs.</span
                 >
               </li>
               <li>
@@ -449,18 +456,19 @@
               <li>
                 <span class="zh"
                   >移植自 Godot 4.6 原型，本届比赛期间重做为 three.js r169 + TypeScript + Vite；
-                  玩法、数值与 401 条双语文案 1:1 保留，表现层与工程结构重做。</span
+                  玩法与数值 1:1 保留，双语文案补到 416 条，表现层与工程结构重做。</span
                 ><span class="en"
                   >The original was Godot 4.6. This build is three.js r169 + TypeScript + Vite — a full port rebuilt
-                  during the competition, with gameplay, numbers and all 401 bilingual strings kept 1:1.</span
+                  during the competition, with gameplay and numbers kept 1:1, the bilingual strings carried over and
+                  grown to 416, the presentation layer and project structure rebuilt.</span
                 >
               </li>
               <li>
                 <span class="zh"
-                  >几何不变量写成无头回归：<b>52 组 / 796 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
+                  >几何不变量写成无头回归：<b>67 组 / 1012 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
                   16 座驿站可达、经济系统总量、水位、双语键集合一致。它是上线的门。</span
                 ><span class="en"
-                  >Geometric invariants live in a headless regression — <b>52 suites / 796 assertions</b> pinning the 961
+                  >Geometric invariants live in a headless regression — <b>67 suites / 1012 assertions</b> pinning the 961
                   centreline points, 1228.8 m, 4 crossings, 16 reachable stations, economy totals, water level and
                   bilingual key parity. It gates the deploy.</span
                 >
@@ -485,27 +493,35 @@
           <tbody>
             <tr>
               <th><span class="zh">游戏本体</span><span class="en">Game build</span></th>
-              <td><b>20.77 MB</b><span class="zh"> · 63 个文件</span><span class="en"> · 63 files</span></td>
+              <td><b>21.41 MB</b><span class="zh"> · 63 个文件</span><span class="en"> · 63 files</span></td>
             </tr>
             <tr>
               <th><span class="zh">其中模型</span><span class="en">of which models</span></th>
-              <td>16.84 MB<span class="zh">（81%）</span><span class="en"> (81%)</span></td>
+              <td>17.47 MB<span class="zh">（82%）</span><span class="en"> (82%)</span></td>
             </tr>
             <tr>
               <th><span class="zh">首屏必下</span><span class="en">First playable frame</span></th>
-              <td><b>3.45 MB</b><span class="zh"> · JS gzip 280 KB</span><span class="en"> · 280 KB gzipped JS</span></td>
+              <td><b>1.13 MB</b><span class="zh"
+                > · JS gzip 279 KB<br /><span class="dim"
+                  >口径 = index.html + 入口 JS + CSS + 字体子集，<b>不含任何模型</b>；自行车（2.79 MB）
+                  走在同一条启动链上，但没到之前也玩得了——那时是走路。</span
+                ></span
+              ><span class="en"> · 279 KB gzipped JS<br /><span class="dim"
+                  >Counted as index.html + entry JS + CSS + the subset font, <b>no models at all</b>; the bicycle
+                  (2.79 MB) rides the same boot chain, but the game is playable before it lands — you are on foot.</span
+              ></span>
             </tr>
             <tr>
               <th><span class="zh">开发规模</span><span class="en">Development</span></th>
-              <td><span class="zh">三天 · 32 笔提交 · 一人</span><span class="en">Three days · 32 commits · one person</span></td>
+              <td><span class="zh">一人 · 52 笔提交</span><span class="en">One person · 52 commits</span></td>
             </tr>
           </tbody>
         </table>
         <p class="card-meta">
           <span class="zh"
-            >数字量自本机 <code>dist/</code>，2026-10-06；每次 <code>npm run build</code> 会把当次实测值打印出来。</span
+            >数字量自本机 <code>dist/</code>，2026-10-08；每次 <code>npm run build</code> 会把当次实测值打印出来。</span
           ><span class="en"
-            >Measured from the local <code>dist/</code> on 2026-10-06; every <code>npm run build</code> prints the
+            >Measured from the local <code>dist/</code> on 2026-10-08; every <code>npm run build</code> prints the
             current numbers.</span
           >
         </p>
@@ -517,7 +533,7 @@
         <a data-cfg="repoUrl" href="https://github.com/Jasper-Leung/188js"><span class="zh">代码仓库</span><span class="en">Repository</span></a>
         <a data-cfg="devlogUrl" href="https://github.com/Jasper-Leung/188js/blob/main/promo/devlog.md"><span class="zh">开发日志</span><span class="en">Dev log</span></a>
         <a data-cfg="commitsUrl" href="https://github.com/Jasper-Leung/188js/commits/main"><span class="zh">提交记录</span><span class="en">Commits</span></a>
-        <a data-cfg="demoUrl" data-demo data-todo="demoUrl"><span class="zh">在线 Demo</span><span class="en">Live demo</span></a>
+        <a data-cfg="demoUrl" data-demo href="https://jasper-leung.github.io/188js/?"><span class="zh">在线 Demo</span><span class="en">Live demo</span></a>
       </p>
       <p class="foot-note">
         <span class="zh"

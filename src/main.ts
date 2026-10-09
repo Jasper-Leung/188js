@@ -521,6 +521,16 @@ class App {
   private demoActive = false;
   private demoT = 0;
   /**
+   * 序章那七张叙事段落正在排队或正在演。
+   *
+   * **它管的是打卡，不是骑行**：车该动照动（序章本来就不锁操作）。
+   * 只用它让开 `tryCheckIn()` 里的商店，理由见那里。
+   *
+   * 生命周期交给 `tryCheckIn()` 自查（叙事段落一空就自己落下），
+   * 所以 `resetRun()` 不必管它——重开时序章会重新起播并把它重新置真。
+   */
+  private prologueBusy = false;
+  /**
    * 玩家自己按过 `E` 没有。
    *
    * 它是「车到货时自动换成自行车」的唯一安全阀（`onAssetLoaded()`）：
@@ -1103,6 +1113,10 @@ class App {
     // 判据：谁长谁开，不是谁想开谁开。
     if (!game.prologueDone) {
       game.markPrologueDone();
+      // 置位在**起播**这一刻而不是播完：闸门要挡住的是"叙事还在屏上时按下的那一下空格"，
+      // 而序章一进世界就起了播，中间没有玩家能插手的时间窗。
+      // 它自己落下的地方在 `tryCheckIn()` —— 叙事段落一空就落，不靠轮询。
+      this.prologueBusy = true;
       this.ui.showStorySequence(
         [
           t('prologue_0_1'),
@@ -1310,6 +1324,24 @@ class App {
   // ---------------------------------------------------------------- 打卡
   tryCheckIn() {
     if (this.phase !== 'roaming') return;
+    // 序章那七张叙事段落还在屏上时，**打卡让路**。
+    //
+    // 实机撞到的：序章跑在 `roaming` 相位上，而故事卡是**故意不锁操作**的
+    // （`narrativeBusy` 全程为假、`canRide` 也放行——那些判断都是对的），
+    // 错的是打卡没跟着一起让路。于是玩家出生就在十八驿门口、而那是个商店，
+    // 按下 Space 推进叙事的那一下**同时**把商店顶了上来：
+    // 律师函那段压在前面，背后一屏 0 铜钱、全部"Not enough coins"的商品。
+    //
+    // 为什么不用 `world.narrativeBusy`：那正是这里**不能用**的信号——
+    // "骑过去顺便读"的字本来就不该锁操作，把它改成锁会砸掉别的设计。
+    //
+    // 为什么不清标志而是每次重新判：标志只保证"序章刚起播"这一次让路，
+    // 而叙事段落随时可能被点掉或自动走完。挂在 tryCheckIn 里自查，
+    // 就不会出现"序章早结束了、闸门还关着"这种僵尸状态，也不需要每帧去轮询。
+    if (this.prologueBusy) {
+      if (this.ui.storyBusy) return;
+      this.prologueBusy = false;
+    }
     const kind = this.interactKind();
     if (kind === 'shop') {
       // 相位复用 `checkin`：它已经在 `verify_phase` 的"占用"集合里

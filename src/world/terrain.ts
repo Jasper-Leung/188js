@@ -57,12 +57,14 @@ export class Terrain {
     const uniforms = patchStandard(this.material, TERRAIN_PATCH, {
       ground_color: { value: base.convertSRGBToLinear() },
       // `BASE_COLOR` 是源项目的数据，一个数不改。
-      // 下面两个是**这里定的**辅助色，所以按"照片里的草"重新调过：
+      // 下面两个是**这里定的**辅助色，跟着着色器里那道去饱和一起调过：
       // 原来那组 (0.24,0.39,0.16) / (0.47,0.545,0.245) 饱和度太高，
       // 加上底色之后整片地读成"游戏里的鲜绿"，一眼就假。
-      // 真实草地的暗部是压住饱和度的深绿偏土，枯黄层更接近麦秆。
-      ground_dark: { value: new Color(0.2, 0.28, 0.135) },
-      ground_dry: { value: new Color(0.44, 0.47, 0.255) },
+      // 现在把两个都往青灰里收：暗部去掉黄绿、枯黄层去掉土黄，
+      // 于是它们和降饱和之后的底色落在同一族里——
+      // **辅助色与底色分家，是这类调色最容易犯也最难看出来的一种错。**
+      ground_dark: { value: new Color(0.19, 0.25, 0.17) },
+      ground_dry: { value: new Color(0.45, 0.46, 0.3) },
       mottle_scale: { value: 0.35 },
       clump_scale: { value: 0.9 },
       speckle_strength: { value: 0.12 },

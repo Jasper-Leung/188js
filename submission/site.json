@@ -19,16 +19,22 @@
   "commitsUrl": "https://github.com/Jasper-Leung/188js/commits/main",
 
   "_demoUrl": [
-    "在线 Demo 的正式地址还没定（历史上仓库里留过三套部署痕迹，见表单 §0.4）。",
-    "现在 demoHidden = true：整块「在线 Demo」卡片、抬头的试玩按钮、页脚那条链接都收起来，",
-    "页面上不留一个点不开的按钮。地址定下来之后：",
-    "  1) 把 demoHidden 改成 false",
-    "  2) 把 demoUrl 填成整条 https://…",
-    "  3) 跑一次 npm run build",
-    "顺带一提：dist/ 的根目录就是游戏本体，所以本站自己也是 Demo 的载体之一 —— 部署到哪儿，哪儿就能直接玩。"
+    "在线 Demo 的地址。**就是本站自己**：`dist/` 的根目录就是游戏本体，",
+    "所以部署到哪儿，哪儿的根就能直接玩（这正是 `base: './'` 的约束，见 vite.config.ts）。",
+    "",
+    "末尾那个孤零零的 `?` 是**缓存开关**，不是手滑：Pages 走 CDN，",
+    "游戏每次重新部署，浏览器和中间缓存却还攥着旧的 index.html 与旧的哈希资源，",
+    "于是评委点进来看到的是上一版。挂一个空查询串就成了另一个缓存键，每次拿到的都是当下这版。",
+    "代价为零——Vite 不读查询串，`?` 照样路由到同一个 index.html。",
+    "",
+    "⚠ 历史上仓库里留过 `no188-gift-web` 这个地址，而它指向的是**旧版落地页**、不是游戏本体。",
+    "认地址只有一个办法：抓那个 URL 的 index.html，看它引的是 `assets/index-*.js`（游戏）",
+    "还是 `landing.css`（落地页）。README 与 release-body 里那几处曾经写错过，已经改掉。",
+    "",
+    "改地址时：`demoHidden` 保持 false；填完跑一次 `npm run build`。"
   ],
-  "demoUrl": "",
-  "demoHidden": true,
+  "demoUrl": "https://jasper-leung.github.io/188js/?",
+  "demoHidden": false,
 
   "_sourceZipUrl": [
     "源码 zip（GitHub 对 main 分支的归档）。和 releaseUrl 指向的桌面版安装包是两回事。"

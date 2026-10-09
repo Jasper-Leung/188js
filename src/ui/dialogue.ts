@@ -120,6 +120,26 @@ export class Dialogue {
     this.autoT = 0;
   }
 
+  /**
+   * 立刻收场，不等玩家按键。
+   *
+   * 存在的理由是 `Ui.hidePanels()`：那个方法负责"推新面板之前把旧面板收干净"，
+   * 而它原来收了 pause / postcard / synthesis / endCard / shop 五样，
+   * **唯独没收对白**。症状是 90 秒演示结束、结算屏推上来之后，
+   * 序章那一句还浮在明信片卡片正上方——而且它会跟着玩家继续走：
+   * `showTitle()` 与 `closeEndCard()` 都走同一个 `hidePanels()`。
+   *
+   * ⚠ **必须走 `finish()`，不能只 `setShown(root, false)`。**
+   * `finish()` 除了藏，还会解 `resolveCurrent` 并摘掉按键监听。
+   * 只藏不解 Promise 的话，所有 `whenDialogueIdle()` 的调用方会永久挂着——
+   * 那正是这个项目反复栽过的"界面全对、只有某个 Promise 永远不落地"。
+   *
+   * `finish()` 本身幂等，没有对白在播时调用是安全的空操作。
+   */
+  hide(): void {
+    this.finish();
+  }
+
   /** 每帧推进一步逐字显示。暂停时 main 不调它，逐字就停在那儿——这是对的。 */
   update(dt: number): void {
     // 自动推进（演示模式）。没有它的话，演示会在第一句对白上永远停住：

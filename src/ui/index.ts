@@ -456,6 +456,18 @@ export class UI {
     this.storyCards.showSequence(parts, { title, ...opts });
   }
 
+  /**
+   * 叙事段落正在屏上吗（序章那七张、或驿里那几句）。
+   *
+   * 给 `main.tryCheckIn()` 当闸门用。**不能拿 `world.narrativeBusy` 代替**：
+   * 故事卡是"骑过去顺便读"，它刻意不锁操作，所以序章期间
+   * `narrativeBusy` 恒为假、`canRide` 也放行——那些判断都是对的，
+   * 错的是**打卡**没有跟着一起让路。
+   */
+  get storyBusy(): boolean {
+    return this.storyCards.busy;
+  }
+
   /** 强制打断：压暗 + 锁操作。只给"有人在你耳边说话"那几场用。 */
   showInterruptCard(text: string, title?: string, ms?: number): void {
     this.storyCards.show(text, { title, interrupt: true, ms });
@@ -541,6 +553,10 @@ export class UI {
     this.synthesis.hide();
     this.endCard.hide();
     this.shop.close();
+    // 对白也在这张单子里。**它原来不在**——于是 `finishRun()` 推结算屏时，
+    // 序章那一句还浮在明信片正上方，而且会跟着玩家一路走到标题页。
+    // `hide()` 内部走 `finish()`，所以 `dialogueIdle` 会被解开（见 `Dialogue.hide`）。
+    this.dialogue.hide();
   }
 
   showPause(): void {

@@ -158,6 +158,23 @@ export class StoryCards {
     if (!this.cards.length) this.pump();
   }
 
+  /**
+   * 现在屏上有叙事段落吗。
+   *
+   * **队列也要算**：序章那七张是一张演完才 `pump()` 下一张的，
+   * 所以"最后一张刚退场、队列还没接上"的那一帧是真的有话没说完。
+   * 只看 `cards` 会漏掉它——而那一帧恰好是玩家最可能按空格的时刻。
+   *
+   * 谁读它：`main.tryCheckIn()`。理由写在那里：序章跑在 `roaming` 相位上，
+   * 而故事卡是**故意不锁操作**的（`narrativeBusy` 在这期间为假），
+   * 于是"推进叙事"的那一下空格会顺带触发打卡。
+   * 玩家出生就在十八驿门口，而那是个商店——
+   * 于是这个游戏里玩家按下的第一个键，同时读到了律师函和一屏买不起的商品。
+   */
+  get busy(): boolean {
+    return this.count > 0 || this.pending > 0;
+  }
+
   /** 队列里还有就上下一张。 */
   private pump() {
     const next = this.queue.shift();
