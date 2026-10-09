@@ -269,7 +269,6 @@ export function makeShell(c: MiniGameContext): Shell {
  * 零分配：Godot 那边每个主题都要 `PackedVector2Array` 建几十个点，
  * 这里全部改成直接 `moveTo/lineTo/fill`，点数是常量而不是对象。
  */
-const SKY = 4;
 
 interface ThemeCfg {
   readonly top: Rgb;
@@ -317,27 +316,66 @@ export type Theme = (typeof THEME)[keyof typeof THEME];
 /** 顺序 0..4 与碎片顺序 云/茶/琴/竹/禽 一致。改这里之前先看 MiniGamePicker 的轮换表。 */
 const THEMES: readonly ThemeCfg[] = [
   // 0 云 · 云影台：雨后初霁，高台上一片被洗过的淡蓝
-  makeTheme('9FC3DC', 'E4EEF2', '7E9DAF', '5E7D8C'),
+  //
+  // 远景 `7E9DAF` ↔ 近景 `5E7D8C` 原来只有 **1.54** —— 是五件里第二糊的。
+  // 它一直没人提是因为云本身有五团白云压着，形状够读；
+  // 但**层**读不出来：远处那片山和近处这片台是同一个调子。
+  // 抬远景、压近景之后拉到 **2.45**，台与山才分得开。
+  makeTheme('9FC3DC', 'E4EEF2', '93AEBE', '4E6B7C'),
   // 1 茶 · 茶烟小筑：灶上的暖黄，屋里比屋外亮
   makeTheme('3B2C20', '6B4E33', '8A6540', '4A3626'),
   // 2 琴 · 琴音林：林子里的暮色，风把叶子翻过来是亮的
-  makeTheme('2A3A33', '546B52', '3E5647', '26362C'),
+  //
+  // ⚠ 原来远景 `3E5647` 与近景 `26362C` 的对比度只有 **1.59**，
+  // 两层剪影几乎同色 —— 于是"林子"读不出来，剩下的就是一片糊。
+  // 抬亮远景、压深近景之后拉到 **3.27**。
+  //
+  // 注意 `far` 是画在**上层**（h*0.62）那一层，`mid` 才是近景（h*0.74），
+  // 所以正确方向是"远山被雾抬亮、近山沉下去"——我第一版反过来调，
+  // 把近景调亮了，实测远↔近从 1.59 掉到 1.16，比原来更糊。
+  makeTheme('2A3A33', '546B52', '667E6F', '1E2D28'),
   // 3 竹 · 竹雨庭：夜雨，湿的、发亮的
-  makeTheme('141C1E', '2E3A38', '222D2C', '161E1F'),
+  //
+  // ⚠ **这一屏原来最糊**，原因不是画得少，是三层全挤在同一个亮度上：
+  // 远景 `222D2C` ↔ 近景 `161E1F` 的对比度实测只有 **1.19**，
+  // 远景 ↔ 天底只有 **1.20** —— 两层山脊之间、以及山脊与天之间
+  // **几乎没有分界**。玩家看到的是一块均匀的深色，
+  // 于是"粗糙"读作"没画完"，而不是"夜雨"。
+  //
+  // 修法是**拉开层距**，不是加细节：天底抬到 `404F4B`、远山被雾抬到
+  // `5A6E70`、近景压到 `121A19`。远↔天 1.20 → **1.60**，
+  // 远↔近 1.19 → **3.27**，层次立刻立住。
+  makeTheme('1E282B', '404F4B', '5A6E70', '121A19'),
   // 4 禽 · 花房·禽语湖湾：天刚亮，湖面比天暗
   makeTheme('5C7A93', 'D9C9AE', '7E94A3', '4E6069'),
 ];
 
 export function drawBackdrop(g: CanvasRenderingContext2D, w: number, h: number, theme: Theme): void {
   const t = THEMES[theme];
-  // 天光渐变
-  g.fillStyle = '#000';
-  for (let i = 0; i < SKY; i++) {
-    const k0 = i / SKY;
-    const k1 = (i + 1) / SKY;
-    g.fillStyle = rgba(lerpRgb(t.top, t.bot, k0));
-    g.fillRect(0, h * k0, w, h * (k1 - k0) + 1);
-  }
+  // 天光渐变。
+  //
+  // ⚠ 原来是把天分成 4 段、每段填一个纯色（`SKY = 4` + 4 次 `fillRect`）。
+  // 那是**四道可见的横边**——两段之间的亮度差在夜雨那张图上尤其明显，
+  // 读起来像"贴了四条色带"，也就是玩家说的"背景粗糙"的一半来源。
+  //
+  // 换成一条真正的 `createLinearGradient`：Godot 那边是 `draw_rect` 逐行画的，
+  // 本身连续，Web 侧用四段纯色去逼近它才是失真。
+  // 建一次渐变对象、每帧复用（存进 `g` 的 `__skyGrad`），别每帧新建。
+  const sky = (g as CanvasRenderingContext2D & { __skyGrad?: CanvasGradient }).__skyGrad;
+  const grad = sky && (g as CanvasRenderingContext2D & { __skyKey?: string }).__skyKey === `${theme}`
+    ? sky
+    : (() => {
+        const lg = g.createLinearGradient(0, 0, 0, h);
+        lg.addColorStop(0, rgba(t.top));
+        // 中间插两站，让过渡的曲率接近真实天光而不是一条直线。
+        lg.addColorStop(0.55, rgba(lerpRgb(t.top, t.bot, 0.55)));
+        lg.addColorStop(1, rgba(t.bot));
+        (g as CanvasRenderingContext2D & { __skyGrad?: CanvasGradient; __skyKey?: string }).__skyGrad = lg;
+        (g as CanvasRenderingContext2D & { __skyKey?: string }).__skyKey = `${theme}`;
+        return lg;
+      })();
+  g.fillStyle = grad;
+  g.fillRect(0, 0, w, h);
   // 两层远景：远的一层更淡（空气透视），近的一层更沉
   horizon(g, w, h, h * 0.62, t.farCol);
   horizon(g, w, h, h * 0.74, t.midCol);

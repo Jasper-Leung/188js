@@ -647,7 +647,16 @@ export class World {
               this.emit({
                 type: 'storyLine',
                 stationIndex: this.checkInTarget,
-                title: st?.placement.def.name ?? '',
+                // ⚠ **必须走 `stationNameOf()`**，不能直接取 `def.name`。
+                // `def.name` 是中文站名，而英文界面里这张卡的抬头
+                // 会原样显示成「竹雨庭」——同一座驿站在顶栏、对白框、
+                // 路过台词三处都显示英文，唯独这张是中文。
+                //
+                // 为什么一直没人发现：这两张卡**只在第二、三次到访才出现**
+                // （`count === 1 || count === 2`），而绝大多数人第一遍玩到底
+                // 根本走不到这里。同一函数的 447 行（路过台词）用的就是
+                // `stationNameOf()`，630 行（首访对白）也是——**只有这一行漏了**。
+                title: st ? stationNameOf(st.placement.def) : '',
                 text,
               });
             }

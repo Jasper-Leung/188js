@@ -302,6 +302,25 @@ body {
   color: #efe7d6;
   white-space: pre-wrap;
 }
+/* 「点一下跳过」那个角标。
+ *
+ * 存在的理由：`cursor: pointer` 只在**鼠标已经指着它**的时候才存在，
+ * 而触屏玩家永远看不见它——他看到的只是一块黑底白字，
+ * 不知道那是不是需要他做什么，于是只能干等它自己走完
+ * （序章那七句中文侧要 66 秒）。
+ *
+ * 所以"可点"这件事必须在屏上有一行字说，而不是靠光标形状暗示。
+ * 它自己会在 2.6 秒后撤掉（`StoryCards.hintLeft`），只提醒一次。 */
+.g-card-hint {
+  margin-top: 9px;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  color: rgba(214, 196, 160, 0.58);
+  /* 不吃点击：它是提示，不是热区的一部分。真正吃点击的是整张卡，
+   * 而这一行压在卡里面——所以它自己不能抢指针事件。 */
+  pointer-events: none;
+  animation: g-card-in 220ms ease-out backwards;
+}
 @keyframes g-card-in {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }

@@ -56,7 +56,7 @@ import { isShown } from '../ui/dom';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS, clampTier } from '../core/settings';
-import { DEFAULT_LANG, getLang, setLang, t } from '../i18n';
+import { DEFAULT_LANG, getLang, setLang, t, stationNameOf } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
 import type { UIHooks } from '../ui';
@@ -589,6 +589,162 @@ function clamp01(v: number) {
 }
 
 // ---------------------------------------------------------------- 文案
+/**
+ * 站名不许绕过 `stationNameOf()`。
+ *
+ * ## 它挡的是什么
+ *
+ * `road.json` 里每个站都有 `name`（中文）与 `name_en`（英文），
+ * 而**中文那一侧的名字长得像个普通字符串**——所以
+ * `title: st?.placement.def.name` 编译得过、单测跑得过、界面也不报错，
+ * 只是英文界面里那张卡的抬头原样显示成「竹雨庭」。
+ *
+ * 实测就出在 `world.ts` 打出 `revisit_2nd_here` / `revisit_3rd_here`
+ * 那一句：同一个函数里另外两处（路过台词、首访对白的说话人）
+ * 都写了 `stationNameOf(...)`，**只有这一行漏了**。
+ *
+ * ## 为什么六轮都没人看见
+ *
+ * 那两张卡**只在第二、三次到访才出现**（`count === 1 || count === 2`），
+ * 而绝大多数人第一遍玩到底根本走不到。`verify_first_run` 守的是第一分钟，
+ * `verify_i18n` 守的是文案表两侧对齐——**没有一条判据管"数据字段被怎么取用"**。
+ *
+ * ## 口径：不列黑名单，列**白名单**
+ *
+ * 逐条登记"哪几处是合法的"太容易漏（这正是它漏掉的原因）。
+ * 所以反过来：扫全部 `src/**`（排除 `src/verify` 与 `src/debug`），
+ * 凡是**把 `def.name` / `placement.def.name` 当作显示文本取用**的地方，
+ * 必须在 `stationNameOf(` 的调用里，或者明确属于诊断输出。
+ *
+ * 各自会红的做法：
+ *   · 把 `world.ts` 那一行改回 `st?.placement.def.name ?? ''` → 第 1 条红。
+ *   · 在别处新写一处 `title: xxx.def.name` → 第 2 条红（枚举扫到）。
+ *   · 把 `stationNameOf()` 改成 `return byLang(def.name, def.name)` → 第 3 条红
+ *     （英文侧缺失时不再回退中文站名）。
+ */
+check('verify_station_name_i18n', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+
+  // ---- 1. 复现那一处：`revisit_*_here` 那张卡的抬头 ----
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'world', 'world.ts'), 'utf8');
+    // 只看发出 `revisit_*_here` 那张卡的那一段。
+    const at = src.indexOf("revisit_2nd_here");
+    asserts++;
+    if (at < 0) {
+      probs.push('world.ts 里找不到 revisit_2nd_here —— 第二/三次到访那张卡不见了，这条判据要跟着改');
+    } else {
+      const seg = src.slice(at, at + 900);
+      asserts++;
+      if (/def\.name\s*\?\?/.test(seg) || /title:\s*[^,\n]*def\.name\b/.test(seg)) {
+        probs.push(
+          'revisit_2nd_here / revisit_3rd_here 那张卡的抬头直接取了 `def.name`（中文站名）——' +
+            '英文界面里它会原样显示成「竹雨庭」，必须走 stationNameOf()',
+        );
+      }
+      asserts++;
+      if (!/stationNameOf\(/.test(seg)) {
+        probs.push('那张卡的抬头没有走 stationNameOf() —— 英文侧必然是中文站名');
+      }
+    }
+  }
+
+  // ---- 2. 全量扫：任何 `def.name` 的显示性取用都必须经过 stationNameOf ----
+  asserts++;
+  {
+    // 注释必须先剥掉：`world.ts` 里那段注释**正是在讲这个 bug**，
+    // 它里面满是 `st?.placement.def.name`，留着会把判据自己判红。
+    // 口径与 `tools/i18n-dead.mjs` 的 `stripComments` 同源。
+    const stripComments = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^[ \t]*\/\/.*$/gm, ' ');
+    const walk = (dir: string, out: string[] = []): string[] => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p, out);
+        else if (name.endsWith('.ts')) out.push(p);
+      }
+      return out;
+    };
+    const offenders: string[] = [];
+    for (const f of walk(join(process.cwd(), 'src'))) {
+      const rel = f.replace(`${process.cwd()}${sep}`, '');
+      // 判据自己不算（它整段在讲这件事），诊断输出不算（`probe` / `spawn`
+      // 打在终端上，而终端语言由跑它的人决定，不是玩家在读界面）。
+      if (rel.includes(`verify${sep}`) || rel.includes(`debug${sep}`)) continue;
+      const text = stripComments(readFileSync(f, 'utf8'));
+      text.split(/\r?\n/).forEach((line, i) => {
+        // 命中条件：`xxx.def.name` 出现在一个**取值**的位置上，
+        // 而不是在 `stationNameOf(` 的实参里。
+        const m = line.match(/(\w[\w.]*?)\.def\.name\b(?!_en)/);
+        if (!m) return;
+        // 合法用法一：整体就是 `stationNameOf(...)` 的实参。
+        if (/stationNameOf\s*\(\s*$/.test(line.slice(0, m.index ?? 0))) return;
+        // 合法用法二：判它自己的存在（`if (def.text)`），不显示。
+        if (/^\s*(if|\?|&&|\|\|)/.test(line)) return;
+        // 其余一律算漏翻——包括 `title: xxx.def.name`、`el(..., def.name)`。
+        offenders.push(`${rel}:${i + 1}  ${line.trim().slice(0, 70)}`);
+      });
+    }
+    asserts++;
+    if (offenders.length) {
+      probs.push(
+        `这 ${offenders.length} 处把 \`def.name\`（中文站名）当显示文本直接取用，` +
+          `英文界面里会原样露出中文：${offenders.slice(0, 4).join(' | ')}`,
+      );
+    }
+  }
+
+  // ---- 3. `stationNameOf` 本身要在英文侧缺失时回退到中文名 ----
+  asserts++;
+  {
+    // 用**真实站名**去构造一个"缺 name_en"的副本，
+    // 而不是手写一份 StationDef 字面量——后者会跟着数据表漂。
+    const noEn = { ...STATIONS[14].def, name_en: '' } as typeof STATIONS[14]['def'];
+    setLang('en');
+    const got = stationNameOf(noEn);
+    asserts++;
+    if (got !== noEn.name) probs.push(`英文侧缺 name_en 时 stationNameOf() 返回了「${got}」，应回退到中文站名「${noEn.name}」`);
+    setLang('zh');
+    asserts++;
+    if (stationNameOf(noEn) !== noEn.name) probs.push('中文侧 stationNameOf() 没有返回中文站名');
+  }
+
+  // ---- 4. 两侧都要有英文名（数据层）----
+  asserts++;
+  {
+    const noEn = STATIONS.filter((s) => !s.def.name_en).map((s) => s.def.name);
+    asserts++;
+    if (noEn.length) probs.push(`这 ${noEn.length} 座驿站没有 name_en：${noEn.join('、')}`);
+  }
+
+  // ---- 5. 切到英文真的拿到英文名 ----
+  asserts++;
+  {
+    setLang('en');
+    const names = STATIONS.map((s) => stationNameOf(s.def));
+    setLang('zh');
+    const zhNames = STATIONS.map((s) => s.def.name);
+    asserts++;
+    const leaked = names.filter((n, i) => n === zhNames[i]);
+    if (leaked.length) {
+      probs.push(
+        `英文侧有 ${leaked.length} 座驿站的站名与中文相同：${leaked.join('、')} —— ` +
+          '要么 name_en 缺了，要么 stationNameOf() 没有按语言分支',
+      );
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '16 座站名两侧都有 · 抬头一律走 stationNameOf() · 没有任何地方直取中文 def.name',
+    asserts,
+  );
+});
+
 check('verify_i18n', () => {
   let asserts = 0;
   const probs: string[] = [];
@@ -1286,6 +1442,247 @@ check('verify_panel_layering', () => {
     probs.length
       ? probs.join('；')
       : '闸门随叙事起落 · 面板推上来时底下收干净 · 对白收场会 settle Promise · 两处接线在',
+    asserts,
+  );
+});
+
+/**
+ * 玩家看得见的四件"我不知道这个能不能点 / 为什么要做这个"。
+ *
+ * ## 它挡的是什么
+ *
+ * 这一族全是**同一个形状的缺陷**：代码是对的、界面全对，而玩家**不知道该怎么操作**。
+ * 回归套件结构上看不见它们——`verify_ride` 把车开起来了，可它不知道玩家
+ * 有没有搞明白"那块黑底可以点"或者"为什么要陪这局小游戏"。
+ *
+ * | # | 缺陷 | 症状 |
+ * |---|:---|:---|
+ * | 1 | 「跳过」直接 `finish()` | 点一下整段叙事消失，包括还没读的那几句 |
+ * | 2 | 小游戏前没有目的说明 | 玩家看到的是"按了空格 → 它开始考我" |
+ * | 3 | 可点掉的黑卡没有任何可见提示 | `cursor:pointer` 触屏玩家看不见，只能干等 66 秒 |
+ * | 4 | 天光分 4 段纯色 | 四道可见横边，读作"贴了四条色带" |
+ *
+ * ## 第 1 条为什么是"跳到最后一句"而不是"跳过整段"
+ *
+ * `runMiniGame()` 是 `await whenDialogueIdle()` 之后才开小游戏的
+ * （`main.ts`）。**最后一句正是"要玩一件乐事"的落点**——
+ * 前两句讲地方，第三句讲"你坐进这一趟里"。跳到最后一句，
+ * 玩家读到的是衔接的那一句；再按一次才真的进小游戏。
+ *
+ * 于是"跳过"这一个按钮有两种终态，而它必须**按当前状态分**：
+ * 在中间 → 跳到最后一句；在最后一句 → 才 `finish()`。
+ * 原来的写法两种情况都 `finish()`，所以第二下按了没反应也没有理由。
+ *
+ * 各自会红的做法：
+ *   · `skipToEnd()` 改回 `finish()` → 第 1 条红。
+ *   · 跳到最后一句之后仍不收场 → 第 3 条红（玩家被卡在最后一句）。
+ *   · 删掉 `.g-card-hint` → 第 4 条红。
+ *   · `hintLeft` 改成每张都重置 → 第 5 条红（连着七张都挂角标）。
+ *   · 把 `createLinearGradient` 换回 SKY 分段 → 第 6 条红。
+ */
+check('verify_skip_and_affordance', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const dom = ensureStubDom();
+
+  // ---- 1. 「跳过」在中间那句时，落到**最后一句**而不是收场 ----
+  asserts++;
+  {
+    const dlg = new Dialogue(dom.parent());
+    void dlg.show('说话的人', ['第一句', '第二句', '第三句']);
+    const shown = () => (dlg as unknown as { textEl: HTMLElement; lineIdx: number });
+    asserts++;
+    if (shown().lineIdx !== 0) probs.push('对白没有停在第一句——这条判据不算数');
+
+    (dlg as unknown as { skipToEnd: () => void }).skipToEnd();
+
+    asserts++;
+    if (dlg.active === false) {
+      probs.push('在三句对白的中间按「跳过」，整段直接收场了——还没读的那两句被吞掉');
+    }
+    asserts++;
+    if (shown().lineIdx !== 2) probs.push(`跳过之后停在第 ${shown().lineIdx + 1} 句，应为最后一句（第 3 句）`);
+    asserts++;
+    if (!isShown(dlg.root)) probs.push('跳到最后一句之后对白框被藏了——玩家读不到那句话');
+  }
+
+  // ---- 2. 跳完之后那句话是**完整**的，不是空的 ----
+  asserts++;
+  {
+    const dlg = new Dialogue(dom.parent());
+    void dlg.show('说话的人', ['第一句', '第二句', '第三句很长很长的一句话']);
+    (dlg as unknown as { skipToEnd: () => void }).skipToEnd();
+    const txt = (dlg as unknown as { textEl: HTMLElement }).textEl.textContent ?? '';
+    asserts++;
+    // 逐字显示如果没被填满，玩家看到的是半句——那比整段消失更糟，
+    // 因为他会以为游戏卡在了一个字上。
+    if (txt !== '第三句很长很长的一句话') {
+      probs.push(`跳到最后一句之后正文是「${txt}」，应为完整的那一句——逐字显示没被填满`);
+    }
+  }
+
+  // ---- 3. 已经在最后一句时，第二次按才真的收场 ----
+  asserts++;
+  {
+    const dlg = new Dialogue(dom.parent());
+    void dlg.show('说话的人', ['第一句', '第二句']);
+    const api = dlg as unknown as { skipToEnd: () => void };
+    api.skipToEnd();
+    asserts++;
+    if (!dlg.active) probs.push('两句对白按一次跳过就没了——「跳到最后一句」只跳了 0 句');
+    api.skipToEnd();
+    asserts++;
+    // ⚠ 这里量的**不是** Promise resolve 了（那是 `.then` 微任务，
+    // `finish()` 返回那一刻还没跑）。量的是 `resolveCurrent` 被摘成 null ——
+    // `finish()` 一定先摘再 resolve，所以「摘了」就等于「resolve 调过了」。
+    // `verify_panel_layering` 第 4 条用的是同一个不变量。
+    const resolver = (dlg as unknown as { resolveCurrent: (() => void) | null }).resolveCurrent;
+    asserts++;
+    if (resolver !== null) probs.push('在最后一句按「跳过」没有收场——玩家被卡在最后一句出不去');
+    asserts++;
+    if (isShown(dlg.root)) probs.push('收场之后对白框还留在屏上');
+  }
+
+  // ---- 4. 可点掉的黑卡必须有一个**看得见**的提示 ----
+  asserts++;
+  {
+    // ⚠ **host 要先存下来再传进去**：`StubDom.parent()` 每调一次就
+    // `createElement` 一个新的空容器（见它的定义），而桩的元素**没有**
+    // `parentElement`——事后回头找是找不回来的。
+    // `verify_story` 量 `ResultCard` 时用的是同一个手法。
+    //
+    // 另：桩的 `querySelector` 只挂在 createElement 返回的元素上，
+    // `document` 自己没有——所以查的是 host，不是 `dom.doc`。
+    const host = dom.parent();
+    const cards = new StoryCards(host);
+    cards.show('读我', { dismissible: true });
+    const hint = host.querySelector('.g-card-hint');
+    asserts++;
+    if (!hint) {
+      probs.push('可点掉的故事卡没有任何可见提示——`cursor:pointer` 触屏玩家看不见，只能干等它自己走完');
+    } else {
+      asserts++;
+      if (!(hint.textContent ?? '').trim()) probs.push('那个角标是空的');
+    }
+  }
+
+  // ---- 5. 角标只提醒一次，不是每张都挂 ----
+  asserts++;
+  {
+    const host = dom.parent();
+    const cards = new StoryCards(host);
+    cards.showSequence(['第一句', '第二句', '第三句'], { dismissible: true });
+    // 队列里那张还没上屏，所以此刻屏上应该只有第一张带角标。
+    const n = host.querySelectorAll('.g-card-hint').length;
+    asserts++;
+    if (n !== 1) probs.push(`角标出现了 ${n} 次，应为 1 次——连着七张都挂会读成"这七张都得点"`);
+
+    // 走完一张，接上第二张之后**不该再有**角标。
+    for (let i = 0; i < 400 && (cards.count > 0 || cards.pending > 0); i++) cards.update(1);
+    asserts++;
+    const after = host.querySelectorAll('.g-card-hint').length;
+    if (after !== 0) probs.push('整串叙事走完之后角标还在屏上——它必须自己撤掉');
+  }
+
+  // ---- 6. 天光必须是**连续渐变**，不是分段纯色 ----
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'game', 'minigames', 'chrome.ts'), 'utf8');
+    const body = src.slice(src.indexOf('export function drawBackdrop'));
+    asserts++;
+    if (!/createLinearGradient/.test(body)) {
+      probs.push('`drawBackdrop()` 里没有 `createLinearGradient`——天光退回分段纯色，四道横边会露出来');
+    }
+    asserts++;
+    // 分段那版留下的 SKY 常量必须跟着删掉，否则它是个没人读的数。
+    if (/const SKY = \d+/.test(src)) probs.push('`SKY` 常量还在，但已经没有人读它了');
+  }
+
+  // ---- 7. 背景层距：远山与近山、远山与天，都必须真的分层 ----
+  asserts++;
+  {
+    const src = readFileSync(join(process.cwd(), 'src', 'game', 'minigames', 'chrome.ts'), 'utf8');
+    const rel = (hex6: string) => {
+      const a = [0, 2, 4].map((i) => parseInt(hex6.slice(i, i + 2), 16) / 255);
+      const l = 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
+      return l > 0.04045 ? Math.pow((l + 0.055) / 1.055, 2.4) : l / 12.92;
+    };
+    const ratio = (x: string, y: string) => {
+      const a = rel(x);
+      const b = rel(y);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    };
+    // `makeTheme(top, bot, far, mid)`：far 画在上层（远，被雾抬亮），
+    // mid 才是近景（沉）。所以要拉开的是「far↔mid」与「far↔bot」。
+    const themes = [...src.matchAll(/makeTheme\('([0-9A-Fa-f]{6})',\s*'([0-9A-Fa-f]{6})',\s*'([0-9A-Fa-f]{6})',\s*'([0-9A-Fa-f]{6})'/g)]
+      .map((m) => ({ top: m[1], bot: m[2], far: m[3], mid: m[4] }));
+    asserts++;
+    if (themes.length !== 5) {
+      probs.push(`从 chrome.ts 里认出 ${themes.length} 个主题，应为 5 个——` +
+        (themes.length < 5 ? '有一件乐事没配景，它会静默画成默认色' : '表里多出主题，槽位与它对不上'));
+    } else {
+      for (const th of themes) {
+        const farMid = ratio(th.far, th.mid);
+        // **阈值 1.7**，不是"看起来分层"的 1.35。
+        //
+        // 1.35 是第一次估的，而实测证明它太松：把琴的主题退回原来的
+        // `3E5647 / 26362C`（远↔近 **1.59**）这条判据照样绿——
+        // 也就是说它根本挡不住"层距退回原来那副糊样子"。
+        //
+        // 1.7 的来历是具体的：它同时高于两个**真实存在过的坏值**
+        // （竹原 1.19、琴原 1.59），又低于两个修好之后的值（都是 3.27）。
+        // 一个阈值如果挡不住任何一个实际犯过的错，它就不是阈值，是摆设。
+        asserts++;
+        if (farMid < 1.7) {
+          probs.push(`远景 ${th.far} ↔ 近景 ${th.mid} 只有 ${farMid.toFixed(2)}:1（< 1.7），两层糊在一起`);
+        }
+        const farBot = ratio(th.far, th.bot);
+        asserts++;
+        if (farBot < 1.15) {
+          probs.push(`远景 ${th.far} ↔ 天底 ${th.bot} 只有 ${farBot.toFixed(2)}:1（< 1.15），山脊与天分不开`);
+        }
+      }
+    }
+  }
+
+  // ---- 8. 接线：小游戏之前必须真的挂了那一条目的说明 ----
+  asserts++;
+  {
+    const main = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    asserts++;
+    // 必须排在 `mg.run(` **之前**：排在之后，那句话就被小游戏盖住了，
+    // 而它本来就是给「接下来要玩」这件事做解释的。
+    const whyAt = main.indexOf('minigame_why');
+    const runAt = main.indexOf('this.mg.run(');
+    if (whyAt < 0) {
+      probs.push('main.ts 里没有那条「为什么要玩」的说明——玩家看到的是"按了空格 → 它开始考我"');
+    } else {
+      asserts++;
+      if (runAt < 0) {
+        probs.push('main.ts 里找不到 this.mg.run( —— 小游戏入口改名了，这条判据要跟着改');
+      } else if (whyAt > runAt) {
+        probs.push('「为什么要玩」排在 `mg.run()` 之后——它会被小游戏盖住，而它解释的正是这件事');
+      }
+      asserts++;
+      if (!/minigame_why/.test(main)) probs.push('`minigame_why` 一次都没被引用');
+    }
+    // 两颗新文案的两侧都要有。
+    for (const k of ['storycard_dismiss_hint', 'dialogue_skip_hint']) {
+      const i18n = JSON.parse(
+        readFileSync(join(process.cwd(), 'src', 'data', 'generated', 'i18n.json'), 'utf8'),
+      ) as { zh: Record<string, string>; en: Record<string, string> };
+      asserts++;
+      if (!i18n.zh[k]) probs.push(`i18n.zh 里缺 ${k}——界面会显示 ⟨${k}⟩`);
+      asserts++;
+      if (!i18n.en[k]) probs.push(`i18n.en 里缺 ${k}——切到英文这一行会空掉`);
+    }
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '跳过落到最后一句 · 再按一次才收场 · 黑卡有可见的「点一下跳过」且只提醒一次 · 天光是连续渐变 · 五件乐事的远山近山都分层 · 小游戏前有目的说明',
     asserts,
   );
 });
@@ -7891,7 +8288,10 @@ function ensureStubDom(): StubDom {
         const listeners: Record<string, (() => void)[]> = {};
         const attrs: Record<string, string> = {};
         const text = { v: '' };
-        return {
+        // 桩元素自己的引用。`remove()` 要拿它去 `kids` 里摘自己，
+        // 而箭头函数里的 `this` 指的是 `createElement` 的宿主，不是元素——
+        // 所以必须显式存一份，见下面 `remove` 的注释。
+        const node = {
           tagName: tag.toUpperCase(),
           /**
            * `className` 与 `classList` **必须共用一份**。
@@ -7942,11 +8342,32 @@ function ensureStubDom(): StubDom {
           },
           appendChild: (n: unknown) => {
             kids.push(n);
+            // 记住父节点。**没有这一句 `remove()` 就摘不掉自己**：
+            // 每个元素的 `kids` 是它**自己闭包里**的数组（见 `createElement`），
+            // 所以在元素自己的闭包里查 `kids.indexOf(node)` 永远是 -1。
+            // 真 DOM 里 `removeChild` 走的是父节点的子列表，桩也得这样。
+            (n as { __parent?: unknown[] }).__parent = kids;
             return n;
           },
           remove: () => {
-            const i = kids.indexOf(this);
-            if (i >= 0) kids.splice(i, 1);
+            // ⚠ 这里原来写的是 `kids.indexOf(this)`，而它是**箭头函数**，`this`
+            // 指向 `createElement` 的宿主（`g.document`）而不是元素本身——
+            // 于是 `indexOf` 永远是 -1，**这个桩从来没真的删掉过任何节点**。
+            //
+            // 为什么一直没被发现：既有判据里用到 `remove()` 的地方
+            // （`verify_story` 量 `ResultCard`、`verify_endcard`）量的都是
+            // **类容器自己的计数**（`count` / `pending`），不是 DOM 里还剩几个节点。
+            // 计数走数组，跟 DOM 摘没摘干净无关——桩的这个缺陷正好落在
+            // 那两条判据都没量到的那一维上。
+            //
+            // `verify_skip_and_affordance` 第 5 条是第一条直接数 DOM 里
+            // `.g-card-hint` 还剩几个的判据，它当场把这个缺陷顶了出来。
+            // **修桩，不改判据**——判据量的是玩家真正能看到的东西。
+            const p = (node as { __parent?: unknown[] }).__parent;
+            if (p) {
+              const i = p.indexOf(node);
+              if (i >= 0) p.splice(i, 1);
+            }
           },
           addEventListener: (ev: string, fn: () => void) => {
             (listeners[ev] ??= []).push(fn);
@@ -7962,6 +8383,7 @@ function ensureStubDom(): StubDom {
           querySelector: (sel: string) => findAll(kids, sel)[0] ?? null,
           querySelectorAll: (sel: string) => findAll(kids, sel),
         };
+        return node;
       },
     } as unknown as Document;
   }

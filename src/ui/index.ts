@@ -434,8 +434,8 @@ export class UI {
    *        会在第三句还没读完就被抽走，而"读不完"读作"字太多了"。
    *        下限由 StoryCards 兜（2.4s）。
    */
-  showStoryCard(text: string, title?: string, ms?: number): void {
-    this.storyCards.show(text, { title, ms });
+  showStoryCard(text: string, title?: string, ms?: number, dismissible = false): void {
+    this.storyCards.show(text, { title, ms, dismissible });
   }
 
   /**

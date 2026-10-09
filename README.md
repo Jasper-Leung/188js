@@ -137,7 +137,7 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 416-key string table match exactly.
+and both sides of the 420-key string table match exactly.
 
 ### Two: translate geometry point by point
 
@@ -156,7 +156,7 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        416 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        420 strings consistent across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise

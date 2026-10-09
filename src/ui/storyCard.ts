@@ -130,6 +130,21 @@ export class StoryCards {
   /** 自动推进的秒数。0 = 不自动推进（只有强制打断才用得到）。 */
   autoSec = DEFAULT_MS / 1000;
 
+  /**
+   * 「点一下跳过」那个角标还剩几秒。
+   *
+   * 0 = 不显示。**整趟只给一次**（见 `show()` 里那一段）——
+   * 连着七张都挂角标会读成"这七张都得点"，而玩家只需要知道**一次**就够了。
+   */
+  private hintLeft = 0;
+
+  /**
+   * 这一趟提醒过了没有。**跨卡**，所以不能靠 `cards.length === 0` 判——
+   * `pump()` 触发时上一张已经出列，新那张看到的又是 0。
+   * 只在 `clear()`（进世界 / 重开）时复位。
+   */
+  private hintShown = false;
+
   constructor(parent: HTMLElement) {
     this.root = el('div', 'g-cards');
     parent.appendChild(this.root);
@@ -221,6 +236,19 @@ export class StoryCards {
       // 绑在这一张上而不是 `.g-cards` 容器上：容器要保持
       // `pointer-events: none`，否则路边那些字也会开始吃点击。
       card.addEventListener('click', () => this.dismiss(card));
+      // **可点这件事必须看得见。** 这一层不做点击的可见反馈，
+      // 于是"可点掉"这件事在屏上零信息——玩家不知道这张黑卡能点，
+      // 只能干等它自己走完（序章那七句中文侧要 66 秒）。
+      //
+      // 为什么用角标而不是整卡变亮：这张卡是"骑过去顺便读"的背景层，
+      // 让它一直发着光等于把它抬成"界面在催你"，而它本来不该抢注意力。
+      // 一个右下角的小字只在**这一趟的第一张**上出现一小会儿
+      // （见下面 `hintShown`），玩家看到了就够了。
+      if (!this.hintShown) {
+        card.appendChild(el('div', 'g-card-hint', t('storycard_dismiss_hint')));
+        this.hintShown = true;
+        this.hintLeft = 2.6;
+      }
     }
     this.root.appendChild(card);
     const ms = opts.ms ?? readingMs(text, isEnglish());
@@ -257,6 +285,23 @@ export class StoryCards {
 
   /** 走 `update(dt)`，不用 `setTimeout`：暂停时游戏循环会停而定时器不会。 */
   update(dt: number): void {
+    // 「点一下跳过」的角标自己淡出。**用 `dt` 不用定时器**，
+    // 理由和这个文件里其他计时一样：暂停时游戏循环停而 `setTimeout` 不停。
+    //
+    // ⚠ 找的是**当前屏上那张卡**里的角标，不是 `this.root` 里搜第一个：
+    // 角标挂在卡片下，而队列一次只演一张 —— 一张演完之后旧卡已被摘掉，
+    // `root` 里剩的是新接上的那张，它**没有**角标（`hintShown` 已经为真）。
+    // 从 `root` 搜第一个在两种情况下会答错：一张都没摘时搜到的确实是那张，
+    // 摘完之后搜不到、于是 `?.remove()` 静默空转。
+    if (this.hintLeft > 0) {
+      this.hintLeft -= dt;
+      if (this.hintLeft <= 0) {
+        this.hintLeft = 0;
+        for (const c of this.cards) {
+          c.root.querySelector('.g-card-hint')?.remove();
+        }
+      }
+    }
     if (!this.cards.length) return;
     for (let i = this.cards.length - 1; i >= 0; i--) {
       const c = this.cards[i];
@@ -281,6 +326,9 @@ export class StoryCards {
     for (const c of this.cards) c.root.remove();
     this.cards = [];
     this.queue = [];
+    this.hintLeft = 0;
+    // 重开一趟要把"提醒过了"也复位，否则这一趟的第一张不再带角标。
+    this.hintShown = false;
     setShown(this.root, false);
   }
 
