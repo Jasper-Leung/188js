@@ -1,6 +1,6 @@
 {
   "name": "gift188-three",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "188号礼物 — three.js 版。3D 骑行叙事游戏，面向低配置设备优化。",
