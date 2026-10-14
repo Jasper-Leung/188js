@@ -172,4 +172,7 @@ export function tierOf(input: PostcardInput) {
   return computeTier(input);
 }
 
+/** 便捷：念出档位的那一行（合成屏 / 结算屏都从它取，判定只有这一份）。 */
+export { tierLine } from './types';
+
 export { computeTier as tier, seenCountOf as seenCount, isStationSeen as stationSeen };

@@ -456,29 +456,35 @@
               <li>
                 <span class="zh"
                   >移植自 Godot 4.6 原型，本届比赛期间重做为 three.js r169 + TypeScript + Vite；
-                  玩法与数值 1:1 保留，双语文案补到 420 条，表现层与工程结构重做。</span
+                  玩法与数值 1:1 保留，双语文案 458 条两侧一致，表现层与工程结构重做。</span
                 ><span class="en"
                   >The original was Godot 4.6. This build is three.js r169 + TypeScript + Vite — a full port rebuilt
-                  during the competition, with gameplay and numbers kept 1:1, the bilingual strings carried over and
-                  grown to 420, the presentation layer and project structure rebuilt.</span
+                  during the competition, with gameplay and numbers kept 1:1, 458 bilingual strings matching on both
+                  sides, the presentation layer and project structure rebuilt.</span
                 >
               </li>
               <li>
                 <span class="zh"
-                  >几何不变量写成无头回归：<b>67 组 / 1012 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
+                  >几何不变量写成无头回归：<b>88 组 / 1424 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
                   16 座驿站可达、经济系统总量、水位、双语键集合一致。它是上线的门。</span
                 ><span class="en"
-                  >Geometric invariants live in a headless regression — <b>67 suites / 1012 assertions</b> pinning the 961
+                  >Geometric invariants live in a headless regression — <b>88 suites / 1424 assertions</b> pinning the 961
                   centreline points, 1228.8 m, 4 crossings, 16 reachable stations, economy totals, water level and
                   bilingual key parity. It gates the deploy.</span
                 >
               </li>
               <li>
                 <span class="zh"
-                  >它抓到过真问题：一个漏掉的 <code>fmod</code> 把群山压成了一片高原，而当时所有按数量写的断言还是绿的。</span
+                  >每条断言在被信任之前，先被证明会红。而它真的抓到过安静的事故：一次交错缓冲属性的误读，
+                  让整片树林飘在 <b>941,141 米</b>的高空——布置表说树在那儿、剔除统计说它们可见，
+                  所有按数量写的判据全绿。还有一次漏掉的 <code>fmod</code> 把群山压成高原，
+                  而点数、总长、高程范围全部正确。</span
                 ><span class="en"
-                  >It has caught real bugs: a missing <code>fmod</code> flattened the mountains into a plateau while
-                  every count-based assertion stayed green.</span
+                  >Every assertion is proven to fail before it is trusted — and they have caught quiet accidents: one
+                  misread of an interleaved buffer put an entire forest <b>941,141 metres</b> above the earth, while the
+                  placement tables said the trees were there, the culling statistics said they were visible, and every
+                  count-based assertion stayed green. A missing <code>fmod</code> once flattened the mountains into a
+                  plateau with every point count, total length and elevation range still correct.</span
                 >
               </li>
             </ul>

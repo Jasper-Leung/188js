@@ -26,13 +26,13 @@ import { STATIONS } from '../data/route';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROAD, ECON, SHOPS, I18N, WORLD } from '../data/raw';
-import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, Object3D, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
+import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, MeshStandardMaterial, Object3D, Color, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
 import { ROAD as ROAD_GEOM } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';
 import { interactAt } from '../game/phase';
 import { camParams } from '../world/ride';
-import { Vehicle, FOOT_LATERAL_OFFSET, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, type RideMode } from '../world/vehicle';
-import { assertRide, assertDemoDrive } from './ride';
+import { Vehicle, FOOT_LATERAL_OFFSET, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, SUBJECT_LIFT, liftSubjectMaterials, type RideMode } from '../world/vehicle';
+import { assertRide, assertDemoDrive, assertSpawnHeading, assertJunctionMoment } from './ride';
 import { GameStateManager } from '../game/state';
 
 /** 由 `entry.ts` 在原位调用一次，见文件头「为什么是导出函数」。 */
@@ -434,6 +434,118 @@ export function registerVehicleChecks(check: CheckFn): void {
   check('verify_demo_drive', () => {
     const r = assertDemoDrive();
     return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+  });
+
+  /**
+   * 出生朝向。紧挨着 `verify_ride`，因为那一条守的是同一个东西的另一半：
+   * `verify_ride` 量「出生点在不在路面上」，这一条量「车头指着哪」。
+   *
+   * 独立成条而不是并进去，是因为它有独立的失效方式——
+   * `verify_ride` 全绿而这一条红，说的正是「站在路上但朝反了」。
+   */
+  check('verify_spawn_heading', () => {
+    const r = assertSpawnHeading();
+    return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+  });
+
+  /**
+   * 交叉口的"停一拍"。独立成条而不是并进 `verify_ride`：它守的不是
+   * "路通不通"，是"那句话说出来的时候世界用运动学附和非"——
+   * 失效方式也独立（删掉 `applyMoment` / 写漏计时器递减 / 改成系数连乘，
+   * 三条各自红，而 `verify_ride` 一条都不会响）。
+   */
+  check('verify_junction_moment', () => {
+    const r = assertJunctionMoment();
+    return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+  });
+
+  /**
+   * 主体提亮。守的是**系数和接线**，不是好不好看。
+   *
+   * 它能证的一件事很具体：`bicycle.glb` 的 baseColor 贴图均值约
+   * 0.13 反照率（64.6% 的像素亮度低于 40），而 `attach()` 之后
+   * 那个材质确实被乘过了。这是「修没修」的判据。
+   *
+   * 它证不了「够不够亮」——无头环境没有渲染引擎，
+   * 而第九轮实机拍到的正是「DOM 与模型都在、像素是黑的」那一族。
+   * 所以亮度本身仍然只有人眼能判，这条只保证那盏「有病的贴图」
+   * 一定被接上了矫正。
+   */
+  check('verify_subject_material', () => {
+    const probs: string[] = [];
+    let asserts = 0;
+
+    // 1. 表本身：自行车必须有系数，且在「救得回来又不发白」的区间里。
+    asserts++;
+    const bikeLift = SUBJECT_LIFT.bike;
+    if (!bikeLift || bikeLift <= 1) {
+      probs.push(`SUBJECT_LIFT.bike 是 ${bikeLift} —— 自行车那张近黑贴图没人矫正`);
+    }
+    asserts++;
+    if (bikeLift && (bikeLift > 4 || bikeLift < 1.5)) {
+      probs.push(`自行车提亮系数 ${bikeLift} 不在 1.5–4 之间（0.13 反照率抬到这里才读得出形体）`);
+    }
+
+    // 2. 没量出问题的模型不许被抬：抬上去只会把水墨调子抬坏。
+    asserts++;
+    for (const m of ['motorcycle', 'skate', 'foot'] as RideMode[]) {
+      const v = SUBJECT_LIFT[m];
+      if (v !== undefined && v > 1) probs.push(`${m} 的贴图量出来是正常的，却给了 ${v} 的提亮`);
+    }
+
+    // 3. 行为：`liftSubjectMaterials` 真的把基色乘上去了。
+    asserts++;
+    {
+      const mat = new MeshStandardMaterial({ color: new Color(0.13, 0.13, 0.13) });
+      const mesh = new Mesh(new BoxGeometry(1, 1, 1), mat);
+      const root = new Object3D();
+      root.add(mesh);
+      const n = liftSubjectMaterials(root, 2.8);
+      asserts++;
+      if (n !== 1) probs.push(`提亮报告改了 ${n} 个材质，应为 1`);
+      asserts++;
+      if (!(mat.color.r > 0.3 && mat.color.r < 0.45)) {
+        probs.push(`0.13 提亮后是 ${mat.color.r.toFixed(3)}，应落在 0.36 附近`);
+      }
+    }
+
+    // 4. 共享材质只乘一次：three 的材质被多个 mesh 共用，
+    //    重复叠乘会把 2.8 变成 7.84，那块主体直接发白。
+    asserts++;
+    {
+      const shared = new MeshStandardMaterial({ color: new Color(0.13, 0.13, 0.13) });
+      const root = new Object3D();
+      root.add(new Mesh(new BoxGeometry(1, 1, 1), shared));
+      root.add(new Mesh(new BoxGeometry(1, 1, 1), shared));
+      const n = liftSubjectMaterials(root, 2.8);
+      asserts++;
+      if (n !== 1) probs.push(`两个 mesh 共用一个材质时报告改了 ${n} 个，应为 1`);
+      asserts++;
+      if (shared.color.r > 0.45) {
+        probs.push(`共享材质被叠乘到 ${shared.color.r.toFixed(3)} —— 提亮跑了两遍`);
+      }
+    }
+
+    // 5. 接线：`attach()` 真的调了它。没调的话 1–4 全绿而车上照样是黑的。
+    asserts++;
+    {
+      const v = new Vehicle();
+      const mat = new MeshStandardMaterial({ color: new Color(0.13, 0.13, 0.13) });
+      const root = new Object3D();
+      root.add(new Mesh(new BoxGeometry(1, 1, 1), mat));
+      v.attach({ bike: root, skate: null, char: null, clips: {} });
+      if (!(mat.color.r > 0.3)) {
+        probs.push(`attach() 之后基色还是 ${mat.color.r.toFixed(3)} —— 提亮没有接在模型入口上`);
+      }
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `自行车基色 0.13 × ${bikeLift} ≈ ${(0.13 * (bikeLift ?? 1)).toFixed(2)} · 共享材质只乘一次 · attach 已接线`,
+      asserts,
+    );
   });
 
   // ---------------------------------------------------------------- 演示的 90 秒承诺

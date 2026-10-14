@@ -30,13 +30,22 @@
 import { createBambooGame } from './bamboo';
 import { createBirdGame } from './bird';
 import { createCloudGame } from './cloud';
+import { createQinGame } from './qin';
 import { createTeaGame } from './tea';
 import { createZitherGame } from './zither';
 import type { MiniGame, MiniGameContext, MiniGameId } from './types';
 
-/** 顺序与碎片槽位 0..4 一致：云 / 茶 / 琴 / 竹 / 禽。
+/**
+ * **轮换表** —— 顺序与碎片槽位 0..4 一致：云 / 茶 / 琴 / 竹 / 禽。
  *  这是一条**独立副本**，和 `RoadData.FRAGMENT_SLOT_STATION_IDX` 的顺序必须对得上
- *  ——它决定"第一趟拿到的还是自己那件"。 */
+ *  ——它决定"第一趟拿到的还是自己那件"。
+ *
+ *  ⚠ **琴音林的自由演奏（`qin`）不在这里。** 它不是第六件乐事：
+ *  它不打分、不计时、没有胜负，也不消耗那座驿站的到访次数。
+ *  `gameFor()` 的分母读的是 `MINI_GAME_IDS.length`，
+ *  所以这里多一个元素就等于把 15 局重排成 18 局 —— `verify_mini_game`
+ *  钉的就是这张表，钉的是"15 局、每件 3 次、首访 = 自己那件"。
+ */
 export const MINI_GAME_IDS: readonly MiniGameId[] = ['cloud', 'tea', 'zither', 'bamboo', 'bird'];
 
 /** 第 `visit` 次到访（**从 0 起**）`slot` 号碎片驿站，该玩第几件。纯函数。 */
@@ -73,6 +82,7 @@ export function createMiniGame(id: MiniGameId, ctx: MiniGameContext): MiniGame {
     case 'zither': return createZitherGame(ctx);
     case 'bamboo': return createBambooGame(ctx);
     case 'bird': return createBirdGame(ctx);
+    case 'qin': return createQinGame(ctx);
   }
 }
 

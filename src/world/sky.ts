@@ -160,6 +160,42 @@ export class Sky {
   readonly sun = new DirectionalLight(0xfff2dd, 2.4);
   readonly hemi = new HemisphereLight(0xbfd8ff, 0x4a5a3a, 0.9);
   readonly ambient = new AmbientLight(0xffffff, 0.25);
+  /**
+   * 主体补光。**不投阴影**，位置跟着相机走。
+   *
+   * ## 为什么世界级的三盏灯救不了它
+   *
+   * `sun` 的方向随一天里的时刻走，`hemi` 从天顶补——而三种机位里，
+   * 玩家看到的**永远是骑手的背**（`first` 更是把角色藏了）。
+   * 背对着太阳的那一面只剩 `hemi` 的下半球（`groundColor` 是暗绿），
+   * 于是骑手和车在画面正中读成**一团黑**，看不出是个人在骑车。
+   *
+   * 而这件事不能靠调 `sun`/`hemi` 解决：抬高它们会把整张画面一起抬亮，
+   * 草地、路面、树全跟着变淡，主体还是那团黑——只是黑得没那么明显。
+   *
+   * ## 为什么放在"相机这一侧"
+   *
+   * 位置**跟着相机走**：落在"相机与主体之间、略偏上偏侧"，
+   * 所以不管玩家在 `forward` / `chase` / `first` 哪一个机位、
+   * 也不管他把车转向哪边，主体的**正面永远有一盏灯对着它**。
+   * 固定在世界坐标里的灯做不到这件事：车一转过去它就又背光了。
+   *
+   * ## 它**照得到全世界**，这一点必须写下来
+   *
+   * three.js 没有"这盏灯只照这几个物体"这回事：`Light.layers`
+   * 只决定这盏灯**要不要参与渲染**（拿 `camera.layers` 比），
+   * 一旦参与，它对场景里每一个受光材质都生效。
+   * 我先按"灯锁一层、物体额外开一层"写过一版，实测主体亮度回到关灯时的
+   * 97.1 —— 那一层直接让这盏灯被整个剔除了，等于没加。
+   *
+   * 所以范围这件事只能交给**强度**去换：抬到能把主体救回来（0.9）就停，
+   * 再往上主体就发白。中间试过给载具与角色的材质加 `emissive`，
+   * 指标漂亮（主体平均 117.7、暗像素 0%）而玩家一眼看出"变白了"——
+   * emissive 是漫反射之后的常数，背光面和受光面抬得一样多，
+   * 那不是"被太阳照到"，是刷了一层漆。已删；
+   * `verify_subject_lighting` 现在守着"载具与角色的材质一个字节都不许动"。
+   */
+  readonly rim = new DirectionalLight(0xfff0dd, 0.85);
   readonly state: DayState = {
     dusk: 0,
     sunDir: new Vector3(0.4, 0.7, 0.3).normalize(),
@@ -213,7 +249,7 @@ export class Sky {
       this.sun.shadow.bias = -0.0008;
       this.sun.shadow.normalBias = 0.035;
     }
-    scene.add(this.sun, this.sun.target, this.hemi, this.ambient);
+    scene.add(this.sun, this.sun.target, this.hemi, this.ambient, this.rim, this.rim.target);
   }
 
   /**
@@ -286,6 +322,10 @@ export class Sky {
     this.hemi.color.setHex(0xbfd8ff).lerp(new Color(0x6a6a90), d);
     this.hemi.groundColor.setHex(0x4a5a3a).lerp(new Color(0x2a2434), d);
     this.ambient.intensity = 0.25 * this.state.ambient;
+    // 补光跟着一起暗，否则黄昏时主体会比整张画面还亮。
+    // 1.5 是实测出来的：主体区域的平均亮度 97.1 → 109.1，暗像素（<40）8.1% → 3.2%。
+    this.rim.intensity = 0.9 * this.state.ambient;
+    this.rim.color.copy(this.state.sunColor).lerp(new Color(1, 0.97, 0.94), 0.5);
   }
 
   /** 阴影相机要跟着玩家走，否则 800m 的世界里阴影只在原点附近有效 */
@@ -293,6 +333,29 @@ export class Sky {
     this.sun.position.set(x + this.state.sunDir.x * 160, y + this.state.sunDir.y * 160, z + this.state.sunDir.z * 160);
     this.sun.target.position.set(x, y, z);
     this.sun.target.updateMatrixWorld();
+  }
+
+  /**
+   * 补光跟着**相机**走：落在相机与主体之间、略偏上偏侧。
+   *
+   * `dx/dz` 是"主体 → 相机"的水平方向（由调用方从相机位置反推，
+   * 因为 `Sky` 不该知道 `Ride` 的机位）。灯放在这条线上，
+   * 于是主体的正面永远朝着相机那一侧有光——这正是三个机位共缺的那一盏。
+   *
+   * 侧偏 0.35、抬高 0.55：全打在正前方会拍平成一张证件照，
+   * 偏一点才有"从旁边来的光"的体积感。
+   */
+  updateRimFocus(dx: number, dz: number, x: number, y: number, z: number) {
+    // 相机正好压在主体上时（`first` 之外不该发生，但别除以零）
+    const len = Math.hypot(dx, dz) || 1;
+    const ux = dx / len;
+    const uz = dz / len;
+    // 右手侧 = 视线方向左转 90°
+    const sx = -uz;
+    const sz = ux;
+    this.rim.position.set(x + ux * 6 + sx * 2.1, y + 3.3, z + uz * 6 + sz * 2.1);
+    this.rim.target.position.set(x, y, z);
+    this.rim.target.updateMatrixWorld();
   }
 
   /** 天空球挂在相机上，避免玩家走出球外看到黑 */

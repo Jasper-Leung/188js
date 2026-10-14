@@ -31,7 +31,7 @@ import { Scene, PerspectiveCamera } from 'three';
 import { game, GameStateManager } from './game/state';
 import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
-import { ECON, SHOPS, WORLD } from './data/raw';
+import { ECON, SHOPS, WORLD, RIDE, ROAD as ROAD_RAW } from './data/raw';
 import { UI } from './ui';
 import { setSpaceKeyOwner, stationName } from './ui/hud';
 import { clamp } from './core/math';
@@ -43,7 +43,9 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportFileName, exportPostcardPng, seededBackText, type EndingId } from './game/postcard';
 
-import { afterCheckInRoute, canRide as canRideNow, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
+import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
+import { createLiveApi, type LiveApiHost } from './game/api';
+import type { AiObservation } from './game/api';
 import type { BeatEvent } from './game/beat';
 import type { RideInput } from './world/ride';
 import { MODE_TUNE } from './world/vehicle';
@@ -250,6 +252,24 @@ async function main() {
     });
   // 硬超时：GLTFLoader 没有内建超时，悬住的请求会永远 pending。
   // 20 秒足够 localhost 与正常宽带走完这几组，也足够在慢网下给出"它不来了"的信号。
+  //
+  // ## 这一条**什么都不丢**，评审记了两次是因为它读起来像在丢
+  //
+  // 第九轮与第十轮都提过它，两次的猜测是「慢网玩家会少看到几座地标，
+  // 而他们不会知道」。**那是错的，`withTimeout` 的实现决定了这不可能**：
+  //
+  //   · 它是 `Promise.race([p, 只打警告的定时器])` —— 定时器那一支
+  //     `console.warn` 之后 `r()`，**不 reject、不 abort、不清任何缓存**；
+  //   · 调用点是 `void`，返回值整个丢掉，所以它连"替 p 兜底"都不是；
+  //   · `assetChain` 自己那侧仍然在跑，它落定的时候照样调 `boot(1)`。
+  //
+  // 所以慢网玩家看到的是**更晚看到树**，不是**永远看不到树**。
+  // 那条 `warn_model_timeout` 文案自己写着 "continuing"，
+  // **它是准确的**——只是它长得像一条失败。
+  //
+  // ⚠ **这里唯一不能改的是「不要把它改成真的会取消的那一种」**：
+  // 一旦有人为了"更干脆"给它加上 abort，那一改才是真的丢资产，
+  // 而且症状是"某些玩家路边永远没有树"——极难归因。
   void withTimeout(assetChain, 20_000, t('warn_model_timeout'));
 
   // **摩托车单独一条链**，不进上面的 `assetChain`。
@@ -499,6 +519,17 @@ function nextFrame(): Promise<void> {
 
 // ---------------------------------------------------------------- App
 class App {
+  /**
+   * 相位。**整个宿主里唯一被写的地方是 `goPhase()`。**
+   *
+   * 原来它在**十一处**被直接赋值，想回答"现在能处于哪些相位、谁负责切"，
+   * 只能把十一个赋值点和它们各自的守卫条件连着读一遍。
+   * 现在那十一处都走 `goPhase()`，而允许的迁移列在 `game/phase.ts`
+   * 的 `PHASE_EDGES` 里。
+   *
+   * 读这一格的地方有一大堆（`canRide` / `isInWorld` / 键位分支 / …），
+   * 所以它**是**公开的；只是不再被随便写。
+   */
   phase: Phase = 'boot';
   world: World;
   settings: SettingsData;
@@ -549,6 +580,25 @@ class App {
     this.world = world;
     this.settings = settings;
     this.capability = capability;
+  }
+
+  /**
+   * 切相位。**整个宿主里唯一写 `this.phase` 的地方。**
+   *
+   * ## 为什么只是"一个入口"而不是"一个闸门"
+   *
+   * 允许的迁移列在 `game/phase.ts` 的 `PHASE_EDGES` 里，而这里
+   * **不拒绝**表外的迁移。原因很实在：本项目的回归**跑不到这个类**
+   * （`World` 在无头环境里构造不出来），所以一张靠"跑一遍才知道全不全"
+   * 的表去拒绝运行时迁移，等于把一个我从未观察到的行为变成硬失败，
+   * 而这次重构的承诺是"行为不变"。
+   *
+   * 真正的强制点是**静态**的那一条：`verify_phase` 数 `this.phase =`
+   * 在 `main.ts` 里出现几次，只能是 1（就是下面这行）。
+   * 于是新增迁移**必须**先过这里，也就必然被表收编或者被回归抓住。
+   */
+  private goPhase(next: Phase): void {
+    this.phase = next;
   }
 
   async ready() {
@@ -683,7 +733,6 @@ class App {
     this.world.onRoadsideLine = (text) => this.ui.showStoryCard(text, t('stele_title'));
     this.world.onBeat = this.beatOn;
     this.world.onBgmMood = (slot) => audio.setBgmMood(slot);
-    game.on('state', () => this.ui.syncFromState());
     game.on('lvbi', () => this.ui.syncFromState());
     game.on('mood', () => this.ui.syncFromState());
     game.on('item', () => this.ui.syncFromState());
@@ -710,7 +759,7 @@ class App {
 
     mark('boot_step_run');
     this.loop.start();
-    this.phase = 'title';
+    this.goPhase('title');
     mark('boot_step_title');
     this.ui.showTitle();
     mark('boot_step_ready');
@@ -797,6 +846,20 @@ class App {
      *
      * 返回**字符串**而不是打印——这样它能被赋值、被复制、被贴进对话。
      * 打印出来的那一份只存在于滚屏里，捞不回来。
+     *
+     * ## 它是一个 **getter**：每读一次都是一份新的快照
+     *
+     * `gift188` 是 `Object.defineProperty` 装上的 getter，
+     * 所以 `const D = gift188` 拿到的是**那一刻**的快照，
+     * 之后车再往前走，`D.bike` 永远停在原地。
+     *
+     * 这个坑很贵：我用它做过一次"把车开六千帧"的探针，
+     * 结果车在 (−14.1, 77.5) 上一动不动地"冻"了六千帧——
+     * **车其实一直在动**，只是探针读的是开局那一份。
+     * 症状像物理坏了，而根因是探针自己把时间冻住了。
+     *
+     * 所以：**每一帧都重新读** `gift188`，不要存进变量。
+     * 存下来的那份是冻结的，只会更早地过期。
      */
     Object.defineProperty(window, 'gift188', {
       get: () => this.debugHandle(),
@@ -964,23 +1027,17 @@ class App {
           }
           break;
         case 'KeyF': {
-          // **F 同时服务两件事**，而顺序是有讲究的：先节拍，后旧物。
+          // **F 同时服务四件事**，而顺序是有讲究的：先节拍，后路边。
           //
-          // 节拍窗口只有 1.15s，而旧物要停下来才够得着——
+          // 节拍窗口只有 1.15s，而路边那些要停下来才够得着——
           // 窗口开着的时候玩家正在骑，不是在路边站着。
-          // 所以先把窗口吃掉：它有截止时间，旧物没有。
+          // 所以先把窗口吃掉：它有截止时间，其余三样没有。
           const beat = this.world.pressBeat();
           if (beat !== 'miss' || this.world.beats.state.open) {
             this.ui.setBeat(this.world.beats.state);
             break;
           }
-          // 摸旧物。**主角唯一属于自己的那件事**——序章里他明说
-          // "我这双手只会做一件事"，而那三张卡之后游戏再也没给过他一次机会。
-          //
-          // 够不着的时候**什么都不做，也不解释**：玩家正对着它，按了没反应
-          // 本身就是"我得再靠近一点"的反馈，一句提示反而是在教他读界面。
-          const r = this.world.touchRelic();
-          if (r) this.ui.showStoryCard(t(r.textKey), t(r.titleKey));
+          this.touchRoadside();
           break;
         }
         case 'Digit1':
@@ -1005,20 +1062,148 @@ class App {
     window.addEventListener('blur', () => this.keys.clear());
   }
 
-  private onConfirm() {
-    if (this.phase === 'title') {
-      this.startRide();
+  /**
+ * 「摸一下眼前这个」。F 键唯一的落点。
+ *
+ * ## 三样东西共用一个动词，是刻意的
+ *
+ * 旧物、琴音林那张琴、路肩上的木牌——三样都不是 UI 上的按钮，
+ * 都是"世界里的东西，伸手碰一下"。主角的设定是
+ * 「东西坏了我修，修之前我要先摸一遍」，
+ * 所以它们共用一把键、共用一种手感，比各配一个键更像**这个人**。
+ *
+ * ## 顺序：按距离，近的优先
+ *
+ * 三样东西的落位互不相邻（路肩外 2m / 驿站院里 / 路肩外 2m），
+ * 所以实际不会打架；可判据仍然按距离取最近的那一个，
+ * 因为"优先序写死"在有人把木牌挪到驿站门口的那天就会变成 bug，
+ * 而那种 bug 的症状是"我站在木牌前面，按 F 弹出来的却是旧物"——
+ * 界面上没有任何东西能解释它。
+ *
+ * 一样都够不着时**什么都不做，也不解释**：玩家正对着它，按了没反应
+ * 本身就是"我得再靠近一点"的反馈，一句提示反而是在教他读界面。
+ */
+private touchRoadside() {
+  const w = this.world;
+  const cands: { kind: 'relic' | 'qin' | 'sign'; d: number }[] = [];
+  if (w.relicNearby >= 0 && !w.relics.isHeard(w.relicNearby)) {
+    cands.push({ kind: 'relic', d: w.relicDistance });
+  }
+  if (w.qinInReach) cands.push({ kind: 'qin', d: w.qinDistance });
+  if (w.signInReach) cands.push({ kind: 'sign', d: w.signDistance });
+  if (cands.length === 0) return;
+  cands.sort((a, b) => a.d - b.d);
+
+  switch (cands[0].kind) {
+    case 'relic': {
+      // 摸旧物。**主角唯一属于自己的那件事**——序章里他明说
+      // "我这双手只会做一件事"，而那三张卡之后游戏再也没给过他一次机会。
+      const r = w.touchRelic();
+      if (r) this.ui.showStoryCard(t(r.textKey), t(r.titleKey));
       return;
     }
-    if (this.phase === 'roaming') this.tryCheckIn();
+    case 'qin':
+      void this.runGuqin();
+      return;
+    case 'sign':
+      this.touchSign();
+      return;
+  }
+}
+
+/** 读木牌。第一次读出那段字；之后按下去直接起跑。 */
+private touchSign() {
+  const w = this.world;
+  if (!this.signRead) {
+    this.signRead = true;
+    this.ui.showStoryCard(t('challenge_sign_text'), t('challenge_sign_title'), 9000, true);
+    return;
+  }
+  if (!w.startDodge()) {
+    this.ui.showToast(t('challenge_busy'), 1600, 'reply');
+  }
+}
+
+/**
+ * 琴音林那张琴。**自由演奏**：不进打卡、不扣旅币、不给碎片。
+ *
+ * ## 为什么复用 `checkin` 相位而不是新增一个
+ *
+ * 语义完全一样——站定了、车不能动、镜头之外正在办事——
+ * 而铺子已经复用过它一次（见 `tryCheckIn()` 那段注释）。
+ * 新增一个相位会在 `PHASE_EDGES` 与 `verify_phase` 的占用集合里
+ * 各添一条，而它带来不了任何新的能力。
+ */
+private async runGuqin() {
+  if (this.mg.isRunning || this.phase !== 'roaming') return;
+  if (this.prologueBusy && this.ui.storyBusy) return;
+  // 坐在琴前面时不该还在躲石头。实际不会发生（木牌在路肩上、琴在驿站院里），
+  // 但这一句是零成本的那一半：万一两样挪近了，它挡住的是"面板关着、石头还在场上"。
+  this.world.endDodge();
+  this.goPhase('checkin');
+  // 把焦点从"脚下那个圈"上摘下来（理由同 `runMiniGame`）。
+  this.ui.releaseFocus();
+  // **先讲清楚这是什么**，再让面板上来。自由演奏这一屏没有任何
+  // 进度条也没有倒计时，所以玩家第一眼必须知道"我不会被打断"。
+  if (!this.qinSeen) {
+    this.qinSeen = true;
+    this.ui.showStoryCard(t('qin_intro_text'), t('qin_intro_title'));
+    await nextFrame();
+    await this.ui.whenDialogueIdle();
+  }
+  await this.mg.runFreePlay('qin', seedFor(this.QIN_STATION, 0));
+  this.toRoaming();
+  this.ui.showToast(t('qin_left'), 2000);
+}
+
+/** 琴音林的碎片槽位。与 `World` 里那一处同源，判据 `verify_qin_station` 钉着它。 */
+private readonly QIN_STATION = 2;
+/** 木牌那一段字读过了没有（本次会话）。和 `Relics.heard` 一样不落盘：
+ *  它不是剧情进度，是"这一趟我有没有停下来读过"。 */
+private signRead = false;
+/** 琴音林的引子只讲一次。之后再进去就直接是那张琴。 */
+private qinSeen = false;
+/** 茶倒完水那一句旁白讲过了没有（本次会话）。理由见 `runMiniGame` 里那段。 */
+private teaPourSeen = false;
+
+private onConfirm() {
+    // 按哪一下去哪里由 `confirmAction()` 一处说了算（见那里的注释）：
+    // 这一屏原本漏了 `onboarding`，而 AI 契约给引导页标着"出路是 advance"，
+    // 于是契约一直亮着、游戏一直停在原地，两边都不报错。
+    switch (confirmAction(this.phase)) {
+      case 'startRide':
+        this.startRide();
+        break;
+      case 'enterWorld':
+        this.enterWorld();
+        break;
+      case 'checkIn':
+        this.tryCheckIn();
+        break;
+    }
   }
 
   // ---------------------------------------------------------------- 阶段
+  /**
+   * 标题页的「开启旅程」：**从头**来一趟。
+   *
+   * 它原来不清档。症状是：玩到一半刷新页面，标题页上那颗最大的
+   * 「开启旅程」按下去，进游戏发现钱还在、天数还在、序章也不播——
+   * 玩家以为开了新的一趟，实际接上了旧的那趟，而且**没有任何提示**。
+   *
+   * 存档在 `ready()` 的「读档…」那一步就已经读进来了（见文件头），
+   * 所以不清它就是"带着别人的进度启程"。有存档时清掉，
+   * 这一趟才是真的从头。
+   *
+   * 清完之后 `prologueDone` 是 false，`enterWorld()` 自然会把序章播回来——
+   * 这正是"新的一趟"该有的样子，不需要在这里另外安排。
+   */
   private async startRide() {
+    if (game.hasSave()) this.resetRun();
     await audio.unlock();
     audio.playBgm('bgm', 0.5);
     this.ui.setDialogueAutoAdvance(0);
-    this.phase = 'onboarding';
+    this.goPhase('onboarding');
     this.ui.showOnboarding();
   }
 
@@ -1060,7 +1245,7 @@ class App {
       this.ui.enterWorld();
       return;
     }
-    this.phase = 'roaming';
+    this.goPhase('roaming');
     this.ui.enterWorld();
     this.ui.syncFromState();
     this.playPrologue();
@@ -1136,14 +1321,14 @@ class App {
   }
 
   private toRoaming() {
-    this.phase = 'roaming';
+    this.goPhase('roaming');
     this.ui.hidePause();
     this.loop.resume();
   }
 
   pause() {
     if (this.phase !== 'roaming') return;
-    this.phase = 'paused';
+    this.goPhase('paused');
     this.loop.suspend();
     this.ui.showPause();
   }
@@ -1177,7 +1362,7 @@ class App {
    */
   private closeShop() {
     this.ui.setShopOpen(false);
-    if (this.phase === 'checkin') this.phase = 'roaming';
+    if (this.phase === 'checkin') this.goPhase('roaming');
   }
 
   /**
@@ -1267,7 +1452,7 @@ class App {
     // 再也回不到骑行。今天这条路径按不到（小游戏期间 Esc 被游戏吃掉），
     // 理由见 `MiniGameHost.abort()` 的注释。
     this.mg.abort();
-    this.phase = 'endcard';
+    this.goPhase('endcard');
     this.demoActive = false;
     this.loop.suspend();
     this.ui.showEndCard();
@@ -1293,7 +1478,7 @@ class App {
    * 「重新开始」那一个动词后面发生。
    */
   private closeEndCard() {
-    this.phase = 'roaming';
+    this.goPhase('roaming');
     this.loop.resume();
     this.ui.closeEndCard();
     this.ui.syncFromState();
@@ -1348,7 +1533,7 @@ class App {
       // （`{paused, checkin, synthesis}`），所以不用新增相位、那条不变式也不用改。
       // 语义也对得上——"站定了、车不能动、镜头之外正在办事"。
       // `world.checkInStage` 保持 `'none'`，打卡过场不会被触发。
-      this.phase = 'checkin';
+      this.goPhase('checkin');
       this.ui.setShopOpen(true);
       return;
     }
@@ -1365,7 +1550,7 @@ class App {
     // `runMiniGame` 里 `STATIONS[idx].slot < 0` 会立刻把它踢回 roaming，
     // 于是"第一章完成"这件事一次都不会发生。
     if (kind === 'home' || this.world.nearby.isHome) {
-      this.phase = 'checkin';
+      this.goPhase('checkin');
       this.world.startCheckIn(
         GameStateManager.HOME_STATION,
         () => void this.completeChapterOne(),
@@ -1375,7 +1560,7 @@ class App {
     }
     const idx = this.world.nearby.index;
     if (idx < 0) return;
-    this.phase = 'checkin';
+    this.goPhase('checkin');
     this.world.startCheckIn(idx, (finished) => void this.runMiniGame(finished));
   }
 
@@ -1415,7 +1600,7 @@ class App {
     // 对白在 startCheckIn 的 holding 段已经发起。等它念完再进合成——
     // 主循环一停玩家就没法再点了，不等的话那三句会卡在半截然后被面板盖住。
     await this.ui.whenDialogueIdle();
-    this.phase = 'synthesis';
+    this.goPhase('synthesis');
     this.ui.showSynthesis('chapter');
   }
 
@@ -1427,7 +1612,7 @@ class App {
     }
     const visit = game.getStationCount(stationIdx); // 打卡前的次数
     const id = MiniGameHost.idFor(st.slot, visit);
-    this.phase = 'minigame';
+    this.goPhase('minigame');
     // 把焦点从"脚下那个圈"上摘下来。
     //
     // 打卡是**用空格**触发的，而空格落在 HUD 的圈按钮上时，那个按钮会成为
@@ -1496,6 +1681,20 @@ class App {
     // 弹出来的是「这次没有完成」。他没做错任何事，却读到了"我失败了"。
     const outcome: SettleOutcome = handle.result;
     const win = outcome === 'win';
+
+    // **茶倒完水那一下的一句旁白**，只讲一次。
+    //
+    // 它落在小游戏交回来之后：玩家刚看完壶倾下去、水进盏、
+    // 「成了」浮出来，这时候补一句"原来忙完了是有声音的"，
+    // 才接得住——放在小游戏之前讲，那是提前剧透。
+    //
+    // 一次性闩锁**不落盘**：它不是剧情进度，
+    // 是"这一趟我有没有留心看过那一下"。
+    if (win && id === 'tea' && !this.teaPourSeen) {
+      this.teaPourSeen = true;
+      this.ui.showStoryCard(t('tea_pour_text'), t('tea_pour_title'));
+    }
+
     // 乐事结束了，被压着的反派对白现在可以交付
     this.world.setBusyForMinigame(false);
 
@@ -1563,7 +1762,7 @@ class App {
       // 完满评级（五座各去三次）就地结算。
       // 顺序是 `afterCheckInRoute` 里的活契约，理由写在那里。
       case 'maxed':
-        this.phase = 'synthesis';
+        this.goPhase('synthesis');
         this.ui.showSynthesis('maxed');
         return;
       // 过期。这一趟**不结束**，但目标换了。
@@ -1681,8 +1880,7 @@ class App {
    */
   private applyAutomation() {
     const q = new URLSearchParams(location.search);
-    const clean = q.has('clean');
-    // `?clean` 蕴含 `?nocine`：既然界面整个藏起来了，
+    const clean = q.has('clean');    // `?clean` 蕴含 `?nocine`：既然界面整个藏起来了，
     // 再让文字在背后继续排队只是浪费——而且若 `show()` 仍会读出文字，
     // 它读的是 0 宽容器，将来取消干净模式时会突然冒出一堆旧卡。
     const nocine = q.has('nocine') || clean;
@@ -1699,6 +1897,112 @@ class App {
     if (clean || q.has('autostart')) {
       this.continueRun();
     }
+
+    this.installAiApi();
+  }
+
+  // ---------------------------------------------------------------- AI 接口
+
+  /**
+   * 把 AI 可游玩接口装到 `window.__gift188`。
+   *
+   * ## 它为什么常驻，而不是藏在 `?ai=1` 后面
+   *
+   * 藏起来等于要求每个想用它的人**先知道那个参数**，
+   * 而"AI 能不能玩这个游戏"这件事本身就该是打开控制台敲一行就能试的。
+   * 它也**不能**做任何键盘做不到的事：每个动作都是一次真的
+   * `KeyboardEvent` 派发，走的是和人手键盘完全同一条路
+   * （理由与七处键盘监听的账，见 `game/api/live.ts` 的文件头）。
+   *
+   * ## 观测为什么几乎全是"现读现报"
+   *
+   * 导航那几项**不重新计算**，直接读 HUD 上一帧算好的
+   * （`hud.aiNext`）。两份算法早晚会漂，而漂了以后 AI 会朝着
+   * 玩家在屏幕上**看不见**的方向骑——症状像"AI 不会用导航"，极难归因。
+   */
+  private installAiApi() {
+    const host: LiveApiHost = {
+      phase: () => this.phase,
+      narrativeBusy: () => this.world.narrativeBusy,
+      dialogueOpen: () => this.ui.aiScreen().dialogueOpen,
+      dialogueText: () => this.ui.aiScreen().dialogueText,
+      minigameRunning: () => this.mg.isRunning,
+      panelOpen: () => this.ui.aiScreen().panelOpen,
+      canCheckIn: () => this.world.canCheckIn().ok,
+      observation: () => this.aiObservation(),
+      // **合成真的 KeyboardEvent**，而不是另开一条平行输入：
+      // 七个监听键盘的地方（宿主 / 对白 / 结算 / 明信片 / 小游戏 / 触屏 / HUD）
+      // 原封不动地收到，走和人手键盘完全同一条路。
+      dispatchKey: (code, down) => {
+        const ev = new KeyboardEvent(down ? 'keydown' : 'keyup', {
+          code,
+          key: code,
+          bubbles: true,
+          cancelable: true,
+          repeat: false,
+        });
+        // 派发给**焦点所在的那个元素**，没有焦点才发给 window。
+        //
+        // 真实按键的事件目标是当前焦点，而事件只会往上冒、不会往下走——
+        // 所以一发到 window，它就永远到不了按钮上。
+        // 而引导页、结算屏、合成面板的出路**全都**挂在按钮元素上
+        // （`wireKeyActivate`），于是 AI 按确认键时：
+        // `available` 里亮着 `advance`、`tap('advance')` 返回 accepted，
+        // 而游戏纹丝不动。实测引导页连按 150 次没动过。
+        //
+        // 派给焦点之后事件照样会冒到 window（`bubbles: true`），
+        // 所以骑行与面板那套 window 监听一个字都不用改——
+        // 这一句只是让"目标"和真人按键一致，不是另开一条平行输入。
+        const target = document.activeElement;
+        (target instanceof HTMLElement ? target : window).dispatchEvent(ev);
+      },
+    };
+    (window as unknown as { __gift188?: unknown }).__gift188 = createLiveApi(host);
+  }
+
+  /**
+   * 一帧观测。**只报玩家真能感觉到的东西**——
+   * 往里塞渲染器统计或 Object3D 树会让这份快照失去"观测"的意义，
+   * 那等于让任何基于它做的评估作弊。
+   */
+  private aiObservation(): Omit<AiObservation, 'available' | 'tick' | 't'> {
+    const r = this.world.ride;
+    const nav = this.ui.navNext;
+    const screen = this.ui.aiScreen();
+    return {
+      phase: this.phase,
+      chapter: game.chapter,
+      day: game.day,
+      daysLeft: game.daysLeft,
+      coins: game.lvbi,
+      lvbi: game.lvbi,
+      mood: game.mood,
+      fragmentsGot: game.getCollectedCount(),
+      slotVisits: ROAD_RAW.FRAGMENT_SLOT_STATION_IDX.map((i) => game.getStationCount(i)),
+      speed: r.speedValue,
+      maxSpeed: RIDE.MAX_SPEED,
+      onRoad: !r.offRoad,
+      // 「偏了多远」和上面那个布尔**必须**是同一份计算（见 `Ride.offRoadMeters`）：
+      // 在这一行自己拿 `r.lateral` 重算，就会出现 `onRoad: true` 配 `offRoad: 2.81`
+      // 这种自相矛盾的观测——一个说在路上，一个说偏出去两米八。
+      offRoad: r.offRoadMeters,
+      // 归一化弧长，和 `nearestArcParam()` 的定义一致（0..1）。
+      arc: nearestArcParam(r.pos.x, r.pos.z),
+      km: game.progressKm,
+      vehicle: r.vehicleKind,
+      camera: r.cameraMode,
+      nextStation: nav.idx,
+      nextName: nav.name,
+      nextDistance: nav.dist,
+      nextArrow: nav.arrow,
+      canCheckIn: this.world.canCheckIn().ok,
+      objective: nav.objective,
+      lang: getLang(),
+      dialogueOpen: screen.dialogueOpen,
+      dialogueText: screen.dialogueText,
+      minigame: this.mg.isRunning,
+      panelOpen: screen.panelOpen,
+    };
   }
 
   // ---------------------------------------------------------------- 事件
@@ -1737,6 +2041,33 @@ class App {
       this.onAssetLoaded(e.what);
     } else if (e.type === 'stationPassed') {
       void e.index;
+    } else if (e.type === 'dodgeStart') {
+      // 起跑。这一句是**唯一**告诉玩家"接下来一整圈都在躲什么"的台词，
+      // 所以它带 `dismissible`：它是给自己看的，不是拦路的那一句。
+      this.ui.showStoryCard(t('challenge_start_text'), t('challenge_start_title'), 7000, true);
+    } else if (e.type === 'dodgeHit') {
+      this.ui.showStoryCard(e.text, t('challenge_hit_title'), 6500, true);
+      this.ui.syncFromState();
+    } else if (e.type === 'dodgeWon') {
+      // **奖励在这里发，不在世界层。**
+      //
+      // `checkIn()` 会走旅币账本、心神、存档与 `allCollected` 事件；
+      // 那些都是 `GameStateManager` 的活。世界层要是也顺手改一笔，
+      // 两边就会各自记一次到访，而顶栏那一格圆点只有一处——
+      // 于是玩家看见"碎片到了，可到访次数没涨"。
+      const lvbiBefore = game.lvbi;
+      // 它会返回 false：五座驿站都去满三次之后，绕完一圈**仍然有解**
+      //（一圈确实一件没碰），但已经没有碎片可以再给了。
+      // 那种时候弹「碎片落进你手里」是在骗人——所以分成两句话说。
+      const awarded = game.checkIn(e.station);
+      const gained = Math.max(game.lvbi - lvbiBefore, 0);
+      this.ui.showStoryCard(
+        awarded ? e.text : t('challenge_all_full_text'),
+        t(awarded ? 'challenge_win_title' : 'challenge_all_full_title'),
+      );
+      if (gained > 0) this.ui.showToast(t('challenge_gain', { coins: gained }), 2200);
+      this.ui.syncFromState();
+      if (audio.ready) audio.sfx('collect');
     }
   }
 
@@ -1795,7 +2126,72 @@ class App {
     this.mg.fixedUpdate(dt);
     this.world.postFixedUpdate();
     this.updateRelicHint();
+    this.updateRoadsideHint();
+    // 挑战进度条。**只在进行中才读世界**：没在挑战的时候那一行是
+    // "active: false"，而 `dodgeProgress` 每帧算一次弧长累加并不便宜。
+    const dodge = this.world.dodgeRunning;
+    this.ui.setDodge({
+      active: dodge,
+      progress: this.world.dodgeProgress,
+      left: TOTAL_ARCLENGTH - this.world.dodgeTravelledMeters,
+    });
     this.updateDayToast();
+    this.announceSaveState();
+  }
+
+  /**
+   * 路边的两样东西：木牌与琴音林，各给一次提示。
+   *
+   * 和旧物同一条规矩（`updateRelicHint`）：**够得着才提示**，
+   * 而提示只说"可以按 F"，不解释玩法——玩法由木牌上那段字负责。
+   *
+   * 挑战进行中不提示：那 0.9 秒里玩家要盯的是石头。
+   */
+  private updateRoadsideHint() {
+    const w = this.world;
+    if (w.dodgeRunning) return;
+    if (w.signInReach && !this.signRead && !this.signHinted) {
+      this.signHinted = true;
+      this.ui.showToast(t('challenge_hint'), 2200);
+    }
+    if (w.qinInReach && !this.qinSeen && !this.qinHinted) {
+      this.qinHinted = true;
+      this.ui.showToast(t('qin_hint_near'), 2600);
+    }
+  }
+  private signHinted = false;
+  private qinHinted = false;
+
+  /**
+   * 存档那边的两条坏消息，各说一次。
+   *
+   * ## 为什么放在这里，而不是 `load()` / `save()` 旁边直接弹
+   *
+   * `load()` 发生在 `boot()` 里、UI 还没建好（`showTitle()` 在它后面）；
+   * 而 `save()` 是被 `checkIn()` / `noteLap()` / `buy()` 内部调的，
+   * 一趟几十次。把提示写在发生处，就得给"UI 还没准备好"和"同一句话说四十遍"
+   * 各写一层例外。
+   *
+   * 所以两边都只**置一个标志**，说话统一放在这一帧。
+   * `take…()` 读走就清，于是这两个调用每帧各问一次、总共只会各响一次。
+   *
+   * ## 为什么是 `fixed()` 而不是 `render()`
+   *
+   * 暂停时 `fixed()` 不跑，于是玩家在暂停面板里不会被这两条提示打断；
+   * 而"存档没存上"这句话本来也不该抢着对一个正在读暂停菜单的人说话。
+   */
+  private announceSaveState() {
+    if (game.takeSaveMigrated()) {
+      // 说的是「格式变了，进度没带过来」而不是「进度没了」。
+      // 前者是**发生了什么**，后者会被读成判罚——而玩家什么都没做错，
+      // 他只是在我们改存档格式的那个版本里多骑了两天。
+      this.ui.showToast(`${t('save_migrated_title')}\n${t('save_migrated_line')}`, 5200);
+    }
+    if (game.takeWriteFailed()) {
+      // 必须说清「这一趟不会留下存档」：**只说"存不上"而不说后果，
+      // 玩家会以为待会儿重试一下就好，于是照常玩两小时再关掉。
+      this.ui.showToast(`${t('save_unsaved_title')}\n${t('save_unsaved_line')}`, 5200);
+    }
   }
 
   /**

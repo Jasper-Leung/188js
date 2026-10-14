@@ -247,6 +247,51 @@ export function computeTier(input: PostcardInput): CardTier {
 }
 
 /**
+ * 按出现顺序消费 `%s` / `%d`（与主 i18n 的数组参数同语义）。
+ *
+ * `layout.t()` 是不带参数的那一条——postcard 的画笔侧只需要取原文。
+ * 评级行要填四个占位符，所以这里补最短的一段，**不**把主 i18n 的
+ * `t()` 引进来：那个 `t()` 按"当前语言"取表，会绕开 `input.lang`,
+ * 而这一层全是按 lang 取值的纯函数（`paperTierName` 同族）。
+ */
+function fillOrdered(s: string, args: readonly (string | number)[]): string {
+  let i = 0;
+  return s.replace(/%s|%d/g, () => (i < args.length ? String(args[i++]) : ''));
+}
+
+/**
+ * 评级行：把「你走到了哪一档」念出来。
+ *
+ * ## 为什么这一行必须存在
+ *
+ * 五档名（`tier_0` 初旅 / `tier_1` 探索者 / `tier_2` 朝圣者 / `tier_3` 大师 /
+ * `tier_4` 完满）加 `tier_now` / `tier_full` 两条句式，曾经整族躺在死字
+ * 白名单里——**评级函数一直在算，算完没人念**。玩家骑了二十多分钟，
+ * 手里那张卡没有一句定级，"再骑一圈刷完满"也就没有对象。
+ *
+ * 放在这一层而不是 UI 层：`paperTierName` 已经在用同一条 `t(input.lang, …)`
+ * 通路，判定（哪一档 / 还差几次）只此一份，合成屏与结算屏都从它取。
+ *
+ * `computeVariant` 的 4（完满）**有自己的那句**（`tier_full`），
+ * 不套 `tier_now` 的百分比句式——完满不说"还差 0 次"。
+ */
+export function tierLine(input: PostcardInput): string {
+  const variant = computeVariant(input);
+  if (variant >= VARIANT_TO_TIER.length) return t(input.lang, 'tier_full');
+  let have = 0;
+  for (let s = 0; s < input.slotVisits.length; s++) {
+    have += Math.min(visitsOf(input, s), MAX_VISITS_PER_STATION);
+  }
+  const left = input.slotVisits.length * MAX_VISITS_PER_STATION - have;
+  return fillOrdered(t(input.lang, 'tier_now'), [
+    t(input.lang, `tier_${variant}`),
+    variant + 1,
+    VARIANT_TO_TIER.length + 1,
+    Math.max(0, left),
+  ]);
+}
+
+/**
  * 纸面档位名对应的 i18n key。
  * 0 = 没买套餐：明信片照样产出，只是不打纸名（只剩落款）。
  */

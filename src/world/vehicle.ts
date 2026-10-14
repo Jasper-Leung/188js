@@ -510,6 +510,73 @@ export const MODE_TUNE: Record<
 };
 
 /* ------------------------------------------------------------------ *
+ * ## 主体提亮：为什么是它，而不是再补一盏灯
+ * ------------------------------------------------------------------ */
+
+/**
+ * 逐模型的主体提亮系数。1 = 不动。
+ *
+ * **这不是审美偏好，是一个量出来的数。** 把 GLB 里那张 baseColor
+ * 贴图解出来取均值（`sharp` 直接读二进制，不用起浏览器）：
+ *
+ * | 模型 | baseColor 均值 RGB | 亮度 < 40 的像素占比 |
+ * |:---|:---|---:|
+ * | `bicycle.glb` | **32.5 / 32.9 / 31.6** | **64.6%** |
+ * | `survivor.glb` | 67.7 / 67.3 / 58.0 | 1.7% |
+ * | `motorcycle.glb` | 121.6 / 120.7 / 240.9 | 3.4% |
+ *
+ * 只有自行车那张是**近黑的**：平均反照率约 0.13。
+ * 于是无论怎么打光都救不回来——`Sky.rim` 那盏补光是在的，
+ * `verify_subject_lighting` 守着它强度大于 0、落在相机那一侧、不随昼夜失配，
+ * **它一直在照，只是照一个 0.13 反照率的东西仍然是黑的**。
+ *
+ * 所以修的地方是材质，不是灯：
+ * 0.13 × 2.8 ≈ 0.36，那块主体从剪影变回一件有明暗的东西。
+ *
+ * **为什么不改贴图**：`assets:tex` 要重跑整个资源管线，
+ * 而 `sharp` 与 `@gltf-transform/functions` 不能同进程（见 `AGENTS.md` §4），
+ * 为了一个系数去动 17.47MB 的二进制产物不划算。运行期提亮是可逆的，
+ * 真要修根子就重烘 bicycle 的 baseColor，再把这个系数调回 1。
+ *
+ * 角色与摩托给 1：它们量出来本来就正常，抬上去只会把水墨调子抬坏。
+ * `verify_subject_material` 守着这张表——**它只钉系数，
+ * 证不了好不好看**（无头没有排版/渲染引擎，见 `AGENTS.md` §1）。
+ */
+export const SUBJECT_LIFT: Partial<Record<RideMode, number>> = {
+  bike: 2.8,
+};
+
+/**
+ * 把一个模型树上所有材质的基色乘上 `lift`，返回改了几个材质。
+ *
+ * 用 `material.color` 而不是直接动贴图：`color` 在标准材质里是
+ * **乘在贴图前面**的一个系数（最终色 = color × texture），
+ * 所以只改它就够，不碰那 21 张 JPEG，也不用重新上传纹理。
+ *
+ * 同一个材质被多个 mesh 共用时只改一次——three 的材质是共享的，
+ * 重复乘会把系数叠上去（2.8 → 7.84 → 变成一块发白的东西）。
+ */
+export function liftSubjectMaterials(root: Object3D | null, lift: number): number {
+  if (!root || !(lift > 1)) return 0;
+  let n = 0;
+  const seen = new Set<unknown>();
+  root.traverse((o) => {
+    const mat = (o as Mesh).material as
+      | { color?: { multiplyScalar(v: number): unknown } }
+      | Array<{ color?: { multiplyScalar(v: number): unknown } }>
+      | undefined;
+    if (!mat) return;
+    for (const m of Array.isArray(mat) ? mat : [mat]) {
+      if (!m || !m.color || seen.has(m)) continue;
+      seen.add(m);
+      m.color.multiplyScalar(lift);
+      n++;
+    }
+  });
+  return n;
+}
+
+/* ------------------------------------------------------------------ *
  * ## 行车基底：把「模型自己的轴」换算成「行驶的轴」
  * ------------------------------------------------------------------ *
  *
@@ -1897,10 +1964,16 @@ export class Vehicle {
     return this.models.skate !== null;
   }
 
-  attach(m: Partial<VehicleModels>): void {
+    attach(m: Partial<VehicleModels>): void {
     this.models = { ...this.models, ...m };
     this.prepareClips();
     this.rebuild();
+    // 主体提亮放在**挂上模型之后**：只处理这次新挂上来的那些，
+    // 不动已经提过的（否则 `attach` 调两次就是系数相乘）。
+    for (const [mode, obj] of Object.entries(m) as [RideMode, Object3D | null][]) {
+      const lift = SUBJECT_LIFT[mode];
+      if (lift) liftSubjectMaterials(obj, lift);
+    }
   }
 
   /**

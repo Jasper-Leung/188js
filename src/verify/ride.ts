@@ -24,13 +24,15 @@
 import { Terrain } from '../world/terrain';
 import { Road, JUNCTION, ROAD } from '../world/road';
 import { Stations } from '../world/stations';
-import { Ride } from '../world/ride';
+import { Ride, roadSpawnPose, MOMENT } from '../world/ride';
 import { PRESETS } from '../core/settings';
 import { RIDE, WORLD, ROADMESH } from '../data/raw';
 import { canRide, demoAim, demoInput, demoLookahead, unwrapArc, DEMO_CRUISE } from '../game/phase';
 import { MODE_TUNE } from '../world/vehicle';
-import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength, nearestArcParam } from '../data/route';
+import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength, nearestArcParam, STATIONS } from '../data/route';
 import { Object3D } from 'three';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** 一个不碰 WebGL 的相机替身。骑行只写它的 position / lookAt。 */
 function fakeCamera() {
@@ -156,6 +158,123 @@ export function assertRide(): { ok: boolean; detail: string; asserts: number } {
   const detail = probs.length
     ? probs.join('；')
     : `1s 满油门 ${RIDE.ACCEL} m/s · 满舵 0.5s ${(wantTurn * 57.3).toFixed(0)}° · 极速 ${RIDE.MAX_SPEED} m/s · 交叉口 ${j.detail}`;
+  return { ok: probs.length === 0, detail, asserts };
+}
+
+/** 出生点处路面切向（**独立**量出来的，不复用 `roadSpawnPose` 内部的 ±2m 采样）。 */
+function tangentDegAt(x: number, z: number): number {
+  const s = nearestArcParam(x, z) * TOTAL_ARCLENGTH;
+  const a = pointAtArcLength(Math.max(0, s - 5)).pos;
+  const b = pointAtArcLength(Math.min(TOTAL_ARCLENGTH, s + 5)).pos;
+  return Math.atan2(b.x - a.x, b.z - a.z);
+}
+
+/** 两个角的差，收到 (−180, 180]。 */
+function angleGapDeg(a: number, b: number): number {
+  let d = (a - b) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d <= -Math.PI) d += Math.PI * 2;
+  return Math.abs((d * 180) / Math.PI);
+}
+
+/**
+ * 出生**朝向**顺不顺着这条路——`verify_ride` 只守了出生点「在路面上」，
+ * 这一次把「车头指着哪」也钉住。
+ *
+ * ## 它挡的是什么
+ *
+ * `spawn(x, z, 0)` 的 `heading = 0` 是车头朝 **(0, 0, −1)**，
+ * 和路面方向是两回事。玩家站在路面正中，所以 `onRoad()` 一直是真的，
+ * **没有任何症状**——但按 W 之后车会斜着离开沥青：
+ *
+ *   横向增长 sin(偏角) → 越过「路面半宽 + 缓冲」需要十几米 →
+ *   从静止 ACCEL 起步大约 **2 秒**出路面，然后被离路降速按到 45%。
+ *
+ * 也就是说：**玩家在这个游戏里的第一个操作，结果是在草地上。**
+ *
+ * ## 为什么以前没有
+ *
+ * 唯一算对的那一处在 `assertDemoDrive` 的夹具里（`ride.ts` 早年的注释
+ * 「`build()` 给的是 heading=0，不是路的方向」就是证据）。
+ * **回归在自己身上做了修正，于是它测的就不再是产品给玩家的东西。**
+ * 所以第 4 条数的是 `world.ts` 的接线，不是夹具。
+ *
+ * 各自会红的做法：
+ *   · `world.ts` 构造里把 `roadSpawnPose` 换回 `spawn(…, 0)` → 第 4 条红。
+ *   · `roadSpawnPose` 漏掉那个负号 → 第 1 条红（整整 180°）。
+ *   · 离路阈值调小 / `ACCEL` 调大 → 第 3 条先红（更早离路）。
+ */
+export function assertSpawnHeading(): { ok: boolean; detail: string; asserts: number } {
+  const probs: string[] = [];
+  let asserts = 0;
+  const { ride } = build();
+  ride.setCanMove(canRide({ phase: 'roaming', checkInPressed: false, narrativeBusy: false, checkInStage: 'none' }));
+
+  // 0 号驿站旁就是**玩家的真实起点**（`World` 构造里用的那一个）。
+  const st0 = STATIONS[0];
+  const pose = roadSpawnPose(st0.x, st0.z);
+
+  asserts++;
+  ride.spawn(pose.x, pose.z, pose.heading);
+  if (!ride.onRoad()) {
+    probs.push(`出生点 (${pose.x.toFixed(1)}, ${pose.z.toFixed(1)}) 不在路面上`);
+  }
+
+  // 走一帧让 `_fwd` 算出来，然后拿**产品的**前向量去比路面切向。
+  // 不用 `headingValue` 自己再换算一次——那份换算正是会漂的东西。
+  ride.fixedUpdate(1 / 60, { throttle: 0, steer: 0 });
+  const f = ride.forward;
+  const travelDeg = Math.atan2(f.x, f.z);
+  const gap = angleGapDeg(travelDeg, tangentDegAt(pose.x, pose.z));
+  asserts++;
+  if (gap > 5) {
+    probs.push(`出生朝向偏离路面 ${gap.toFixed(1)}°（应 < 5°）——车头不指着前进方向`);
+  }
+
+  // 玩家进世界后**第一个动作**：按住油门，什么都不打。
+  // 这条比角度更值钱：它直接就是玩家经历的那两秒。
+  asserts++;
+  ride.spawn(pose.x, pose.z, pose.heading);
+  for (let i = 0; i < 120; i++) ride.fixedUpdate(1 / 60, { throttle: -1, steer: 0 });
+  if (!ride.onRoad()) {
+    probs.push(
+      `按满油门 2 秒就离路了（偏出 ${ride.lateral.toFixed(1)}m）——` +
+        `出生朝向不对，玩家第一个操作就会掉进草地`,
+    );
+  }
+
+  // 接线：产品代码不许再出现裸的 `spawn(…, 0)`。
+  // 只量 `roadSpawnPose` 自己的话，有人不调它这条判据照样绿。
+  asserts++;
+  const worldSrc = readFileSync(join(process.cwd(), 'src', 'world', 'world.ts'), 'utf8');
+  if (/spawn\([^)]*,\s*0\s*\)/.test(worldSrc)) {
+    probs.push('world.ts 里还有 `spawn(…, 0)`——出生朝向又退回写死的 0 了');
+  }
+  asserts++;
+  if (!worldSrc.includes('roadSpawnPose(')) {
+    probs.push('world.ts 不再调用 roadSpawnPose——出生位姿和产品代码脱钩了');
+  }
+
+  // 每座驿站旁都要站得住：这一条是给 helper 本身的，不是只测 0 号。
+  asserts++;
+  let worst = 0;
+  for (let i = 0; i < STATIONS.length; i++) {
+    const st = STATIONS[i];
+    const p = roadSpawnPose(st.x, st.z);
+    ride.spawn(p.x, p.z, p.heading);
+    ride.fixedUpdate(1 / 60, { throttle: 0, steer: 0 });
+    const ff = ride.forward;
+    const g = angleGapDeg(Math.atan2(ff.x, ff.z), tangentDegAt(p.x, p.z));
+    if (g > worst) worst = g;
+  }
+  if (worst > 5) {
+    probs.push(`${STATIONS.length} 座驿站里有出生朝向偏出路面 5° 以上的（最差 ${worst.toFixed(1)}°）`);
+  }
+
+  const detail = probs.length
+    ? probs.join('；')
+    : `0 号驿站旁出生朝向偏路面 ${gap.toFixed(2)}° · 满油门 2 秒仍在路上 · ` +
+      `${STATIONS.length} 座驿站最差 ${worst.toFixed(2)}°`;
   return { ok: probs.length === 0, detail, asserts };
 }
 
@@ -592,6 +711,42 @@ export function assertDemoDrive(): { ok: boolean; detail: string; asserts: numbe
     if (demoLookahead(0) < 0) probs.push('前视算出了负数');
   }
 
+  // ---- 2f. `ride.lateral` 必须等于**真的**横向距离 ----
+  //
+  // 它现在直接调 `distToCenterline()`，而这里拿 `lateralOf()`（逐段垂足、扫全路径）
+  // 当参考。上面 2b 那些横向偏移一直用参考实现算，所以这条守的是**另一条**路：
+  // 骑行自己报的那个数——AI 观测的「离路多少米」读的就是它。
+  //
+  // 原来骑行侧是 `round(nearestArcParam(x, z) * (CENTERLINE.length - 1))`
+  // 再量到那个点上——它假设 961 个点在弧长上均匀分布，而它们不是
+  // （48 段曲线各插 20 个点，外加一条长直线），点距差着两个数量级。
+  // 后果不是"偏得不准"，是**在沥青上报离路 8m**。
+  asserts++;
+  {
+    let worstErr = 0;
+    let where = '';
+    for (let k = 0; k < 40; k++) {
+      const arcK = k / 40;
+      const p = pointAtArcLength(arcK * TOTAL_ARCLENGTH).pos;
+      const t = tangentAt(arcK);
+      const right = { x: -t.z, z: t.x };
+      // 路上、路肩、路外各取几档——只有路上的点才会暴露那个 bug。
+      for (const off of [0, 2, 5, 9]) {
+        const x = p.x + right.x * off;
+        const z = p.z + right.z * off;
+        ride.spawn(x, z, Math.atan2(-t.x, -t.z));
+        const err = Math.abs(ride.lateral - lateralOf(x, z));
+        if (err > worstErr) {
+          worstErr = err;
+          where = `arc=${arcK.toFixed(2)} 偏 ${off}m`;
+        }
+      }
+    }
+    if (worstErr > 0.05) {
+      probs.push(`ride.lateral 和逐段垂足的参考实现差 ${worstErr.toFixed(2)}m（${where}）——横向距离算错了`);
+    }
+  }
+
   const detail = probs.length
     ? probs.join('；')
     : `${seconds}s 走了 ${gained.toFixed(0)}m · 全程在路面上 · 最远横向 ${worstLateral.toFixed(2)}m / 半宽 ${ROADMESH.TOTAL_HALF_WIDTH}m · 均速 ${avg.toFixed(1)} m/s · 峰值转向 ${worstSteer.toFixed(2)} · 徒步退路 ${footRun.gained.toFixed(0)}m 均速 ${footRun.avg.toFixed(1)} m/s 离路 ${footRun.off} 帧`;
@@ -624,9 +779,68 @@ function lateralOf(x: number, z: number): number {
   return best;
 }
 
+/**
+ * 交叉口的"停一拍"（`MOMENT` / `Ride.holdMoment()`）。
+ *
+ * 守三件会各自失效的事：
+ *
+ * 1. **停得住**。`holdMoment()` 之后即使满油门，速度也上不到
+ *    `MAX_SPEED × MOMENT.FACTOR` 以上——把 `applyMoment()` 删掉会红。
+ * 2. **放得开**。计时器归零后回得去极速——把 `momentTimer -= dt`
+ *    写漏会红：停顿变成永久减速，比没有这个功能更糟。
+ * 3. **不叠加**。连按两次和按一次一样快——哪天实现改成"系数相连乘"
+ *    （0.25 × 0.25），玩家连过两个路口会被按到几乎停住，这条红。
+ *
+ * `sprintOnRoad()` 每帧把车钉回路面上，所以离路惩罚不掺和进来——
+ * 这一条量的是路口那半拍，不是草地。
+ */
+export function assertJunctionMoment(): { ok: boolean; detail: string; asserts: number } {
+  const probs: string[] = [];
+  let asserts = 0;
+  const { ride } = build();
+  ride.setCanMove(canRide({ phase: 'roaming', checkInPressed: false, narrativeBusy: false, checkInStage: 'none' }));
+
+  const cap = RIDE.MAX_SPEED * MOMENT.FACTOR;
+
+  // 先把速度攒到极速
+  asserts++;
+  const before = sprintOnRoad(ride, 10);
+  if (Math.abs(before - RIDE.MAX_SPEED) > 0.05) {
+    probs.push(`攒速失败：满油门十秒只有 ${before.toFixed(2)}，应为 MAX_SPEED=${RIDE.MAX_SPEED}`);
+  }
+
+  // 1. 停得住：半拍之内踩着满油门也快不过 cap
+  asserts++;
+  ride.holdMoment(MOMENT.HOLD);
+  const during = sprintOnRoad(ride, MOMENT.HOLD / 2);
+  if (during > cap + 0.05) {
+    probs.push(`停一拍期间车速 ${during.toFixed(2)}，应被压在 ${cap.toFixed(2)} 以内`);
+  }
+
+  // 2. 放得开：一拍结束回到极速
+  asserts++;
+  const after = sprintOnRoad(ride, 10);
+  if (Math.abs(after - RIDE.MAX_SPEED) > 0.05) {
+    probs.push(`停一拍结束后车速 ${after.toFixed(2)}，应为 MAX_SPEED=${RIDE.MAX_SPEED}——停顿变成了永久减速`);
+  }
+
+  // 3. 不叠加：连拍两次不会更慢
+  asserts++;
+  ride.holdMoment(0.3);
+  ride.holdMoment(0.3);
+  const twice = sprintOnRoad(ride, 0.2);
+  if (twice < cap - 0.05) {
+    probs.push(`连拍两次车速被压到 ${twice.toFixed(2)}（低于单次上限 ${cap.toFixed(2)}）——停拍叠加了`);
+  }
+
+  const detail = probs.length
+    ? probs.join('；')
+    : `停拍 ${MOMENT.HOLD}s 压至 ${(MOMENT.FACTOR * 100).toFixed(0)}%（${cap.toFixed(1)} m/s）· 放开回极速 ${RIDE.MAX_SPEED} · 连拍不叠加`;
+  return { ok: probs.length === 0, detail, asserts };
+}
+
 /** 供探针打印用 */
-export function probeRide() {
-  console.log('=== 骑行链路自检（Node，无 WebGL）===');
+export function probeRide() {  console.log('=== 骑行链路自检（Node，无 WebGL）===');
 
   const { ride, start } = build();
   console.log(`  出生点 (${start.x.toFixed(2)}, ${start.z.toFixed(2)})  在路上=${ride.onRoad()}`);

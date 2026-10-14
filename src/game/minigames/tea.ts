@@ -35,9 +35,27 @@ import {
 } from './chrome';
 import type { MiniGame, MiniGameContext, MiniGameResult } from './types';
 
-/** 收尾动画时长（秒）。见 drawCurtain。 */
-const SETTLE_SEC = 0.9;
+/**
+ * 收尾动画时长（秒）。见 `drawPour`。
+ *
+ * 它是三段之和而不是一个拍脑袋的数：
+ * 抬起倾倒 → 水流 → 扶正，而**扶正这一段不砍**——
+ * 扶正的时候「成了」才浮出来，于是那一屏的因果是
+ * 「水倒完了 → 才说成了」，而不是两件事同时发生。
+ *
+ * ⚠ **三段加起来必须留在 2.0 秒以内**。这不是审美：茶按满
+ * `HOLD_DURATION`(3s) 之后还要走完这一段，而 `verify_minigame_playable`
+ * 给"按住空格"的那个窗口正好 5.0 秒。3 + 2.0 = 5.0 刚好卡在边上，
+ * 溢出一帧就会让茶看起来"收不到终局"，然后判据会误报成卡死。
+ */
+const TILT_IN = 0.40;
+const POUR_HOLD = 1.20;
+const TILT_OUT = 0.35;
+const SETTLE_SEC = TILT_IN + POUR_HOLD + TILT_OUT;
 const HOLD_DURATION = 3.0;
+
+/** 倾到底的角度（弧度，约 62°）。再大壶嘴会翻到壶口上面去，读不出是"在倒"。 */
+export const POUR_TILT = 1.08;
 
 /** 壶的几何。原来 rx/ry/壶心三个各写一份在 `_draw()` 里，回归就只能自己再抄一份
  *  （抄的那份迟早和画的漂）。抽出来之后，"水位线落在壶身之内"这条判据量的是
@@ -101,6 +119,57 @@ function waterLineY(cy: number, ry: number, fill: number): number {
 
 const potScale = (w: number, h: number): number => Math.min(w, h) / 400;
 
+/** 壶嘴尖在壶身坐标系里的位置（`x` 是 rx 的几成，`y` 是 ry 的几成，y 向上为负）。
+ *  画壶嘴与画水柱读的是**同一对**数：只在一处写的话，
+ *  水柱会从壶嘴旁边那一小段缺口里漏出来，而图上只是"水没对上口"。 */
+export const SPOUT_TIP_X = 1.42;
+export const SPOUT_TIP_Y = -1.12;
+
+/** 茶盏相对**倾到底的壶嘴尖**的落位。盏不是固定摆的，是从壶嘴那一点推出来的——
+ *  固定摆的话，只要倾角一改，盏与水柱就对不上，而两者永远不会同时被看见，
+ *  于是这个错能一直躺着。 */
+export const CUP_DX = 0.06;
+export const CUP_DY = 0.62;
+export const CUP_W = 0.46;
+export const CUP_H = 0.34;
+
+/** 盏壁颜色：比壶身亮一档的釉白。这屏的底是暖褐，盏要跳出来才读得出"这是容器"。 */
+const COL_CUP_S = 'rgba(226, 214, 190, 0.92)';
+
+/**
+ * 把一点绕支点转 `ang`（弧度）。canvas 的 `rotate` 在 y 向下的坐标系里
+ * 是**顺时针为正**，所以这里用同一套符号——`draw()` 画的和这里算的必须一致。
+ */
+export function rotatePoint(
+  x: number, y: number, px: number, py: number, ang: number,
+): { x: number; y: number } {
+  const c = Math.cos(ang);
+  const s = Math.sin(ang);
+  const dx = x - px;
+  const dy = y - py;
+  return { x: px + dx * c - dy * s, y: py + dx * s + dy * c };
+}
+
+/** 壶倾 `ang` 之后，壶嘴尖真的在哪儿。`draw()` 的水柱与 `verify_tea_pour` 共用。 */
+export function pourSpoutTip(
+  cx: number, cy: number, rx: number, ry: number, ang: number,
+): { x: number; y: number } {
+  return rotatePoint(cx + rx * SPOUT_TIP_X, cy + ry * SPOUT_TIP_Y, cx, cy + ry * 0.85, ang);
+}
+
+/**
+ * 茶盏的落位（`Rect`，y 是**盏口**）。
+ *
+ * 摆位用**倾到底**的壶嘴尖而不是当前角度：壶是从正位转过来的，
+ * 盏若跟着一起动，水柱会跟着盏一起动——于是水永远落得进去，
+ * 而那正是"倒不进盏"的另一种写法。
+ */
+export function pourCupRect(cx: number, cy: number, rx: number, ry: number): Rect {
+  const tip = pourSpoutTip(cx, cy, rx, ry, POUR_TILT);
+  const w = rx * CUP_W;
+  return { x: tip.x + rx * CUP_DX - w * 0.5, y: tip.y + ry * CUP_DY, w, h: ry * CUP_H };
+}
+
 /**
  * 第 i 颗水汽在 t 时刻的偏移 / 半径 / 透明度。
  * `u` 是"这一轮走到几成"，三颗各错开 1/3 轮——同相的话那就是同一个点画三遍。
@@ -152,6 +221,50 @@ class TeaGame implements MiniGame {
 
   private fillFraction(): number {
     return Math.min(Math.max(this.holdTime / Math.max(HOLD_DURATION, 0.001), 0), 1);
+  }
+
+  // ------------------------------------------------------------ 倒水时序
+  //
+  // 四个读数，**全部由 `settleT` 这一个钟推出来**。
+  //
+  // 原来这里没有第二个钟，于是倾角、水柱、茶盏水位各写一份自己的计时，
+  // 改一个就要改三个——而它们不同步时的症状是"壶已经扶正了，水还在往下淌"，
+  // 图上完全看不出是哪个数字慢了。
+
+  /** 收尾整体进度 0..1。 */
+  private pourProgress(): number {
+    return Math.min(Math.max(this.settleT / SETTLE_SEC, 0), 1);
+  }
+
+  /** 当前倾角（弧度）。抬起 → 保持 → 扶正。 */
+  private tiltAngle(): number {
+    if (this.settleT <= 0) return 0;
+    const ease = (u: number) => u * u * (3 - 2 * u);
+    if (this.settleT < TILT_IN) return POUR_TILT * ease(this.settleT / TILT_IN);
+    if (this.settleT < TILT_IN + POUR_HOLD) return POUR_TILT;
+    const u = (this.settleT - TILT_IN - POUR_HOLD) / TILT_OUT;
+    return POUR_TILT * (1 - ease(Math.min(Math.max(u, 0), 1)));
+  }
+
+  /**
+   * 水柱强度 0..1。
+   *
+   * 两头各留一段淡入淡出（各 12% 的时长）：水柱不该凭空出现，
+   * 也不该在壶还大张着嘴的时候凭空断掉。
+   */
+  private pourFlow(): number {
+    const start = TILT_IN * 0.8;
+    const end = TILT_IN + POUR_HOLD;
+    if (this.settleT <= start || this.settleT >= end) return 0;
+    const u = (this.settleT - start) / (end - start);
+    return Math.min(Math.min(u / 0.12, (1 - u) / 0.12), 1);
+  }
+
+  /** 盏里的水位 0..1。水柱出的这段时间里一点点满上来。 */
+  private cupFill(): number {
+    const start = TILT_IN * 0.8;
+    const span = TILT_IN + POUR_HOLD - start;
+    return Math.min(Math.max((this.settleT - start) / span, 0), 1);
   }
 
   /**
@@ -273,20 +386,110 @@ class TeaGame implements MiniGame {
     drawBackdrop(g, w, h, THEME.TEA);
     drawTextCentered(g, tf(this.sh, 'mg_tea_title'), w, h * 0.12, 28, this.sh.paper);
 
-    // 茶壶。原来这里是一个半圆弧 + 一根斜线 + 一个半圆环，落在深色背板上认不出是
-    // 茶壶——五个小游戏里只有它没有可读的形象。壶身 + 壶盖 + 壶嘴 + 壶把，
-    // 且壶里的水位跟着注水进度涨，进度条之外再有一处读数。
     const cx = w * 0.5;
     const cy = h * POT_CY;
     const sc = potScale(w, h);
     const rx = POT_RX * sc;
     const ry = POT_RY * sc;
+
+    // 读数分两处：**玩的时候**是进度条，**倒的时候**是茶盏。
+    //
+    // 原来这里只有一个 `fillFraction()`，倒水时它恒等于 1，
+    // 于是壶里满着、条也满着，而水正在往盏里流——同一屏上两句话互相拆台。
+    // 倒水期间壶里的水位必须真的降下去（`potWater`），那才是"水倒出去了"。
+    const held = this.fillFraction();
+    const pouring = this.settleT > 0;
+    const potWater = pouring ? Math.max(1 - this.pourProgress() * 1.25, 0) : held;
+
+    // 茶盏。**先画它、再画壶**：壶倾过来时会盖住盏沿一点，
+    // 顺序反过来就成了"壶浮在盏前面"。
+    this.drawCup(g, cx, cy, rx, ry);
+
+    // 整只壶绕一个**偏低的支点**转。支点摆在壶身下缘而不是正中心，
+    // 转起来才像被人拎着把手倒水；绕正中心转的话壶像原地歪了一下，
+    // 而那正是"倒不进去"的读法。
+    const tilt = this.tiltAngle();
+    const pivotX = cx;
+    const pivotY = cy + ry * 0.85;
+    g.save();
+    g.translate(pivotX, pivotY);
+    g.rotate(tilt);
+    g.translate(-pivotX, -pivotY);
+    this.drawPot(g, cx, cy, rx, ry, sc, potWater);
+    g.restore();
+
+    // 水流：从**转过之后**的壶嘴尖落到盏口。
+    //
+    // 算的是壶嘴现在真的在的那一点，而不是它静止时的位置——
+    // 壶嘴静止时在 (cx+1.42rx, cy−1.12ry)，倾 62° 之后它落到了
+    // (cx+156sc, cy+93sc)：用旧位置画，水会从半空中开始，往上穿过壶身。
+    const flow = this.pourFlow();
+    if (flow > 0) {
+      const tip = pourSpoutTip(cx, cy, rx, ry, tilt);
+      const cup = pourCupRect(cx, cy, rx, ry);
+      this.drawStream(g, tip.x, tip.y, cup.x + cup.w * 0.5, cup.y, sc, flow);
+    }
+
+    // 水汽：三颗从壶口往上飘，越飘越淡，一轮走完从壶口重新冒出来。
+    // 倒水时壶口已经不是朝上去了，水汽也该跟着散。
+    const steamFade = pouring ? Math.max(1 - this.pourProgress() * 2.2, 0) : 1;
+    if (steamFade > 0) {
+      for (let i = 0; i < STEAM_COUNT; i++) {
+        steamPuff(i, this.t, sc, this.puff);
+        circle(g, cx + this.puff[0], cy + this.puff[1], this.puff[2], `rgba(255,255,255,${this.puff[3] * steamFade})`);
+      }
+    }
+
+    if (!pouring) {
+      // 进度条。门槛在**条的右端**（按满 HOLD_DURATION 即成），原来这根条只有一条
+      // 边框、什么标记都没有，而标题写的是"3秒后完成"——玩家盯着一个从 0% 爬到 100%
+      // 的数，看不出"还差几秒"，而那正是这一屏的全部。
+      // 松手时条不倒退是不行的：`holdTime` 立刻清零，刻痕要跟着往回退，不然条上留着
+      // 一道满的刻痕而条是空的，两者在同一屏上互相拆台。
+      const fillCol = this.holding ? 'rgb(153,89,26)' : 'rgb(89,51,20)';
+      drawBar(g, this.bar, held, 1, fillCol, TRACK_S, TRACK_LIGHT_S, 'rgb(204,153,77)', 'rgb(255,209,115)');
+
+      // 进度文字：百分比 + 还差几秒。只报百分比的话，玩家得自己乘一个他不知道是多少的
+      // HOLD_DURATION 才算得出还差多久。
+      drawText(g, `${Math.floor(held * 100)}%`, this.bar.x, this.bar.y - 12, 22, this.sh.paper);
+      drawText(g, tf(this.sh, 'mg_tea_left', Math.max(HOLD_DURATION - this.holdTime, 0)),
+        this.bar.x + this.bar.w - 130, this.bar.y - 12, 22, 'rgb(255,217,153)');
+
+      // 提示
+      const hint = this.holding
+        ? tf(this.sh, 'mg_tea_hint_release')
+        : tf(this.sh, 'mg_tea_hint_hold') + tf(this.sh, 'mg_tea_hint_esc');
+      drawTextCentered(g, hint, w, h * 0.88, 22, 'rgb(255,217,153)');
+    } else {
+      // 倒水那一下的一句旁白。
+      //
+      // 为什么这里要有台词：按满三秒 → 壶一歪 → 水进盏 → 退出，
+      // 这一串全是动作。玩家看到的是"我按住了，然后壶自己动了一下"。
+      // 而这一件在五件乐事里是**头一件**（客至汲泉烹茶），
+      // 它该先把"水满了要干什么"讲完——一句话，就这一句。
+      drawTextCentered(g, tf(this.sh, 'mg_tea_pour_line'), w, h * 0.88, 22, 'rgb(255,217,153)');
+    }
+
+    drawCancel(g, this.cancelBtn, tf(this.sh, 'mg_cancel'));
+
+    // **落幕**。「成了」只在扶正那一段浮出来，于是因果是
+    // 「水倒完了 → 才说成了」，而不是两件事同时发生。见 drawCurtain。
+    this.drawCurtain(g, w, h);
+  }
+
+  /**
+   * 壶身 + 壶盖 + 钮 + 嘴 + 把。**不含倾角**——
+   * 倾角由 `draw()` 用 canvas 的 `rotate` 施加在外面，
+   * 而这里画的每一样东西都会跟着一起转，包括壶嘴。
+   */
+  private drawPot(
+    g: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, sc: number, water: number,
+  ): void {
     ellipse(g, cx, cy, rx, ry, COL_POT_S);
 
     // 水位。逐行取椭圆的半宽来填，所以水是贴着壶壁涨的，不会溢出一个方块。
     // 水面 y 与下面那条进度条**读同一个** `fillFraction()`。
-    const held = this.fillFraction();
-    const waterY = waterLineY(cy, ry, held);
+    const waterY = waterLineY(cy, ry, water);
     g.fillStyle = COL_WATER_S;
     for (let r = 0; r < WATER_ROWS; r++) {
       const y0 = cy - ry + (2 * ry * r) / WATER_ROWS;
@@ -315,68 +518,92 @@ class TeaGame implements MiniGame {
     g.fillStyle = COL_POT_S;
     g.beginPath();
     g.moveTo(cx + rx * 0.72, cy - ry * 0.55);
-    g.lineTo(cx + rx * 1.42, cy - ry * 1.12);
+    g.lineTo(cx + rx * SPOUT_TIP_X, cy + ry * SPOUT_TIP_Y);
     g.lineTo(cx + rx * 1.3, cy - ry * 0.82);
     g.lineTo(cx + rx * 0.8, cy - ry * 0.2);
     g.closePath();
     g.fill();
     // 壶把
     arcStroke(g, cx - rx * 0.86, cy - ry * 0.1, ry * 0.52, Math.PI * 0.45, Math.PI * 1.55, COL_EDGE_S, 5 * sc);
-
-    // 水汽：三颗从壶口往上飘，越飘越淡，一轮走完从壶口重新冒出来。
-    for (let i = 0; i < STEAM_COUNT; i++) {
-      steamPuff(i, this.t, sc, this.puff);
-      circle(g, cx + this.puff[0], cy + this.puff[1], this.puff[2], `rgba(255,255,255,${this.puff[3]})`);
-    }
-
-    // 进度条。门槛在**条的右端**（按满 HOLD_DURATION 即成），原来这根条只有一条
-    // 边框、什么标记都没有，而标题写的是"3秒后完成"——玩家盯着一个从 0% 爬到 100%
-    // 的数，看不出"还差几秒"，而那正是这一屏的全部。
-    // 松手时条不倒退是不行的：`holdTime` 立刻清零，刻痕要跟着往回退，不然条上留着
-    // 一道满的刻痕而条是空的，两者在同一屏上互相拆台。
-    const fillCol = this.holding ? 'rgb(153,89,26)' : 'rgb(89,51,20)';
-    drawBar(g, this.bar, held, 1, fillCol, TRACK_S, TRACK_LIGHT_S, 'rgb(204,153,77)', 'rgb(255,209,115)');
-
-    // 进度文字：百分比 + 还差几秒。只报百分比的话，玩家得自己乘一个他不知道是多少的
-    // HOLD_DURATION 才算得出还差多久。
-    drawText(g, `${Math.floor(held * 100)}%`, this.bar.x, this.bar.y - 12, 22, this.sh.paper);
-    drawText(g, tf(this.sh, 'mg_tea_left', Math.max(HOLD_DURATION - this.holdTime, 0)),
-      this.bar.x + this.bar.w - 130, this.bar.y - 12, 22, 'rgb(255,217,153)');
-
-    // 提示
-    const hint = this.holding
-      ? tf(this.sh, 'mg_tea_hint_release')
-      : tf(this.sh, 'mg_tea_hint_hold') + tf(this.sh, 'mg_tea_hint_esc');
-    drawTextCentered(g, hint, w, h * 0.88, 22, 'rgb(255,217,153)');
-
-    drawCancel(g, this.cancelBtn, tf(this.sh, 'mg_cancel'));
-
-    // **落幕**。
-    //
-    // 这一屏本来是「按满 3 秒 → 立刻 `onDone('win')`」，于是它
-    // **在最后一帧和第 0 帧长得一模一样**：进度条满着，水汽还在飘，
-    // 而屏幕已经被结算盖住了。玩家看到的是"我按了，然后什么也没发生"。
-    //
-    // 过场需要落幕——尤其是这一件，它本来就是过场而不是玩法。
-    // 所以让 `finish()` 之后再多跑一会儿，把水汽散尽、进度条回落、
-    // 最后浮出「成了」。**不加失败分支**：它本来就没有失败。
-    this.drawCurtain(g, w, h, sc);
   }
 
-  /** 收尾那一下。见 draw() 末尾的说明。 */
-  private drawCurtain(g: CanvasRenderingContext2D, w: number, h: number, sc: number): void {
-    const p = Math.min(this.settleT / SETTLE_SEC, 1);
-    if (p <= 0) return;
+  /** 茶盏。空盏从第一帧就在那儿——玩家按之前先看见"水将要倒进哪里"。 */
+  private drawCup(g: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number): void {
+    const c = pourCupRect(cx, cy, rx, ry);
+    const halfW = c.w * 0.5;
+    const hh = c.h;
 
-    // 水汽散尽
-    const fade = 1 - p;
-    for (let i = 0; i < STEAM_COUNT; i++) {
-      steamPuff(i, this.t + p * 3, sc, this.puff);
-      circle(g, w * 0.5 + this.puff[0], h * POT_CY + this.puff[1], this.puff[2] * (1 + p * 0.6),
-        `rgba(255,255,255,${this.puff[3] * fade})`);
+    // 盏里的茶。**水面跟着壶倒出来的那一路下降**，所以两只容器
+    // 在同一屏上是一件事的两头：壶空一点，盏满一点。
+    const fill = this.cupFill();
+    if (fill > 0) {
+      const level = c.y + hh * (1 - fill);
+      g.save();
+      g.beginPath();
+      g.rect(c.x - halfW, level, c.w, hh + 2);
+      g.clip();
+      g.fillStyle = COL_WATER_S;
+      g.beginPath();
+      // 0 → π 是**下半圈**（canvas 的 y 向下，π/2 落在下方），
+      // closePath 补上口沿那条直线，于是这是一只碗。
+      g.ellipse(c.x, c.y, halfW, hh, 0, 0, Math.PI, false);
+      g.closePath();
+      g.fill();
+      g.restore();
     }
+    // 盏壁：下半圈 + 口沿一条线
+    arcStroke(g, c.x, c.y, halfW, 0, Math.PI, COL_CUP_S, Math.max(2, 3 * rx / 78));
+    g.strokeStyle = COL_CUP_S;
+    g.lineWidth = Math.max(2, 2.5 * rx / 78);
+    g.beginPath();
+    g.moveTo(c.x - halfW, c.y);
+    g.lineTo(c.x + halfW, c.y);
+    g.stroke();
+  }
 
-    // 「成了」：从 0.6 倍缩放 + 透明，长成正常大小
+  /** 水柱。带一点外抛（二次曲线），落进盏口时散两圈小水花。 */
+  private drawStream(
+    g: CanvasRenderingContext2D, x0: number, y0: number, x1: number, y1: number, sc: number, strength: number,
+  ): void {
+    const mx = (x0 + x1) * 0.5;
+    const my = (y0 + y1) * 0.5 + Math.abs(x1 - x0) * 0.1;
+    g.strokeStyle = `rgba(214,150,48,${0.4 + 0.55 * strength})`;
+    g.lineWidth = Math.max(2.5, 5 * sc);
+    g.lineCap = 'round';
+    g.beginPath();
+    g.moveTo(x0, y0);
+    g.quadraticCurveTo(mx, my, x1, y1);
+    g.stroke();
+    // 落点：水面被砸出的小坑 + 溅起的两滴
+    g.fillStyle = `rgba(214,150,48,${0.35 + 0.4 * strength})`;
+    g.beginPath();
+    g.ellipse(x1, y1, 7 * sc * (0.7 + 0.3 * strength), 2.4 * sc, 0, 0, Math.PI * 2);
+    g.fill();
+    for (let i = 0; i < 2; i++) {
+      const p = (this.t * 2.2 + i * 0.5) % 1;
+      circle(g, x1 + (i === 0 ? -1 : 1) * (5 + 9 * p) * sc, y1 - 16 * p * sc,
+        (1.6 + 1.4 * (1 - p)) * sc, `rgba(255,206,130,${0.5 * (1 - p) * strength})`);
+    }
+  }
+
+  /**
+   * 收尾那一下：**「成了」浮出来**。见 `draw()` 末尾的说明。
+   *
+   * 它从 `TILT_OUT` 那一段才开始，而不是从 `settleT = 0`。
+   * 差别是因果：提前出现的话，玩家在壶还没倾、水还没落的时候
+   * 就先看到"成了"，于是倒水那两秒读起来像一句附注；
+   * 压在扶正这一段上，「成了」才是**水已经倒完**的意思。
+   *
+   * 水汽不再在这儿画——`draw()` 已经按 `pourProgress()` 淡出它了，
+   * 两处各画一遍的话屏上是四颗水汽而不是三颗，而这种多一颗少一颗
+   * 的事永远不会有人报。
+   */
+  private drawCurtain(g: CanvasRenderingContext2D, w: number, h: number): void {
+    const t0 = TILT_IN + POUR_HOLD;
+    if (this.settleT < t0) return;
+    const p = Math.min((this.settleT - t0) / TILT_OUT, 1);
+
+    // 从 0.6 倍缩放 + 透明，长成正常大小
     const ease = 1 - Math.pow(1 - p, 3);
     g.save();
     g.globalAlpha = Math.min(ease * 1.6, 1);

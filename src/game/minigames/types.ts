@@ -1,6 +1,14 @@
 import type { Lang } from '../../data/raw';
 
-export type MiniGameId = 'cloud' | 'tea' | 'zither' | 'bamboo' | 'bird';
+/**
+ * 小游戏 id。
+ *
+ * ⚠ **`qin` 不在轮换表里**（见 `MINI_GAME_IDS`）：它是琴音林多出来的
+ * 一个**自由演奏**交互，不打分、不计时、也没有胜负，所以不参与
+ * 「碎片槽位 + 第几次到访」的轮换。加进那张表会动到 15 局的排布，
+ * 而 `verify_mini_game` 钉的就是那张表。
+ */
+export type MiniGameId = 'cloud' | 'tea' | 'zither' | 'bamboo' | 'bird' | 'qin';
 export type MiniGameResult = 'win' | 'lose' | 'cancel';
 
 /** 音效钩子。宿主实现，模块只管调。 */
@@ -9,6 +17,16 @@ export interface MiniGameAudio {
   sfx(name: string): void;
   /** 琴音：0..3 对应四个音高 */
   note(index: number): void;
+  /**
+   * 自由演奏的琴音：0..20（三个八度 × 七根弦）。
+   *
+   * **刻意做成可选的**：只有琴音林那一屏要它，而回归里的假 audio
+   * （`verify` 的两处夹具）是照着最小面写的。做成必填就得去改那两个
+   * 夹具，而它们存在的意义是"小游戏的状态机在 Node 里能跑起来"——
+   * 让它们多背一个字段没有任何收益。
+   * 缺省时琴自己退回 `note()`。
+   */
+  noteFree?(index: number): void;
   /** 环境音在小游戏期间要不要压低 */
   duckAmbient(on: boolean): void;
 }

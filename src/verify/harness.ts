@@ -47,3 +47,50 @@ export type CheckFn = (name: string, fn: () => CheckResult) => void;
 export function expect(cond: boolean, detail: string, asserts: number): CheckResult {
   return { ok: cond, detail, asserts };
 }
+
+/**
+ * 读源码做接线判据之前，先把注释剥掉。
+ *
+ * ## 为什么非剥不可
+ *
+ * 一条「这里必须调用 `foo()`」的断言，最容易的"故意弄坏"的方式是
+ * **把那一行注释掉**——而注释里那个字符串**原封不动地留在文件里**，
+ * 于是断言照样绿，量到的是"曾经有人写过它"，不是"它现在还在跑"。
+ *
+ * 口径与 `tools/i18n-dead.mjs` / `tools/i18n-supplement` 那两处同源，
+ * **三处共用这一份**：它们问的是同一个问题（这句话现在还会不会被执行到），
+ * 答案不该有三套写法。它住在 `harness.ts` 而不是 `entry.ts`，
+ * 是为了让拆出去的族也用同一份——否则每搬一族就会多抄一份正则，
+ * 而抄出去的那份迟早和原件漂掉。
+ */
+export const stripComments = (src: string): string =>
+  src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/^[ \t]*\/\/.*$/gm, ' ');
+
+/**
+ * 假 canvas ctx：只记录调用、不真的画。五个小游戏都不读像素。
+ *
+ * ## 为什么**只能有一份**
+ *
+ * 判据里最容易出的错就是**环境不真**：第一版 `verify_minigame_playable`
+ * 用的 ctx 在 `measureText` 上返回固定宽度，于是「这一句有多长」永远算错；
+ * 而这类假 ctx 只要复制两份，就会有一个测试在假环境里绿、另一个不是——
+ * 然后两边各自"对"着跑，症状是一条判据红而另一条绿，且谁都说不出为什么。
+ *
+ * 所以它住在 `harness.ts`：`entry.ts` 与拆出去的族都从这里取。
+ */
+export function fakeCtx(w = 960, h = 540): CanvasRenderingContext2D {
+  return new Proxy({} as Record<string, unknown>, {
+    get(_t, k: string) {
+      if (k === 'canvas') return { width: w, height: h };
+      if (k === 'measureText') return () => ({ width: 10 });
+      if (k === 'createLinearGradient' || k === 'createRadialGradient') {
+        return () => ({ addColorStop() {} });
+      }
+      if (k === 'getImageData') return () => ({ data: new Uint8ClampedArray(4) });
+      return () => undefined; // 所有绘制指令都是 no-op
+    },
+    set() {
+      return true;
+    },
+  }) as unknown as CanvasRenderingContext2D;
+}

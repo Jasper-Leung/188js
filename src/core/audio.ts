@@ -48,6 +48,15 @@ const SFX_NAMES = [
   'zither_1', 'zither_2', 'zither_3', 'zither_4',
 ] as const;
 
+/**
+ * 古琴自由演奏的音列。**和 `minigames/qin.ts` 的 `QIN_STRINGS` 同长**，
+ * 两处各写一份 `7` 的话，改了其中一个就会出现"第七根弦没有音"。
+ */
+const QIN_STRINGS = 7;
+const QIN_FREE_NOTES = QIN_STRINGS * 3;
+/** 宫商角徵羽变宫 + 高八度的宫。见 `noteFree` 的说明。 */
+const QIN_SCALE = [0, 2, 4, 7, 9, 11, 12] as const;
+
 interface Layer {
   buf: AudioBuffer;
   gain: GainNode;
@@ -309,12 +318,24 @@ export class AudioSystem {
 
   // ---------------------------------------------------------------- 音效
   sfx(name: string, volume = 0.9) {
-    if (!this.ready) return;
-    if (!(SFX_NAMES as readonly string[]).includes(name)) return;
-    void this.playSfx(name, volume);
+    this.sfxRate(name, volume, 1);
   }
 
-  private async playSfx(name: string, volume: number) {
+  /**
+   * 带播放速率的一次性音效。
+   *
+   * `rate` 是 `AudioBufferSourceNode.playbackRate`：2.0 = 高八度，
+   * 0.5 = 低八度。用它把**少数几个采样**变成一整架琴，
+   * 而不用为 21 个音各准备一个 ogg（那是 21 份音频资产，
+   * 而这个项目连 17MB 的模型都在往里压）。
+   */
+  private sfxRate(name: string, volume: number, rate: number) {
+    if (!this.ready) return;
+    if (!(SFX_NAMES as readonly string[]).includes(name)) return;
+    void this.playSfx(name, volume, rate);
+  }
+
+  private async playSfx(name: string, volume: number, rate = 1) {
     if (!this.ready || !this.ctx) return;
     const url = `sfx/${name}.ogg`;
     const buf = await this.getBuffer(url);
@@ -322,6 +343,9 @@ export class AudioSystem {
     const ctx = this.ctx;
     const src = ctx.createBufferSource();
     src.buffer = buf;
+    // 夹一道：0 或 NaN 会让某些实现直接抛，而这一条在**弹琴时**被调到最多
+    // （自由演奏是这一路上连发最密的音），为它炸掉整个音频系统是最坏的结果。
+    src.playbackRate.value = Math.max(0.25, Math.min(4, rate));
     const g = ctx.createGain();
     g.gain.value = volume;
     src.connect(g);
@@ -339,9 +363,33 @@ export class AudioSystem {
     };
   }
 
-  /** 琴音：0..3 */
+  /** 琴音：0..3。琴音林那一件乐事（Simon Says）用它。 */
   note(index: number) {
     this.sfx(`zither_${Math.min(Math.max(index, 0), 3) + 1}`, 0.75);
+  }
+
+  /**
+   * 古琴自由演奏：0..20（三个八度 × 七根弦）。
+   *
+   * ## 音高怎么来的
+   *
+   * 音库里只有四个琴音采样。**八度靠选采样，半音靠 `playbackRate`**：
+   * 一个八度内的七个音用 2^(半音/12) 变出来（最高 2.0，正好高八度，
+   * 而古琴越往高处泛音越"薄"，重采样之后并不违和），
+   * 三个八度各挑一个不同的采样当音色。
+   *
+   * ## 半音表为什么是这七个
+   *
+   * 宫商角徵羽变宫 + 高八度的宫：`0 2 4 7 9 11 12`。
+   * 末位那个 12 是**故意的**——七根弦里最细的那根本来就比最粗的高一个八度，
+   * 所以"三八度"的最右一格会自然地高上去，
+   * 而不是把音阶硬凑成七个等距的键。
+   */
+  noteFree(index: number) {
+    const i = Math.min(Math.max(Math.trunc(index), 0), QIN_FREE_NOTES - 1);
+    const oct = Math.floor(i / QIN_STRINGS);
+    const semis = QIN_SCALE[i % QIN_STRINGS];
+    this.sfxRate(`zither_${Math.min(oct, 3) + 1}`, 0.75, Math.pow(2, semis / 12));
   }
 
   /** 小游戏期间压低环境声 */

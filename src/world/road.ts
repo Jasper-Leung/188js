@@ -404,6 +404,15 @@ export class Road {
       // 过渡带上 w 平滑收到 0，路面交回它自己的地形高程。
       ys[i] = ys[i] + (junctionY - ys[i]) * w;
     }
+
+    // 路面拉平了，地形没跟着让位——上坡那一支的自然地形高过这个平面，
+    // 于是草从路面上顶出来（实测 8.4cm）。这里像真实路口那样做**挖方**，
+    // 把地形削到 `junctionY - ROAD_LIFT` 以下，详见 `Terrain.carveJunction()`。
+    //
+    // 放在最后：上面量 `junctionY` 时用的还是未削的地形，
+    // 所以 `junctionY ≥ 核心区地形 + 抬升` 这条保证在削完之后依然成立
+    // ——削只会让地面更低，不会让路基沉进地里。
+    this.terrain.carveJunction(PLAZA_CENTER_X, PLAZA_CENTER_Z, R, junctionY, ROAD_LIFT);
   }
 
   // ---------------------------------------------------------------- 高度

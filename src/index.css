@@ -195,7 +195,10 @@ body {
  * 摆在 HUD 下面一排，贴着底部安全区。
  * `pointer-events:none` 是硬要求：一条道具栏吃掉正在按的空格键，
  * 玩家的车会突然停住——那一下"莫名其妙"比没有提示更糟（同 toast 的取舍）。
- * 没买到的格子显示成暗的轮廓而不是消失，这样玩家知道"还有四格是空的"。
+ * 没买到的格子显示成暗的一格而不是消失，这样玩家知道"还有四格是空的"。
+ *
+ * ★ 这一栏压在**车身几何**上：`first` 机位的车把横过整条底部，
+ * 所以底板必须不透明（见 `.g-item`），否则标签直接印在车篮上。
  */
 .g-itembar {
   position: absolute;
@@ -208,15 +211,30 @@ body {
   z-index: 6;
 }
 .g-item {
-  width: 52px;
-  padding: 6px 0 5px;
+  /*
+   * 宽度**跟着最长的那个标签走**（`min-width` + `nowrap`），不写死。
+   * 写死 52px 时 "Envelope" 要 57px，被格子切成 "Envelop"——
+   * 而 `first` 机位下车篮正好铺在这一片，缺掉的最后一个字母
+   * 掉在藤篮的深色上，看起来像本来就没有那个道具。
+   */
+  min-width: 52px;
+  padding: 6px 8px 5px;
   text-align: center;
   border-radius: 8px;
   border: 1px solid rgba(43, 36, 27, 0.16);
-  background: rgba(232, 224, 205, 0.82);
-  opacity: 0.42;
+  /*
+   * 底板**始终不透明**，未买到的格子也照常挡后面的画面。
+   * 原来这里挂的是整格 `opacity: 0.42`——那等于连底板一起变半透明，
+   * 于是 `first` 机位的车把/车篮从格子里透出来，标签像印在藤篮上。
+   * "没买到显示成暗的轮廓"要暗的是**字**，不是**底板**。
+   */
+  background: rgba(232, 224, 205, 0.94);
+  backdrop-filter: blur(2px);
 }
-.g-item.is-own { opacity: 1; }
+.g-item.is-own {
+  border-color: rgba(43, 36, 27, 0.34);
+  background: rgba(238, 231, 214, 0.97);
+}
 .g-item.is-sel {
   border-color: rgba(180, 96, 48, 0.85);
   box-shadow: 0 0 0 2px rgba(180, 96, 48, 0.22);
@@ -229,7 +247,10 @@ body {
   font-size: 13px;
   color: #2b241b;
   margin-top: 3px;
+  white-space: nowrap;
 }
+/* 没买到的：字暗下去，底板不动。 */
+.g-item:not(.is-own) .g-item-ic { color: rgba(43, 36, 27, 0.5); }
 .g-item-c {
   font: 10px/1.2 ui-monospace, monospace;
   color: rgba(43, 36, 27, 0.6);
@@ -324,6 +345,36 @@ body {
 @keyframes g-card-in {
   from { opacity: 0; transform: translateY(-6px); }
   to { opacity: 1; transform: translateY(0); }
+}
+/* 「跳到最后一句」。只挂在排队播的那一段上，不是每一张卡。
+ *
+ * 它补的是那个 2.6 秒就撤掉的角标留下的空档：角标撤了之后，「这段能跳」
+ * 在屏上就没有任何信息了，而序章七张要等 66 秒（英文 86 秒）自己走完。
+ * 按钮比角标多一件事——**它一直在屏上**。
+ *
+ * 样式刻意做得比碑文小一号、比正文低一档：这张卡是"停下来读"的背景层，
+ * 跳按钮不该比它要读的字更抢眼。 */
+.g-card-skip {
+  margin-top: 11px;
+  padding: 3px 11px;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  line-height: 1.5;
+  color: rgba(214, 196, 160, 0.85);
+  background: rgba(232, 224, 205, 0.06);
+  border: 1px solid rgba(232, 224, 205, 0.22);
+  border-radius: 2px;
+  cursor: pointer;
+  animation: g-card-in 220ms ease-out backwards;
+}
+.g-card-skip:hover {
+  color: #efe7d6;
+  border-color: rgba(232, 224, 205, 0.5);
+}
+.g-card-skip:focus-visible {
+  outline: 1px solid rgba(214, 196, 160, 0.8);
+  outline-offset: 2px;
 }
 
 /* ---------------------------------------------------------------- 结算屏

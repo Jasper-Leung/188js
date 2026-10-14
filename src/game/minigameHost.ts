@@ -45,6 +45,8 @@ export interface MiniGameHandle {
    * 一个是「这一件超时了」。所以它是一个**修饰**，不是一个状态。
    */
   timedOut: boolean;
+  /** 这一局是不是**自由演奏**（琴音林那张琴）。它没有胜负，也没有奖励。 */
+  freePlay?: boolean;
 }
 
 export class MiniGameHost {
@@ -58,6 +60,14 @@ export class MiniGameHost {
   private currentResult: MiniGameResult = 'cancel';
   /** 本局是不是被 30 秒兜底收的。`settle()` 读完就清，所以不会串到下一局 */
   private timedOut = false;
+  /**
+   * 自由演奏模式。见 `runFreePlay()`。
+   *
+   * 它是**一个布尔而不是第二个宿主**：两套 `run()`/`fixedUpdate()`/`settle()`
+   * 会在"Esc 要不要先关面板"这种地方慢慢分叉，而分叉之后谁都没法一眼看出
+   * 另一条路走的是哪套逻辑。
+   */
+  private freeMode = false;
   private resolveFn: ((h: MiniGameHandle) => void) | null = null;
   private dpr = 1;
 
@@ -87,11 +97,34 @@ export class MiniGameHost {
    * 这对"再访"很重要：它必须是可练习的，而不是随机的。
    */
   run(id: MiniGameId, seed: number): Promise<MiniGameHandle> {
+    return this.start(id, seed, false);
+  }
+
+  /**
+   * 跑一件**没有胜负**的乐事（琴音林那张琴）。
+   *
+   * ## 它和 `run()` 的差别只有三处，但每一处都必须
+   *
+   * 1. **没有结算屏**：Esc 或点「离开」直接收起画布。
+   *    弹琴弹到一半弹出一句「这次没有完成」是这个游戏里最不该出现的一句——
+   *    它从没打算让玩家完成任何事。
+   * 2. **不套 30 秒兜底**：自由演奏没有超时，
+   *    而一条倒计时会把"想弹多久弹多久"这句话变成假的。
+   * 3. **句柄上带 `freePlay`**：宿主靠它知道自己**不该**走打卡与经济那一段。
+   *    没有这个标记的话，`main.runMiniGame()` 那条路上多一个分支，
+   *    而"走进来了却忘了不发奖励"是不报错的。
+   */
+  runFreePlay(id: MiniGameId, seed: number): Promise<MiniGameHandle> {
+    return this.start(id, seed, true);
+  }
+
+  private start(id: MiniGameId, seed: number, free: boolean): Promise<MiniGameHandle> {
     this.dispose(true);
     this.root.hidden = false;
     this.elapsed = 0;
     this.resultT = -1;
     this.running = true;
+    this.freeMode = free;
     this.resize();
 
     const ctxObj: MiniGameContext = {
@@ -110,6 +143,7 @@ export class MiniGameHost {
       audio: {
         sfx: (n) => audio.sfx(n),
         note: (i) => audio.note(i),
+        noteFree: (i) => audio.noteFree(i),
         duckAmbient: (on) => audio.duckAmbient(on),
       },
       t,
@@ -136,8 +170,10 @@ export class MiniGameHost {
     // 五件乐事全停在开场那一帧。
     this.game.step(dt);
     this.elapsed += dt;
-    // 超时兜底：云与茶没有内建计时，靠这道
-    if (this.resultT < 0 && this.elapsed > TIMEOUT_SEC) {
+    // 超时兜底：云与茶没有内建计时，靠这道。
+    // **自由演奏不套**：弹琴没有"超时"，而一条倒计时会让
+    // 「想弹多久弹多久」变成一句假话。
+    if (!this.freeMode && this.resultT < 0 && this.elapsed > TIMEOUT_SEC) {
       this.timedOut = true;
       this.finish('lose');
     }
@@ -231,6 +267,11 @@ export class MiniGameHost {
   private finish(result: MiniGameResult) {
     if (!this.running || this.resultT >= 0) return;
     this.currentResult = result;
+    // 自由演奏**立刻收起**：没有结算屏，没有音效停顿，没有"这一局结束了"。
+    if (this.freeMode) {
+      this.settle();
+      return;
+    }
     this.resultT = 0;
     if (result === 'win') audio.sfx('collect');
     else if (result === 'lose') audio.sfx('open', 0.5);
@@ -238,9 +279,15 @@ export class MiniGameHost {
 
   private settle() {
     const id = this.game?.id ?? 'cloud';
-    const h: MiniGameHandle = { result: this.currentResult, id, timedOut: this.timedOut };
+    const h: MiniGameHandle = {
+      result: this.currentResult,
+      id,
+      timedOut: this.timedOut,
+      freePlay: this.freeMode,
+    };
     this.running = false;
     this.timedOut = false;
+    this.freeMode = false;
     this.root.hidden = true;
     this.game?.dispose();
     this.game = null;
@@ -276,6 +323,7 @@ export class MiniGameHost {
     if (force) {
       this.running = false;
       this.timedOut = false;
+      this.freeMode = false;
       this.root.hidden = true;
       // ⚠️ 原来这里 resolve 的是 `{ result: 'cancel', id: 'cloud' }`——
       // **id 写死成云**。被强制收掉的是琴，句柄却说这是云，

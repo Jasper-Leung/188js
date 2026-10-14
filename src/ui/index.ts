@@ -820,6 +820,72 @@ export class UI {
     return this.shop.isOpen;
   }
 
+  /**
+   * HUD 上一帧算出来的「下一处」与目标陈述。
+   *
+   * 只给 `main.ts` 的 AI 接口用（`aiObservation()`）。
+   * **不是**让 UI 再算一遍——`Hud.syncNext()` 每帧已经算过一次了，
+   * 两份算法早晚会漂，而漂了以后 AI 会朝着玩家在屏幕上**看不见**的方向骑。
+   */
+  get navNext(): {
+    idx: number;
+    name: string;
+    dist: number;
+    arrow: string;
+    objective: string;
+  } {
+    return this.hud.aiNext;
+  }
+
+  /**
+   * 「屏幕上现在压着什么」——**只读，不改任何状态**。
+   *
+   * 只为 `main.ts` 装 AI 接口而存在（`game/api/live.ts`）。它问的是
+   * **「此刻哪些键按了真的有反应」**，而这件事的回答分散在七个面板上：
+   * 每加一个面板就多一处要同步的地方，而漏掉一处的症状是
+   * 「AI 在暂停的时候按 W，游戏动了」——看起来像 AI 策略有问题。
+   *
+   * 所以它一次性把面板的可见性收成三个布尔，
+   * `describeActions()` 再拿这三个布尔算出可用动作集合。
+   *
+   * 这里刻意用各面板**自己的** `root` 与 `isShown()`，
+   * 而不是拿 `phase` 去猜：相位描述的是流程状态，
+   * 而「有没有东西压在画面上」是呈现问题——序章对白压在 `roaming` 上就是反例。
+   *
+   * ## 标题 / 引导 / 结算三块**不在**这个列表里
+   *
+   * 它们问的是另一个问题。标题屏开着，意思是「**这一屏就是标题屏**」，
+   * 不是「有一个面板压在世界上面」——玩家正站在这一屏里，而不是被它挡住。
+   * 而 `describeActions()` 恰恰为这三个相位准备了 `advance`，
+   * 并在注释里写着「一个在这里什么都不给的接口，会让 AI 站在标题页永远出不去」。
+   *
+   * 早先把它们也算进 `panelOpen`，于是 `describeActions()` 里
+   * `if (o.panelOpen) return []` 抢先一步返回空集，那三个分支**成了死代码**：
+   * 实机在标题屏上量到 `available: []`、`tap('advance')` 被拒，
+   * AI 连游戏都启动不了，走完一趟也永远停在结算屏上。
+   *
+   * 排除掉它们之后，结算屏上再开明信片面板仍然会被正确地判成"有东西压着"
+   * （`postcard.root` 还在列表里），而裸的结算屏给 `advance`——
+   * 这正是"压在上面的东西"和"当前这一屏"该有的区别。
+   */
+  aiScreen(): { panelOpen: boolean; dialogueOpen: boolean; dialogueText: string } {
+    /** 「压在当前这一屏**上面**」的面板。标题/引导/结算是这一屏本身，故不在内。 */
+    const overlays = [
+      this.shop.root,
+      this.pause.root,
+      this.postcard.root,
+      this.synthesis.root,
+    ];
+    const dialogueOpen = this.dialogue.active;
+    return {
+      panelOpen: overlays.some((r) => isShown(r)),
+      dialogueOpen,
+      // 取**屏幕上真正在显示的那段字**，而不是另存一份——
+      // 对白是一个字一个字打出来的，中间态也是玩家看得见的状态。
+      dialogueText: dialogueOpen ? (this.dialogue.root.textContent ?? '').trim() : '',
+    };
+  }
+
   /** 打开/关闭铺子面板。铺名取 `world.nearby.shopName`。 */
   setShopOpen(open: boolean): void {
     if (!open) {
@@ -848,6 +914,15 @@ export class UI {
    */
   setBeat(s: { open: boolean; remain: number; hits: number; goal: number; done: boolean }): void {
     this.hud.setBeat(s);
+  }
+
+  /**
+   * 路边躲避挑战的进度。**只转调 HUD 那一个方法**——同节拍那一条：
+   * 这一件在界面上只有一根条和一句"还剩多少米"，
+   * 不新增面板、不新增状态。
+   */
+  setDodge(v: { active: boolean; progress: number; left: number }): void {
+    this.hud.setDodge(v);
   }
 
   /** 触屏控件 = 判定为触屏 **且** 已经进到世界里。两个条件都要。 */

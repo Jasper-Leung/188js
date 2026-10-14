@@ -46,14 +46,6 @@ import type { World } from '../world/world';
 import { GameStateManager } from '../game/state';
 import { interactAt, type InteractKind } from '../game/phase';
 
-/**
- * 8 向箭头，索引 0 = 正前方，顺时针递增。
- * 抄自 `HUD3D.gd` 的 `ARROWS`——那边的注释写着「字体 LXGW 覆盖这几个码位」，
- * 也就是这 8 个字形是字体子集里**特意留的**。换成 emoji 箭头（⬆️ 之类）
- * 会让它们掉出子集，首屏多下一份字体去补 4 个字形。
- */
-const ARROWS = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'] as const;
-
 /** 碎片槽位 → 驿站下标。碎片栏按槽位排，而 `getStationCount()` 收驿站下标，
  *  这两个下标空间不是一回事（云影台是驿站 7、槽位 0）。 */
 const SLOT_TO_STATION = ROAD.FRAGMENT_SLOT_STATION_IDX;
@@ -146,18 +138,12 @@ export function nextFragmentTarget(world: World, game: GameStateManager): NextTa
 /**
  * 目标相对**车头**的方向箭头。8 向，向右为正。
  *
- * 必须相对车头而不是罗盘北：8 字自闭合，两个方向都能到全部五座，
- * 骑反了「下一处 · 84m」会一直是 84m，而玩家在交叉点上完全看不出自己
- * 骑反了。这是原作 `_arrow_glyph()` 注释的原话，判据一字不改。
+ * 这一段实现已经搬到 `game/api/types.ts` —— 箭头字形现在是 HUD 与
+ * AI 观测的公共依赖，两边各留一份必然会有一边偷偷漂掉。
+ * 这里只做重导出，调用点一行都不用改。
  */
-function arrowGlyph(dx: number, dz: number, fx: number, fz: number): string {
-  // 约定方位角 a(v) = atan2(x, -z)：正前方（-Z）是 0、正右方（+X）是 +π/2。
-  // 相减即「目标相对车头偏了几度」，向右为正。
-  const rel = Math.atan2(dx, -dz) - Math.atan2(fx, -fz);
-  const wrapped = Math.atan2(Math.sin(rel), Math.cos(rel)); // wrap 到 [-π, π]
-  const i = Math.round(wrapped / (Math.PI / 4));
-  return ARROWS[((i % 8) + 8) % 8];
-}
+
+import { arrowGlyph } from '../game/api/types';
 
 // ---------------------------------------------------------------- 碎片栏
 
@@ -193,6 +179,42 @@ export class Hud {
   /** 「下一处」的两格：站名（可省略号）/ 距离·余次（永不省略） */
   private nextNameEl: HTMLSpanElement;
   private nextMetaEl: HTMLSpanElement;
+  /** 「这一趟要做什么」：一句目标陈述。`objectiveKey` 渲染出来的。 */
+  private objectiveEl: HTMLDivElement;
+
+  // ---- 给 AI 接口读的镜像（见 `aiNext`） ----
+  /**
+   * 顶栏算出来的「下一处」，**原样留一份**。
+   *
+   * AI 观测里也有 `nextStation` / `nextDistance` / `nextArrow`，
+   * 而那三个数**必须**是玩家在这一帧看到的那三个——
+   * 如果 AI 侧自己再算一遍，两处判据迟早会漂；
+   * 漂了以后 AI 会朝着一个玩家在屏幕上**看不见**的方向骑，
+   * 而症状长得像"AI 好像不太会用导航"，极难归因。
+   * 所以这里存的是**已经算好的结果**，不是第二份计算。
+   */
+  private aiNextIdx = -1;
+  private aiNextName = '';
+  private aiNextDist = -1;
+  private aiNextArrow = '';
+  private aiObjective = '';
+
+  /** 上一帧 `update()` 算出来的导航与目标。`main.ts` 装 AI 接口时读它。 */
+  get aiNext(): {
+    idx: number;
+    name: string;
+    dist: number;
+    arrow: string;
+    objective: string;
+  } {
+    return {
+      idx: this.aiNextIdx,
+      name: this.aiNextName,
+      dist: this.aiNextDist,
+      arrow: this.aiNextArrow,
+      objective: this.aiObjective,
+    };
+  }
 
   // 碎片栏
   private fragCountEl: HTMLSpanElement;
@@ -209,6 +231,10 @@ export class Hud {
   private beatRing: HTMLDivElement;
   private beatKey: HTMLDivElement;
   private beatDots: HTMLSpanElement[] = [];
+  /** 路边躲避挑战的进度条。`setDodge()` 逐帧只改一个自定义属性。 */
+  private dodgeEl: HTMLDivElement;
+  private dodgeFill: HTMLSpanElement;
+  private dodgeText: HTMLDivElement;
   private ringX = NaN;
   private ringY = NaN;
   private ringScale = NaN;
@@ -276,6 +302,30 @@ export class Hud {
     this.nextEl.appendChild(this.nextNameEl);
     this.nextEl.appendChild(this.nextMetaEl);
     top.appendChild(this.nextEl);
+    /**
+     * 「这一趟要做什么」——顶栏的**第二行**，独占一行。
+     *
+     * ## 为什么不放进上面那一行
+     *
+     * 那一行的每一格都是一个**数或词**（天数 / 驿数 / 旅币 / 章节），
+     * 而 `.g-top-l > *` 是 `white-space: nowrap`、整组 `flex-shrink: 0`——
+     * 塞一句完整的话进去，「29 days left」就会被折成两行、顶栏整个变高。
+     * 更要紧的是**它问的不是同一个问题**：上面那行答「我这趟怎么样」，
+     * 这一行答「我这趟在干什么」。玩家开场两分钟里最想问的是后者，
+     * 而游戏里此前**从来没有一处字回答过它**（`objectiveKey` 写好了、
+     * 有回归守着，却从没被渲染过一次）。
+     *
+     * ## 为什么不是 toast
+     *
+     * 换目标那一下（集齐、过期）本来就有 toast 喊一遍。
+     * toast 说完就飘走，而"我现在该干嘛"是玩家整个第一章都在反复确认的事——
+     * 所以是**喊一次 + 一直挂着**，不是二选一。
+     *
+     * `flex-basis: 100%` 让它折到第二行，于是那条渐隐背景（它本来就是按
+     * `calc(100% - 0.9em)` 画的，与顶栏是一行还是两行无关）自动罩住两行。
+     */
+    this.objectiveEl = el('div', 'g-objective');
+    top.appendChild(this.objectiveEl);
     this.root.appendChild(top);
 
     // ---------------- 碎片栏 ----------------
@@ -289,7 +339,11 @@ export class Hud {
     const strip = el('div', 'g-frags-row');
     for (let s = 0; s < 5; s++) strip.appendChild(this.buildCell(s));
     fb.appendChild(strip);
-    this.root.appendChild(fb);
+    // **挂进 `top` 里，不挂 `root`。** 碎片栏是 `position: absolute; top: 100%`
+    // （见 styles.css），它的定位基准必须是顶栏本身——
+    // 挂在 `root` 下时基准是 `.g-root`，`top: 100%` 就变成"铺满整屏"。
+    // 挂进 `top` 之后顶栏几行它就跟着几行，目标陈述那一行不会再被它盖住。
+    top.appendChild(fb);
 
     // ---------------- 脚下提示圈 ----------------
     // 圈与文字是两个元素：圈跟着距离缩放，文字不能跟着缩放
@@ -322,6 +376,18 @@ export class Hud {
     }
     this.beatEl.appendChild(bd);
     this.root.appendChild(this.beatEl);
+
+    // ---------------- 路边躲避挑战 ----------------
+    // 放在节拍**下面**一点：两者都是"骑行中的提示"，
+    // 而挑战要骑整整一圈，它不该和 1.15 秒的节拍圈抢同一块地方。
+    this.dodgeEl = el('div', 'g-dodge g-hidden');
+    const dodgeBar = el('div', 'g-dodge-bar');
+    this.dodgeFill = el('span', 'g-dodge-fill');
+    dodgeBar.appendChild(this.dodgeFill);
+    this.dodgeText = el('div', 'g-dodge-text');
+    this.dodgeEl.appendChild(dodgeBar);
+    this.dodgeEl.appendChild(this.dodgeText);
+    this.root.appendChild(this.dodgeEl);
 
     // ---------------- 小地图 ----------------
     this.minimap = new Minimap(this.root, this.world, this.game);
@@ -415,6 +481,17 @@ export class Hud {
     // 用它自己的布尔而不是重新判路面，免得两处判据漂移。
     setShown(this.offRoadEl, this.world.ride.offRoad);
 
+    // 目标陈述。**必须在下面那两个 `return` 之前**——「该回十八驿」那一支
+    // 会直接 `return`，而那一支恰恰是最需要把目标写出来的时候
+    // （顶栏改成指十八驿了，但"这一趟在收尾"这句话只有这里有）。
+    //
+    // `t()` **只调一次**、结果给两处用（写进 DOM、留给 AI 接口读）。
+    // `verify_days` 数过「覆盖 objectiveKey 的地方有且只有一处」，
+    // 所以这里不是"调两次也对"，而是**调两次就会红**。
+    const objectiveText = t(this.game.objectiveKey);
+    setText(this.objectiveEl, objectiveText);
+    this.aiObjective = objectiveText;
+
     // 集齐五件之后，导航指向**十八驿**而不是任何一座碎片驿站。
     // 这是第一章唯一的收尾动作，所以它必须占住「下一处」这一格——
     // 那一格是玩家屏幕上唯一会持续指示"我该去哪"的地方。
@@ -434,6 +511,10 @@ export class Hud {
       const left = this.game.fragmentVisitsRemaining();
       this.setNext(homeNextLine(arrow, dist, left));
       setFlag(this.nextEl, 'is-home', true);
+      this.aiNextIdx = GameStateManager.HOME_STATION;
+      this.aiNextName = stationName(GameStateManager.HOME_STATION);
+      this.aiNextDist = dist;
+      this.aiNextArrow = arrow;
       return;
     }
     setFlag(this.nextEl, 'is-home', false);
@@ -441,6 +522,10 @@ export class Hud {
     if (!target) {
       this.setNext(t('hud_all_done'));
       setFlag(this.nextEl, 'is-done', true);
+      this.aiNextIdx = -1;
+      this.aiNextName = '';
+      this.aiNextDist = -1;
+      this.aiNextArrow = '';
       return;
     }
     setFlag(this.nextEl, 'is-done', false);
@@ -459,6 +544,10 @@ export class Hud {
       // 数字往上跳会让人以为"刚刚近了很多"，而这一栏每帧都在跳。
       this.setNext(t('hud_next_target', { 0: name, 1: arrow, 2: Math.floor(target.dist) }));
     }
+    this.aiNextIdx = target.idx;
+    this.aiNextName = name;
+    this.aiNextDist = Math.floor(target.dist);
+    this.aiNextArrow = arrow;
   }
 
   /**
@@ -572,6 +661,31 @@ export class Hud {
       setFlag(this.beatDots[i], 'is-on', i < s.hits);
     }
   }
+
+  /**
+   * 路边躲避挑战的进度。
+   *
+   * `left` 是**还剩多少米**，不是比例。比例只在条上（`--dodge`），
+   * 而字里那个数必须是米——玩家心里量的是"还有多远到木牌"，
+   * 给一个 0.37 他没法知道自己什么时候能松一口气。
+   *
+   * 距离每帧都在变，字是 DOM 写入而不是 CSS 变量。所以**量化到 5 米一档**：
+   * 每帧重写一次 textContent 会在弱机上变成一条真实的开销，
+   * 而同一个字符串写了 60 次没人看得出来。
+   */
+  setDodge(v: { active: boolean; progress: number; left: number }): void {
+    setShown(this.dodgeEl, v.active);
+    if (!v.active) return;
+    const p = Math.max(0, Math.min(v.progress, 1));
+    this.dodgeEl.style.setProperty('--dodge', p.toFixed(3));
+    const step = Math.max(0, Math.round(v.left / 5) * 5);
+    const text = t('challenge_hud_left', { left: step });
+    if (text !== this.dodgeLast) {
+      this.dodgeLast = text;
+      setText(this.dodgeText, text);
+    }
+  }
+  private dodgeLast = '';
 
   /**
    * 圈上那行字。分派规则只在这一处，而 kind 来自 `interactAt()`——

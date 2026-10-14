@@ -91,6 +91,14 @@
   --paper: rgb(var(--pw) var(--pg) var(--pb));
   --paper-2: rgb(calc(var(--pw) - 8) calc(var(--pg) - 9) calc(var(--pb) - 10));
   --paper-3: rgb(calc(var(--pw) - 16) calc(var(--pg) - 18) calc(var(--pb) - 20));
+  /* 比 --paper-3 再深一档，给「选中态底色」用。
+   *
+   * `--paper-3` 当选中底色是不行的：卡片底色就是 `--paper`，
+   * 两者只差 16/18/20（约 7%），在 42% 的暗化蒙版上看过去**分不出深浅**。
+   * 而正反面那两颗按钮原来唯一的差别就是这个底色加上文字色，
+   * 于是「选中的那颗」读起来像一块空的——玩家描述成"透明"，
+   * 其实是**激活态比面板还接近面板**。差值拉到 40/44/48（约 17%）才立得住。 */
+  --paper-6: rgb(calc(var(--pw) - 40) calc(var(--pg) - 44) calc(var(--pb) - 48));
 
   --ink: #2b241b;
   --ink-soft: #6b5f4c;
@@ -518,6 +526,55 @@
   display: flex;
   gap: 0.22rem;
 }
+
+/* ---------------------------------------------------------------- 路边躲避挑战
+ *
+ * 一根横向的进度条 + 一句「还剩多少米」。
+ *
+ * **为什么它有字而节拍没有**：节拍的窗口是 1.15 秒，一行字读不完，
+ * 所以只能给一个能被余光读到的圈。这一件相反——要骑整整一圈（1228.8m），
+ * 而这一圈里玩家会不停地想「还剩多少」。一个只涨不回的圈读不出"快到了"，
+ * 所以这里**必须有那个数**，而且是米——米是这个游戏里唯一的距离单位。
+ *
+ * 逐帧只改一个自定义属性（`--dodge`），不重建 DOM。
+ */
+.g-root .g-dodge {
+  position: absolute;
+  left: 50%;
+  bottom: 24%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  pointer-events: none;
+  --dodge: 0;
+}
+
+.g-root .g-dodge-bar {
+  width: min(46vw, 20rem);
+  height: 0.45rem;
+  border-radius: 3px;
+  background: rgba(43, 36, 27, 0.28);
+  overflow: hidden;
+}
+
+.g-root .g-dodge-fill {
+  display: block;
+  height: 100%;
+  width: calc(var(--dodge) * 100%);
+  background: linear-gradient(90deg, #b4552f, #d8973f);
+}
+
+.g-root .g-dodge-text {
+  font-size: 0.82rem;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: rgba(250, 246, 236, 0.78);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.05rem 0.4rem;
+}
 .g-root .g-beat-dot {
   width: 0.36rem;
   height: 0.36rem;
@@ -878,6 +935,38 @@
     var(--paper-90) 0 calc(100% - 0.9em),
     rgb(var(--pw) var(--pg) var(--pb) / 0) 100%
   );
+  /* 目标陈述那一行靠 `flex-basis: 100%` 折到第二行（见 hud.ts）。
+   * 上面那条渐隐本来就是按固定高度的空区画的，所以多一行不用改渐变——
+   * 这也是当初把它从百分比改成 `calc(100% - 0.9em)` 的原因。 */
+  flex-wrap: wrap;
+}
+
+/**
+ * 「这一趟要做什么」——顶栏第二行。
+ *
+ * 它答的是「我这趟在干什么」，而上面那行答的是「我这趟怎么样」。
+ * 两行不冲突：目标那行是**已经收尾时**才需要重新看一眼的东西，
+ * 平时它一直挂着不动，扫视时会被跳过——正好是它该有的待遇。
+ *
+ * 字号比上面那行小一档、颜色更淡：它是**常驻的**，
+ * 和「下一处」那种每帧都在跳的导航不是一个量级的信息。
+ */
+.g-root .g-objective {
+  /* 占满整行 → 折到第二行。`min-width: 0` 免得长句把顶栏撑宽。 */
+  flex: 0 0 100%;
+  min-width: 0;
+  font-size: 0.84em;
+  /* 颜色**和顶栏那一行同档**（`--ink-soft`），只用字号压低它的视觉重量。
+   *
+   * 先试的是更淡的 `--ink-faint`（#9a8d76），对着 `--paper-90` 只有约
+   * 2.5:1 —— 而这一行存在的全部理由就是"玩家得能读到这个目标"。
+   * 压低一个常驻元素的视觉重量有的是办法，压低它的可读性只有一个后果：
+   * 目标那句话等于没写。 */
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 0.25em;
 }
 
 .g-root .g-top-l {
@@ -980,11 +1069,26 @@
 /* ---- 碎片栏 ---- */
 .g-root .g-frags {
   position: absolute;
-  /* 2.6em → 3.3em：顶栏为了那条固定高度的渐隐多留了 0.65em 空区，
-     碎片栏跟着往下挪，两块之间还是原来那点缝。
-     这两块的间距是**眼睛量的**（.g-frags 的注释在下面），
-     所以凡是动 `.g-top` 的高度，这里必须一起动。 */
-  top: 3.3em;
+  /* **`top: 100%`，不是某个 em 值。**
+   *
+   * 这里原来写的是 `top: 3.3em`，旁边还挂着一句自我提醒：
+   * 「凡是动 `.g-top` 的高度，这里必须一起动」。
+   * 然后目标陈述那一行（`.g-objective`，`flex-basis: 100%` 折到第二行）
+   * 把顶栏从一行撑成了两行——**提醒没有生效**，
+   * 碎片栏的实色纸正好压在那行字上，而它在 DOM 里更靠后，**后绘制**，
+   * 于是那句「这一趟要做什么」对玩家等于不存在。
+   *
+   * 根因不是数字填错了，是**这个耦合靠人记**。
+   * 顶栏以后还会不会再多一行、再折一次（窄屏已经折过一次），
+   * 谁也不知道——所以改成结构上不可能撞：
+   * 碎片栏现在挂在 `.g-top` **里面**，`top: 100%` 顶的就是顶栏自己的
+   * padding box 下沿，顶栏几行它就跟着几行。
+   *
+   * `left: 0.9em` 不用改：`.g-top` 没有边框，padding box 的左沿
+   * 仍然是 `.g-root` 的左沿，换了父容器之后解析结果完全一样。
+   * 绝对定位子元素不参与 flex 布局（不是 flex item），
+   * 所以它也不会反过来影响顶栏折几行。 */
+  top: 100%;
   left: 0.9em;
   /* 0.35/0.5/0.4 → 0.25/0.4/0.3：整块矮了一档。
      碎片栏压在世界左上角最值钱的位置上（那里通常是山脊和天空），
@@ -1283,6 +1387,14 @@
   background: rgba(24, 20, 15, 0.88);
   border-radius: var(--radius);
   text-align: center;
+  /* 「标题 + 换行 + 一句解释」——存档那两条提示靠 `\n` 把
+   * 「检测到旧存档」和「这一版格式变了…」分成两行。
+   * 用 `pre-line` 而不是 `pre-wrap`：`pre-wrap` 会保留连续空格，
+   * 而 `mg_played` 那个键带一个**尾随空格**（本来是给别的调用方拼接用的），
+   * 保留下来会在提示右边拖出一格空白。
+   * 走 `showToast(t(…))` 的那 14 个键里没有任何一条含换行或连续空格，
+   * 所以这一条对它们是无副作用的。 */
+  white-space: pre-line;
 }
 
 /* =============================================================================
@@ -1431,6 +1543,16 @@
   letter-spacing: 0.08em;
   color: var(--ink-soft);
   margin-top: 0.2em;
+}
+
+/* 评级行：「此刻的明信片：大师（第 4 档 / 共 5 档）· 完满还差 6 次」。
+   排在提示与两颗按钮之间——它是这一屏唯一一个"进度读数"，
+   用 ink 而不是 ink-soft：玩家要为「再骑一圈」做决定，先得看清自己在第几档。 */
+.g-root .g-synth-tier {
+  margin: 0.9em 0 1.2em;
+  font-size: 0.95em;
+  letter-spacing: 0.06em;
+  color: var(--ink);
 }
 
 /* =============================================================================
@@ -1626,16 +1748,38 @@
   font: inherit;
   padding: 0.35em;
   cursor: pointer;
+  /* 未选中的那颗**往后退**：淡一档、字重轻一档。
+     以前两边都是 `--ink-soft`、只有 `is-on` 变 `--ink`，
+     于是「选中」这个状态全靠那一层几乎看不出来的底色扛着。 */
   color: var(--ink-soft);
+  font-weight: 500;
+  transition: background var(--fade) ease, color var(--fade) ease;
 }
 
 .g-root .g-tab:first-child {
   border-left: 0;
 }
 
+/**
+ * 选中态：**两个信号**，不是一个。
+ *
+ * 原来只有 `background: var(--paper-3)`，而卡片底色就是 `--paper`——
+ * 两色差 7%，在暗化蒙版上等于没差。所以「现在看的是正面还是背面」
+ * 这个信息，选中的那颗反而是最没有存在感的一颗。
+ *
+ * 现在是**深底色 + 字重 + 一道朱砂下沿线**三样一起：
+ * · 底色 `--paper-6`（差 17%），灰度屏上仍然分得出来；
+ * · 字重 400 → 600，低分辨率下先看见粗细变化；
+ * · `inset` 的朱砂线（`--accent`）压在按钮下沿——
+ *   `.g-tabs` 有 `overflow: hidden`，所以这道线正好卡在边框内侧，
+ *   而它用的是全项目唯一的强调色，即使前两项在极暗或极亮的环境里一起失效，
+ *   这一道也还在。**三样各自都会失效，所以要三样。**
+ */
 .g-root .g-tab.is-on {
-  background: var(--paper-3);
+  background: var(--paper-6);
   color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .g-root .g-end-cap {
@@ -1662,6 +1806,20 @@
   color: var(--gold);
   font-size: 0.95em;
   letter-spacing: 0.1em;
+}
+
+/* 评级行：与纸面名同一格、右对齐，墨色——这一行是读数，不是装饰。
+   档位名（初旅/探索者/朝圣者/大师/完满）曾经整族是死字，见 tierLine()。 */
+.g-root .g-end-tier {
+  color: var(--ink-soft);
+  margin-left: 0.8em;
+}
+
+/* 完满 + 过期同时成立时的那一句。金色，和完满的金印同一个色——
+   它庆祝的是"你走满了"，同时告知"期限到了"，两件事共用一种颜色。 */
+.g-root .g-end-overdue {
+  color: var(--gold);
+  letter-spacing: 0.04em;
 }
 
 .g-root .g-joys {
@@ -2047,9 +2205,10 @@
   }
 
   .g-root .g-frags {
-    /* 与主规则同一个 +0.7em 偏移：顶栏为渐隐留了固定高度的空区，
-       窄屏这一份必须一起挪，否则碎片栏会骑在顶栏的渐隐边上。 */
-    top: 3.1em;
+    /* `top` 不用再跟着改了：主规则已经是 `100%`，跟着顶栏自己的高度走，
+       窄屏顶栏折成两行它就自己往下让。原先这里那份 `3.1em`
+       是「主规则 3.3em 减同一个 0.2em」的手工账，
+       而那正是目标行看不见的那条路。 */
     transform: scale(0.9);
     transform-origin: top left;
   }

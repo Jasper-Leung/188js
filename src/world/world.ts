@@ -16,13 +16,20 @@ import { Vegetation } from './vegetation';
 import { Scenery, type SceneryKind } from './scenery';
 import { Stations } from './stations';
 import { Relics, RELIC_CUE_RADIUS } from './relics';
+import { Obstacles, buildSign, signWorldPos } from './obstacles';
+import {
+  DodgeRun,
+  SIGN_REACH,
+  signSide,
+  signStandoff,
+} from '../game/challenge';
 import { BambooBeats, type BeatEvent } from '../game/beat';
 import { Sky } from './sky';
-import { Ride, type RideInput } from './ride';
+import { Ride, roadSpawnPose, roadHeadingAtArc, type RideInput, MOMENT } from './ride';
 import { loadModel, modelUrl } from './assets';
 import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
-import { WORLD, ECON, MINIGAMES } from '../data/raw';
+import { WORLD, ECON, MINIGAMES, ROAD as ROAD_DATA } from '../data/raw';
 import { game, GameStateManager } from '../game/state';
 import { recheckGate } from '../game/phase';
 import { t, byLang, stationNameOf } from '../i18n';
@@ -52,6 +59,10 @@ export type WorldEvent =
     }
   /** 反派引子：压暗 1 秒，不锁操作、不结束任何东西 */
   | { type: 'villainCue'; sceneIndex: number; text: string }
+  /** 路边躲避挑战：起跑 / 撞到 / 绕完一圈 */
+  | { type: 'dodgeStart' }
+  | { type: 'dodgeHit'; text: string }
+  | { type: 'dodgeWon'; text: string; station: number }
   | { type: 'duskBegan' }
   | { type: 'loaded'; what: string };
 
@@ -119,6 +130,42 @@ export class World {
    * 只留后者的话，提示永远在玩家已经停稳之后才弹——那时候它已经没有用了。
    */
   relicSpotted = -1;
+
+  // ---------------------------------------------------------------- 路边躲避挑战
+  //
+  // 木牌、石头、绕圈进度。**判定在 `game/challenge.ts`**（纯逻辑，无头问得到），
+  // 这一侧只负责把几何摆上去、把结果播出去。
+
+  /** 路肩上的木牌。 */
+  readonly obstacles = new Obstacles();
+  private signSide: 1 | -1 = 1;
+  private signX = 0;
+  private signZ = 0;
+  /** 玩家离木牌多远。够得着才按 F。 */
+  signDistance = Infinity;
+  /** 木牌够得着吗（`SIGN_REACH` 之内）。顶栏与脚下提示读它。 */
+  signInReach = false;
+  /** 当前那一趟的进度 0..1。HUD 的那根条读它。 */
+  dodgeProgress = 0;
+  dodgeRunning = false;
+  private readonly dodge = new DodgeRun();
+  /** 挑战用的种子。只在起跑那一刻取一次，所以同一趟不会中途换布局。 */
+  private dodgeSeed = 1;
+
+  /**
+   * 自由演奏的古琴（琴音林）。
+   *
+   * 它挂在**驿站**上而不是路边，所以判据是"离琴音林够不够近"，
+   * 与五件旧物那条"离路肩够不够近"是两种不同的理由。
+   */
+  qinDistance = Infinity;
+  qinInReach = false;
+
+  /** 木牌钉在环上的哪个位置。取 0.42：离起点足够远，玩家第一圈一定会经过。 */
+  private readonly SIGN_ARC_T = 0.42;
+  /** 琴音林的碎片槽位。**写死 2 而不是查表**——查表会得到一个
+   *  「若驿站顺序变了琴也跟着搬」的耦合，而琴音林的名字就是琴音林。 */
+  private readonly QIN_STATION = 2;
 
   /**
    * 骑行中的节拍（竹）。**第一件和"骑"有关的乐事。**
@@ -235,6 +282,8 @@ export class World {
     // 节拍点由竹丛落位推出来，所以必须在 `Scenery` 之后。
     this.beats = new BambooBeats(this.scenery);
     step('骑行节拍');
+    this.buildSign();
+    step('路牌');
 
     this.scene.add(
       this.terrain.mesh,
@@ -243,6 +292,7 @@ export class World {
       this.scenery.group,
       this.stations.group,
       this.relics.group,
+      this.obstacles.group,
     );
 
     this.ride = new Ride(this.terrain, this.road, this.stations, camera);
@@ -250,11 +300,18 @@ export class World {
     console.log(`[gift188] 建世界合计 ${(performance.now() - t0).toFixed(0)}ms`);
 
     // 出发点：0 号驿站旁的路面
+    //
+    // 朝向走 `roadSpawnPose()`，**不是写死的 0**。
+    // `heading = 0` 是车头朝 (0,0,−1)，与路面方向无关：这里站着的
+    // 那个点上路面向 −21.5°，差 158.5°。玩家站在路面正中，
+    // 所以 `onRoad()` 一直为真、什么症状都没有——但按 W 之后车斜着
+    // 离开沥青，约 2 秒触发离路降速。
+    // 也就是说**第一个操作的结果是在草里**。见 `ride.ts` 里那个函数。
     const st0 = STATIONS[0];
-    const near = nearestOnCenterline(st0.x, st0.z);
-    this.ride.spawn(near.x, near.z, 0);
+    const start0 = roadSpawnPose(st0.x, st0.z);
+    this.ride.spawn(start0.x, start0.z, start0.heading);
     this.lastPos.copy(this.ride.pos);
-    this.lastArc = nearestArcParam(near.x, near.z);
+    this.lastArc = nearestArcParam(start0.x, start0.z);
   }
 
   on(fn: (e: WorldEvent) => void) {
@@ -308,6 +365,16 @@ export class World {
     this.ride.render(dt);
     this.sky.attachTo(this.ride.camera);
     this.sky.updateShadowFocus(this.ride.pos.x, this.ride.pos.y, this.ride.pos.z);
+    // 主体补光必须排在 `ride.render()` 之后：那一步才把相机的
+    // 阻尼跟随位置算完，而补光要的是"相机在主体哪一侧"。
+    // 排在它前面会拿到上一帧的相机位置——差一帧的偏置在快速转向时肉眼可见。
+    this.sky.updateRimFocus(
+      this.ride.camera.position.x - this.ride.pos.x,
+      this.ride.camera.position.z - this.ride.pos.z,
+      this.ride.pos.x,
+      this.ride.pos.y,
+      this.ride.pos.z,
+    );
 
     const vis = game.getVisibilityFactor();
     this.veg.update(this.ride.pos.x, this.ride.pos.z, vis);
@@ -378,6 +445,8 @@ export class World {
     this.relicDistance = rel.distance;
     // 还在提示圈里的（够不着的也算）。给"那边有东西"那句提示用。
     this.relicSpotted = this.relics.nearestWithin(p.x, p.z, RELIC_CUE_RADIUS).index;
+    this.updateSignAndQin(p.x, p.z);
+    this.updateDodge();
     // 节拍必须在驿站之后建：它要读竹丛的落位，而那是 `Scenery` 算的。
     this.updateBeats();
     let best = -1;
@@ -477,7 +546,7 @@ export class World {
   }
 
   /**
-   * 8 字自交点：骑过中心时说一句「路自此复」。
+   * 8 字自交点：骑过中心时说一句「路自此复」，车停一拍。
    *
    * 这个地方是全图唯一一个**空间本身就是台词**的位置：路在这里分岔、
    * 又绕回自己身上。什么都不说，它就只是地图上的一个岔；
@@ -486,8 +555,87 @@ export class World {
    * **按圈去重，而不是"进过一次就不再进"**：玩家会绕第二圈、第三圈，
    * 而这句话每圈都成立——它提醒的正是"你又走回来了"。
    * `this.lap` 由弧长回绕推进，一圈只变一次，所以拿它当钥匙就够了。
+   *
+   * 停一拍（`MOMENT`）是这个位置的另一半：文字不锁操作、不停车
+   * （storyLine 的约定），但世界用半拍慢下来附和这三个字——
+   * "走到这里，连车速都顿了一下"。刹车交给运动学，不交给过场。
    */
   private junctionLap = -1;
+
+  /**
+   * 木牌与琴音林的"够得着"。
+   *
+   * ## 琴音林为什么用**驿站的判据**而不用路边那一套
+   *
+   * 五件旧物在**路肩外**，所以"够得着"是离它 2.8m。
+   * 琴在**院子里**，离路 18m——按 2.8m 判的话玩家永远够不着，
+   * 按驿站的 13.7+8 判才和"进驿站前院"是同一个动作。
+   * 所以它读的是驿站的 `worldPos`，阈值与 `interactAt()` 那一条同源。
+   */
+  private updateSignAndQin(px: number, pz: number): void {
+    this.signDistance = Math.hypot(px - this.signX, pz - this.signZ);
+    this.signInReach = this.signDistance <= SIGN_REACH;
+    const qin = this.stations.list[this.QIN_STATION];
+    this.qinDistance = qin ? Math.hypot(px - qin.worldPos.x, pz - qin.worldPos.z) : Infinity;
+    this.qinInReach = this.qinDistance <= WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH;
+  }
+
+  /**
+   * 推进躲避挑战。
+   *
+   * **只在 `running` 时算**——不进这一段就零开销，
+   * 因为这个游戏的大多数时间玩家并没有在挑战里，
+   * 而每帧扫二十二块石头不该是常态的价钱。
+   *
+   * 撞到与绕完都在这里收口：世界只**报事实**，发不发碎片由宿主决定。
+   * 让世界直接改存档的话，"谁负责发"就有两个答案了，
+   * 而那两个答案一旦不一致，症状是"碎片到了手，可顶栏没动"。
+   */
+  private updateDodge(): void {
+    if (!this.dodgeRunning) return;
+    const p = this.ride.pos;
+    const ev = this.dodge.step(nearestArcParam(p.x, p.z), p.x, p.z);
+    this.dodgeProgress = this.dodge.progress;
+    if (!ev) return;
+    if (ev.type === 'hit') {
+      this.endDodge();
+      this.emit({ type: 'dodgeHit', text: t('challenge_hit_text') });
+      return;
+    }
+    this.endDodge();
+    // 碎片由宿主挑一座**还欠到访**的驿站：旅币账本、心神、存档
+    // 与 `allCollected` 都在 `GameStateManager` 那一侧，世界层不碰。
+    const station = this.pickRandomFragmentStation();
+    if (station >= 0) {
+      this.emit({
+        type: 'dodgeWon',
+        text: t('challenge_win_text', { name: t(`fragment_${this.slotOf(station)}`) }),
+        station,
+      });
+    }
+  }
+
+  /** 碎片槽位 → 驿站下标。走 `FRAGMENT_SLOT_STATION_IDX` 一张表，不自己记序号。 */
+  private slotOf(stationIdx: number): number {
+    return ROAD_DATA.FRAGMENT_SLOT_STATION_IDX.indexOf(stationIdx);
+  }
+
+  /**
+   * 随机挑一座**还欠到访**的碎片驿站。
+   *
+   * 先在欠访的里挑，全收满了才退回全池——
+   * 后者保证"五块都齐了之后还能再玩"这件事成立，
+   * 而它拿到的仍然是"再访"那一份旅币，与打卡同价。
+   * 返回 -1 表示这一次没有可发的（碎片驿站一座都没有才会发生）。
+   */
+  private pickRandomFragmentStation(): number {
+    const pool = ROAD_DATA.FRAGMENT_SLOT_STATION_IDX;
+    const open = pool.filter((i) => game.fragmentStationNeedsVisit(i));
+    const from = open.length > 0 ? open : [...pool];
+    if (from.length === 0) return -1;
+    return from[Math.floor(this.dodgeSeed % from.length) % from.length];
+  }
+
   private updateJunctionLine() {
     const p = this.ride.pos;
     const d = Math.hypot(p.x - JUNCTION.center.x, p.z - JUNCTION.center.z);
@@ -497,6 +645,7 @@ export class World {
     const text = t('crossing_mark_line');
     if (text && !text.startsWith('⟨')) {
       this.emit({ type: 'storyLine', stationIndex: -1, title: t('crossing_title'), text });
+      this.ride.holdMoment(MOMENT.HOLD);
     }
   }
 
@@ -530,6 +679,87 @@ export class World {
       this.ride.pos.x - this.lastCheckInPos.x,
       this.ride.pos.z - this.lastCheckInPos.z,
     );
+  }
+
+  // ---------------------------------------------------------------- 路边挑战
+
+  /**
+   * 把木牌钉好。
+   *
+   * ## 钉哪一侧是算出来的，不是挑出来的
+   *
+   * 驿站落在中心线外 18m，木牌在路肩外 2m——而 8 字的两支在这一段靠得很近，
+   * 钉错一侧就会落进某座驿站的院子里。所以它取**离最近驿站更远的那一侧**
+   * （`signSide()`），平手固定取 `+1`，于是这个位置是**纯函数**：
+   * 刷新一次页面木牌不会搬家，而判据能问出一个确定的米数。
+   */
+  private buildSign(): void {
+    this.signSide = signSide(this.SIGN_ARC_T);
+    const p = signWorldPos(this.SIGN_ARC_T, this.signSide);
+    this.signX = p.x;
+    this.signZ = p.z;
+    const sign = buildSign();
+    sign.position.set(this.signX, this.terrain.getHeightAt(this.signX, this.signZ), this.signZ);
+    // 朝向路：玩家从路上走过来看到的是正面。
+    const toward = Math.atan2(
+      this.ride.pos.x - this.signX,
+      this.ride.pos.z - this.signZ,
+    );
+    sign.rotation.y = toward;
+    this.obstacles.group.add(sign);
+    // 建世界时把"木牌离最近驿站多远"记一份，供探针读。
+    // 判据不读它（`verify_dodge_sign` 直接问纯函数 `signStandoff()`）——
+    // 两处量的是同一件事，而让判据去问世界实例就得先建一整个世界。
+    this.signStandoffMeters = signStandoff(this.signSide, this.SIGN_ARC_T);
+  }
+
+  /** 木牌离最近一座驿站多远（米）。建世界时算一次，之后不变。 */
+  signStandoffMeters = 0;
+
+  /** 木牌够得着吗（F 键的判据，与旧物同一族）。 */
+  canTouchSign(): boolean {
+    return this.signInReach;
+  }
+
+  /**
+   * 够得着琴音林的琴吗。
+   *
+   * 宿主读的是 `qinInReach` 本身（`main.touchRoadside()` 与顶栏提示都直接读），
+   * 所以这一对方法**只是把它们再问一遍**——留着就成了第二个出口，
+   * 而同一个判断有两个出处时，迟早有一处先改、另一处没改。
+   */
+
+  /**
+   * 起跑一趟躲避挑战。
+   *
+   * 返回 false 表示"此刻不该起跑"（已经在跑 / 正在打卡过场 / 不在木牌旁边）。
+   * **布局只在起跑这一刻生成一次**，之后每帧只推进进度——
+   * 边骑边重排的话，玩家会看见石头在他眼前凭空长出来。
+   */
+  startDodge(): boolean {
+    if (this.dodgeRunning) return false;
+    if (this.checkInStage !== 'none') return false;
+    if (!this.signInReach) return false;
+    // 种子取里程 + 圈数：同一趟里不会重排，而下一趟会换一套。
+    this.dodgeSeed = (Math.round(this.odometer * 7) + this.lap * 104729 + 1) >>> 0;
+    this.dodge.start(nearestArcParam(this.ride.pos.x, this.ride.pos.z), this.dodgeSeed);
+    this.obstacles.place(this.dodge.obstacles, this.terrain);
+    this.dodgeRunning = true;
+    this.dodgeProgress = 0;
+    this.emit({ type: 'dodgeStart' });
+    return true;
+  }
+
+  /** 撤走石头。无论成功、失败还是被别的东西打断。 */
+  endDodge(): void {
+    if (!this.dodgeRunning) return;
+    this.dodgeRunning = false;
+    this.dodgeProgress = 0;
+    this.obstacles.clear();
+  }
+
+  get dodgeTravelledMeters(): number {
+    return this.dodge.travelledMeters;
   }
 
   /** 玩家在打卡范围内吗？（够得着 + 不是冷却中 + 骑开了足够远） */
@@ -779,8 +1009,8 @@ export class World {
   teleportToStation(index: number) {
     const st = STATIONS[index];
     if (!st) return;
-    const near = nearestOnCenterline(st.mapX, st.mapZ);
-    this.ride.spawn(near.x, near.z, 0);
+    const pose = roadSpawnPose(st.mapX, st.mapZ);
+    this.ride.spawn(pose.x, pose.z, pose.heading);
     this.lastPos.copy(this.ride.pos);
     this.ride.snapCamera();
   }
@@ -796,16 +1026,15 @@ export class World {
    */
   teleportToArc(t01: number, yawDeg?: number) {
     const t = clamp(t01, 0, 1);
-    const p = pointAtArcLength(t * TOTAL_ARCLENGTH).pos;
-    // 朝向取中心线在该点的切线方向；给了 yaw 就用给的
-    let heading = 0;
-    if (yawDeg === undefined) {
-      const a = pointAtArcLength(Math.max(0, t * TOTAL_ARCLENGTH - 2)).pos;
-      const b = pointAtArcLength(Math.min(TOTAL_ARCLENGTH, t * TOTAL_ARCLENGTH + 2)).pos;
-      heading = Math.atan2(b.x - a.x, b.z - a.z);
-    } else {
-      heading = (yawDeg * Math.PI) / 180;
-    }
+    const s = t * TOTAL_ARCLENGTH;
+    const p = pointAtArcLength(s).pos;
+    // 朝向默认取中心线在该点的切线方向；给了 yaw 就用给的。
+    //
+    // 切向那一支原来写的是 `atan2(b.x - a.x, b.z - a.z)`——**少一个负号**，
+    // 于是正好差 180°：车仍然站在路面上，只是朝着来路倒着骑。
+    // 演示模式有自动驾驶能把它纠回来，所以这个错误一直没露出来。
+    const heading =
+      yawDeg === undefined ? roadHeadingAtArc(s) : (yawDeg * Math.PI) / 180;
     this.ride.spawn(p.x, p.z, heading);
     this.lastPos.copy(this.ride.pos);
     this.lastArc = t;
@@ -1020,13 +1249,8 @@ function allGeometries(m: { root: Object3D }): BufferGeometry[] {
   return found.map((f) => f.geo);
 }
 
-/** 找到离 (x,z) 最近的一点中心线（用于把车放在路上） */
-function nearestOnCenterline(x: number, z: number) {
-  const t01 = nearestArcParam(x, z);
-  return pointAtArcLength(t01 * TOTAL_ARCLENGTH).pos;
-}
-
-/** 启动自检：碗与路的关系 */
+/**
+ * 启动自检：碗与路的关系 */
 export function verifyWorld() {
   const basins = checkConsistency();
   return {

@@ -190,11 +190,53 @@ export class StoryCards {
     return this.count > 0 || this.pending > 0;
   }
 
+  /**
+   * 这一张是从队列里接上来的吗。
+   *
+   * 「跳到最后一句」那颗按钮只该出现在**排队播的段落**里（序章、驿里的声音），
+   * 不该出现在路边那块单独浮出来的碑文上。而 `queue.length > 0` 本身分不清
+   * 「还有下一张要接」和「别的段落还排在后面」——所以记一笔这颗卡是从
+   * `pump()` 出来的，而不是从外部 `show()` 直接来的。
+   */
+  private pumping = false;
+
   /** 队列里还有就上下一张。 */
   private pump() {
     const next = this.queue.shift();
     if (!next) return;
-    this.show(next.text, next.opts);
+    this.pumping = true;
+    try {
+      this.show(next.text, next.opts);
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  /**
+   * 「跳过」：**跳到这一段最后一张,而不是把整段扔了**。
+   *
+   * 与 `Dialogue.skipToEnd()` 是同一条语义,理由也是同一条。序章最后一张是
+   * 「守驿人记路,不记己……代价是——没有人记得你」——整段叙事里唯一交代
+   * 主角这一趟代价的那一句。一点就全没的话,这颗按钮的读法会变成
+   * 「我把这段故事弄丢了」,而玩家的本意只是「别一句一句点了」。
+   *
+   * 所以:把最后一张**接上来给你读**,不是清场。最后一张自己会按
+   * `readingMs` 走,走完这一整段就真的结束了。
+   *
+   * 幂等:队列已空时它就变成「退掉当前这一张」——那正是最后一张本该退的那一刻,
+   * 于是「跳到最后一句」连按两下的行为与对白框一致(第二次才真的收场)。
+   */
+  skipToEnd(): void {
+    if (this.queue.length) {
+      const last = this.queue[this.queue.length - 1];
+      this.queue = [];
+      for (const c of this.cards) c.root.remove();
+      this.cards = [];
+      this.show(last.text, last.opts);
+      return;
+    }
+    const only = this.cards[0];
+    if (only) this.dismiss(only.root);
   }
 
   /**
@@ -216,6 +258,11 @@ export class StoryCards {
    *        所以只有"停下来读"性质的段落才开：驿里的声音三句每句
    *        10~13 秒，等它自己走完是一种惩罚；而碑文、路口那三个字
    *        属于骑过去顺便读到，开点击只会让人乱点。
+   *
+   *        开了之后的两个出口：整张卡点一下退一张（`dismiss`），以及
+   *        排队播的段落里额外挂一颗「跳到最后一句」（`skipToEnd`）。
+   *        后者只在 `pumping` 为真时出现——它属于「这一段」，不属于
+   *        「这一张」，所以不会跑到路边那块单独的碑文上去。
    */
   show(
     text: string,
@@ -248,6 +295,23 @@ export class StoryCards {
         card.appendChild(el('div', 'g-card-hint', t('storycard_dismiss_hint')));
         this.hintShown = true;
         this.hintLeft = 2.6;
+      }
+      // 「跳到最后一句」:**这一段**才挂,不是每一张。
+      //
+      // 那个 2.6 秒的角标撤掉之后,「可点」这件事在屏上就没有任何信息了——
+      // 七张卡里剩下六张,玩家看不见有什么可点,只能等它自己走完
+      // （中文侧 66 秒、英文侧 86 秒）。按钮比角标多一件事:**它一直在**。
+      //
+      // `stopPropagation` 必须留:整张卡本身吃点击（点一下退一张），
+      // 不吃的话一次点击会同时触发「退这一张」和「跳到最后一张」两件事。
+      if (this.pumping && this.queue.length > 0) {
+        const skip = el('button', 'g-btn g-card-skip', t('storycard_skip'));
+        skip.type = 'button';
+        skip.addEventListener('click', (e) => {
+          e?.stopPropagation();
+          this.skipToEnd();
+        });
+        card.appendChild(skip);
       }
     }
     this.root.appendChild(card);

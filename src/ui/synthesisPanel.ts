@@ -24,6 +24,7 @@ import { t } from '../i18n';
 import { button, el, note, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import { FRAGMENT_COLORS } from './theme';
+import { buildInputFromState, tierLine } from '../game/postcard';
 import type { UIHooks } from './index';
 import type { GameStateManager } from '../game/state';
 
@@ -41,6 +42,7 @@ export class SynthesisPanel {
   private titleEl: HTMLDivElement;
   private strip: HTMLDivElement;
   private hintEl: HTMLDivElement;
+  private tierEl: HTMLDivElement;
   private takeBtn: HTMLButtonElement;
   private keepBtn: HTMLButtonElement;
 
@@ -70,6 +72,14 @@ export class SynthesisPanel {
 
     this.hintEl = note(t('synthesis_choice_hint'));
     card.appendChild(this.hintEl);
+
+    // 评级行：「此刻的明信片：大师（第 4 档 / 共 5 档）· 完满还差 6 次」。
+    // 五档名曾经整族是死字——评级算得出来，没人念。少了这一行，
+    // 「再骑一圈 · 刷到完满」这个按钮就没有对象：玩家不知道自己在第几档、
+    // 离完满还差多少，那个按钮读起来就只是"再受一遍苦"。
+    // 判定走 postcard/types.ts 的 `tierLine()`，和结算屏同一份。
+    this.tierEl = el('div', 'g-synth-tier');
+    card.appendChild(this.tierEl);
 
     const acts = el('div', 'g-acts');
     this.takeBtn = button(t('synthesis_take_postcard'), {
@@ -114,6 +124,10 @@ export class SynthesisPanel {
   private mode: 'chapter' | 'maxed' | 'plain' = 'plain';
 
   sync(): void {
+    // 评级行三种打开方式都给出：chapter 是第一章收尾（此刻必然已集齐，
+    // 档位 = 大师或完满），maxed 与 plain 同理——它量的是进度，不是打开方式。
+    setText(this.tierEl, tierLine(buildInputFromState()));
+
     if (this.mode === 'chapter') {
       setText(this.titleEl, t('chapter1_done_title'));
       setText(this.hintEl, t('chapter1_done_line'));

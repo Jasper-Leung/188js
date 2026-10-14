@@ -200,6 +200,84 @@ export class Terrain {
     return h10 * (1 - fz) + h01 * (1 - fx) + h11 * (fx + fz - 1);
   }
 
+  /**
+   * 把一个圆盘范围内的地形**压到路面之下**，权重与路面自己用的完全一样。
+   *
+   * ## 为什么需要它：草从十字路口的路面上长出来
+   *
+   * 路口是把两条路拉到一个共同平面上（`Road.flattenJunction`），
+   * 靠的是 `ys[i] + (junctionY - ys[i]) * w`——**只动路面**。
+   * 于是在上坡那一支，自然地形高过这个平面，而路面被拉下来了，
+   * 于是地形从路面底下顶上来：路面上出现一块一块的绿。
+   * 实测过渡带上高出 8.4cm。
+   *
+   * 只抬路面不可能解决它：抬到"比最高的地形还高"，路口就会鼓成一个包。
+   * 正确的做法和真实路口一样——**挖方**。
+   *
+   * ## 公式：`h' = lerp(h, min(h, planeY - lift), w)`
+   *
+   * `min` 是"不许把地形抬上去"：已经低于路面的地方一个字都不改，
+   * 只有真正高于路面的那段被削掉。这一步是**幂等且安全**的。
+   *
+   * ## 为什么这样削完路一定浮在上面
+   *
+   * 削过之后，路面与地形的间距恒 ≥ `lift`：
+   * 若 `h ≤ planeY - lift`，地形不动，而路面是 `lerp(h+lift, planeY, w)`，
+   * 两端都不低于 `h + lift`；若 `h > planeY - lift`，削下去正好 `lift`。
+   * 权重和路面用的是**同一个** `w`，所以路怎么落、地形就怎么让——
+   * 两边各用一套权重的话，总会在某一段差出一个正数，而那个正数就是草。
+   *
+   * ## 但权重后来改了，而且必须改
+   *
+   * 照抄路面那个 `w = 1 - smoothstep((d-core)/(flat-core))` 的第一版，
+   * 实测只削掉了需要削的**十分之一**：该削 38cm 的地方只削了 3.8cm，
+   * 草照样长在路面上。
+   *
+   * 原因是**采样密度不一样**。路面按中心线密采样（`RESAMPLE_STEP`），
+   * `w` 几乎是连续的；地形是 6.25m 的网格，`w` 只在**顶点**上取值，
+   * 格与格之间是线性插值。于是顶点 A 满权重、顶点 B 零权重，
+   * 中间那一片地面拿到的是**被抹平的权重**——正好就是草要长出来的地方。
+   *
+   * 所以反过来做：`flat` 以内**满权重**削平，权重在 `flat` 之外的
+   * `2 格`里收到 0。这样压平区内每个顶点都真的落在 `planeY - lift` 以下，
+   * 而分段线性插值**不会把低的地方插出高的值**——草没有生长的余地。
+   *
+   * 过渡带整个挪到压平区**外面**，是同一个道理：留在里面的话，
+   * 坡面上的地形天然就比路高，那恰恰是原来长草的地方。
+   *
+   * ## 与 mesh 的一致性
+   *
+   * `grid` 与 `positions` 是同一个数组的两种视图（顶点 `i = z*ROW + x`），
+   * **两处必须一起改**——只改一处的话 `getHeightAt()` 会和看得见的网格
+   * 差出一截，而车是按 `getHeightAt()` 贴地的，于是车会浮在草上面。
+   * 改完重算法线：削过的地方坡度变了，法线不重算会留下一片假的死光。
+   */
+  carveJunction(cx: number, cz: number, flat: number, planeY: number, lift: number): void {
+    if (!Number.isFinite(planeY)) return;
+    const blend = 2 * CELL;
+    const floor = planeY - lift;
+    const positions = this.mesh.geometry.getAttribute('position');
+    for (let z = 0; z < ROW; z++) {
+      const wz = (z / RES) * SIZE - SIZE * 0.5;
+      for (let x = 0; x < ROW; x++) {
+        const wx = (x / RES) * SIZE - SIZE * 0.5;
+        const d = Math.hypot(wx - cx, wz - cz);
+        if (d >= flat + blend) continue;
+        const i = z * ROW + x;
+        const h = this.grid[i];
+        if (h <= floor) continue;
+        const t = d <= flat ? 0 : Math.min((d - flat) / blend, 1);
+        const w = 1 - t * t * (3 - 2 * t);
+        const carved = h + (floor - h) * w;
+        this.grid[i] = carved;
+        positions.array[i * 3 + 1] = carved;
+      }
+    }
+    positions.needsUpdate = true;
+    this.mesh.geometry.computeVertexNormals();
+    this.mesh.geometry.computeBoundingSphere();
+  }
+
   /** 场界。越界会被软回弹推回来。 */
   static get halfSize(): number {
     return SIZE * 0.5;

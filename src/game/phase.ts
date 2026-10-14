@@ -22,6 +22,110 @@ import { TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 
 export type Phase = 'boot' | 'title' | 'onboarding' | 'roaming' | 'paused' | 'checkin' | 'minigame' | 'synthesis' | 'endcard';
 
+/**
+ * 允许的相位迁移。**这张表是"声明"，不是"闸门"。**
+ *
+ * ## 它挡的是什么
+ *
+ * `main.ts` 原来在**十一处**直接写 `this.phase = …`。于是"现在能处于哪些相位、
+ * 谁负责切、哪些切换是没人想过的"这件事没有任何一处能一眼看完——
+ * 想回答它只能把十一个赋值点连同它们各自的守卫条件一起读一遍。
+ *
+ * 现在所有写入都走宿主里的 `goPhase()` 一个入口，而那张入口表在这里。
+ * 以后加一条边，是往这张表里添一行；漏了，`verify_phase` 会红。
+ *
+ * ## 为什么**不**在运行时拒绝表外的迁移
+ *
+ * 因为宿主（`main.ts`）在无头环境里构造不出来，本项目的回归**跑不到它**。
+ * 一张靠"跑一遍才知道全不全"的表去**拒绝**运行时迁移，等于把一个
+ * 我从未观察过的行为变成硬失败——而这条重构的承诺是"行为不变"。
+ *
+ * 所以它只声明、不拦截。真正的强制点是**静态**的那条：宿主里
+ * `this.phase =` 只允许出现一次（就在 `goPhase()` 里）。新写的迁移
+ * 必须先过 `goPhase()`，于是它必然被这张表收编或被回归抓住。
+ */
+export const PHASE_EDGES: ReadonlySet<string> = new Set([
+  // 开场
+  'boot>title',
+  'title>onboarding',
+  'onboarding>roaming',
+  // 骑行 / 暂停。`paused → roaming` 与 `roaming → roaming` 都真的走过：
+  // 后者是 `toRoaming()` 的幂等形态（小游戏目标不存在、打卡完直接收尾）。
+  'roaming>paused',
+  'roaming>roaming',
+  'paused>roaming',
+  // 站定办事。铺子复用 `checkin`（`verify_phase` 的占用集合里已经有它）。
+  'roaming>checkin',
+  'checkin>roaming',
+  'checkin>synthesis',
+  'checkin>minigame',
+  'checkin>endcard',
+  'minigame>roaming',
+  // 收尾
+  'synthesis>roaming',
+  'synthesis>endcard',
+  // `finishRun()` 有三个调用点，演示那一路是从 `roaming` 直接跳结算页。
+  'roaming>endcard',
+  'endcard>roaming',
+]);
+
+/** 这一条迁移在表里吗。 */
+export function canGoPhase(from: Phase, to: Phase): boolean {
+  return PHASE_EDGES.has(`${from}>${to}`);
+}
+
+/** 相位表的边两端都必须是真相位——写错一个字母，这条边会静默地永远匹配不上。 */
+export function phaseEdgeErrors(): string[] {
+  const all = new Set<Phase>([
+    'boot', 'title', 'onboarding', 'roaming', 'paused',
+    'checkin', 'minigame', 'synthesis', 'endcard',
+  ]);
+  const bad: string[] = [];
+  for (const e of PHASE_EDGES) {
+    const [from, to] = e.split('>');
+    if (!all.has(from as Phase)) bad.push(`「${e}」的起点 ${from} 不是相位`);
+    if (!all.has(to as Phase)) bad.push(`「${e}」的终点 ${to} 不是相位`);
+  }
+  return bad;
+}
+
+/**
+ * 从 `boot` 出发走不到的**边的起点**。
+ *
+ * 存在的意义是**让表自己腐烂时响**。一张只增不减的迁移表迟早会攒下
+ * 永远走不到的边（某条路改了、某一整段删了），而多出来的边看上去和
+ * 其余的一样"对"，没有判据的话它会一直躺着骗人——直到有人照着它去接线。
+ *
+ * 量的是**起点**而不是终点：BFS 沿着所有边走，所以只要起点可达，
+ * 终点就一定进 `seen`。反过来，一条起点本身就没人到不了的边，
+ * 它连走都不会被走到，正是要抓的那种。
+ */
+export function phaseReachErrors(): string[] {
+  const adj = new Map<Phase, Phase[]>();
+  for (const e of PHASE_EDGES) {
+    const [from, to] = e.split('>') as [Phase, Phase];
+    const list = adj.get(from);
+    if (list) list.push(to);
+    else adj.set(from, [to]);
+  }
+  const seen = new Set<Phase>(['boot']);
+  const q: Phase[] = ['boot'];
+  while (q.length) {
+    const cur = q.shift() as Phase;
+    for (const nx of adj.get(cur) ?? []) {
+      if (!seen.has(nx)) {
+        seen.add(nx);
+        q.push(nx);
+      }
+    }
+  }
+  const bad: string[] = [];
+  for (const from of adj.keys()) {
+    if (!seen.has(from)) bad.push(`「${from}>… 」的起点从 boot 走不到——这条边永远不会发生`);
+  }
+  return bad;
+}
+
 export interface CanRideInput {
   phase: Phase;
   /** 打卡按钮这一帧是否刚被按下（按住时不该同时骑行） */
@@ -50,6 +154,34 @@ export function canRide(i: CanRideInput): boolean {
 /** UI 是否应当显示世界 HUD。**必须与 `canRide` 的阶段部分同源**，否则又会脱节。 */
 export function isInWorld(phase: Phase): boolean {
   return phase === 'roaming' || phase === 'paused' || phase === 'checkin' || phase === 'synthesis';
+}
+
+/**
+ * 按空格 / 回车 / 指键的确认键，此刻**到底会发生什么**。
+ *
+ * 导出来是因为这件事在两个地方各写了一份，而它们已经不一致过一次：
+ * `main.ts` 的 `onConfirm()` 认 `title` 与 `roaming`，不认 `onboarding`，
+ * 而 AI 契约的相位表给 `onboarding` 标着"出路是 advance"。
+ * 实机症状最坏：`available: ['advance']` 一直亮着、
+ * `tap('advance')` 一直返回 accepted，而游戏永远停在引导页上——
+ * **按 150 次都没动**。契约在亮着，游戏在原地，两者都没报错。
+ *
+ * 而引导页走不出去还有一半是结构原因：它的出口是那颗
+ * 「开始骑行」按钮，`wireKeyActivate()` 挂在**元素**上，
+ * 所以只有焦点落在按钮上时空格才有用；
+ * AI 派发按键是把事件发到 `window` 的，永远到不了那个元素。
+ * 因此 `onboarding` 这一档**必须**由宿主自己接住，
+ * 而不能指望"按钮会自己响应"。
+ *
+ * 返回 `null` = 这一屏没有确认键的出路（该相位归 `Escape` 或别的键管）。
+ */
+export type ConfirmAction = 'startRide' | 'enterWorld' | 'checkIn';
+
+export function confirmAction(phase: Phase): ConfirmAction | null {
+  if (phase === 'title') return 'startRide';
+  if (phase === 'onboarding') return 'enterWorld';
+  if (phase === 'roaming') return 'checkIn';
+  return null;
 }
 
 /**

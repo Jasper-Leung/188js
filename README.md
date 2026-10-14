@@ -137,7 +137,7 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 420-key string table match exactly.
+and both sides of the 458-key string table match exactly.
 
 ### Two: translate geometry point by point
 
@@ -156,7 +156,7 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        420 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        458 strings consistent across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise
@@ -678,17 +678,45 @@ bytes.
 
 **Unverified**
 
-- **How the crossings and the Tripo buildings actually look.** The numbers
-  are already guarded by regression (crossing coplanar deviation 0.3 cm, 0/97
-  sample points off-road within 48 m of either crossing, all 9 Tripo buildings
-  half-width ≤ 8 m, zero textures, base colour baked into vertex colours), but
-  regression cannot answer "does it look right" — that needs a look on your
-  machine.
-- The actual size and glyphs of the postcard PNG. The export path waits on
-  `document.fonts.load` for the handwritten font; it's logically correct, but it
-  needs one real browser clicking export to confirm.
-- Touch controls. The code is there (four-signal detection + tri-state switch in
-  the pause menu) but it has never been tried on a real device.
+None of these three is "regression hasn't been written yet" — they are
+"regression can't answer this even if it were written". So each one is split
+three ways: **what the guards already hold · what they cannot hold ·
+what you do to close it**.
+
+- **How the crossings and the Tripo buildings actually look**
+  - **Held**: crossing coplanar deviation 0.3 cm, 0/97 sample points off-road
+    within 48 m of either crossing, all 9 Tripo buildings half-width ≤ 8 m, zero
+    textures, base colour baked into vertex colours.
+  - **Not held**: all of that is numbers. "Does this crossing look like a real
+    crossing on screen" needs eyes, and regression has none.
+  - **To close it**: ride the Demo through both 8-crossings once each, and press
+    `B` on `?buildings` for the 16-building checkup. **Both are text output** —
+    no screenshot needed.
+
+- **The postcard PNG's actual size and glyphs**
+  - **Held**: `verify_postcard_export` now pins `await ensureHandwritingFont()`
+    **ahead of** `drawBack()` — get that order wrong and the text is already
+    painted when the font arrives, which exports in the fallback font **without
+    erroring**. It also pins that the family name is never hardcoded, that the
+    two sides don't share a name and both end in `.png`, and that `main.ts`
+    doesn't concatenate the filename itself. `verify_postcard_preview` measures
+    where the dot lands on the card.
+  - **Not held**: how big the PNG is, and whether the glyphs look right. The
+    first depends on the PNG encoder, the second on which fonts this machine has.
+  - **To close it**: finish a run to the end card, click export once, look at
+    the PNG that lands on disk.
+
+- **Touch controls**
+  - **Held**: `verify_controls` measures the four-signal decision (the
+    narrow-window one especially — reading a narrow desktop window as touch
+    conjures a joystick a mouse player can't push); `verify_touch_mode` measures
+    the tri-state switch's forced on/off, the listener notification, real
+    unsubscribe, no duplicate notification on a same-value set, and both wirings
+    (`main.ts` reads `touchEnabled()`, `ui/index.ts` subscribes to changes).
+  - **Not held**: the feel on a real device — whether you hit it, whether the
+    stick keeps up, whether multi-touch misfires. That only exists on hardware.
+  - **To close it**: open the Demo on a real device and flip the tri-state
+    through all three stops in the pause menu, watching the controls come and go.
 
 ---
 

@@ -852,17 +852,19 @@
           0
         ]
       },
-      "text": "夜雨敲竹,窗内的人把一盏灯守到天明。",
-      "text_en": "Night rain taps the bamboo while someone keeps a lamp burning until morning.",
+      "text": "夜雨敲竹,竹子长过头了,连灯也照不出去了。",
+      "text_en": "Night rain on bamboo; it has grown so thick that even the lamp cannot get out.",
       "dialogue": [
         "夜雨敲竹，窗内的人把一盏灯守到天明。",
-        "第二天早上，雨停了，竹叶上还留着水珠。",
-        "这盏灯她也守过一整夜。第二天早上，她没有来关灯。"
+        "第二天早上雨停了，竹叶上还留着水珠——可竹子已经长过头了，一丛挤一丛，把庭里的灯挡死了。",
+        "她守了一整夜的那盏灯，从窗里照不出去了。",
+        "要还那点光，就得砍开一条道。"
       ],
       "dialogue_en": [
         "Night rain taps the bamboo while someone keeps a lamp burning until morning.",
-        "By morning the rain has stopped, and water droplets still cling to the bamboo leaves.",
-        "She kept this same lamp burning for one whole night. In the morning she did not come to put it out."
+        "By morning the rain has stopped and droplets still cling to the leaves — but the bamboo has grown over itself, clump against clump, and it has blocked the courtyard lamp.",
+        "The lamp she kept burning all night can no longer get out of the window.",
+        "To give that light back, someone has to cut a path open."
       ],
       "model_idx": 3
     },

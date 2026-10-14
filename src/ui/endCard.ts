@@ -37,7 +37,7 @@
  * 预览和导出的 PNG 用的就是同一次加载结果。
  */
 import { t, isEnglish } from '../i18n';
-import { blurWithin, button, clear, el, note, rule, setDisabled, setFlag, setShown, setText } from './dom';
+import { blurWithin, button, clear, el, note, rule, setAttr, setDisabled, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate, stationName } from './hud';
 import { FONT_HANDWRITE } from './theme';
 import type { PostcardInput } from '../game/postcard';
@@ -47,7 +47,7 @@ import type { PostcardInput } from '../game/postcard';
 // 判定不许在这一层再抄一遍——抄一份就多一个能漂的地方，
 // 而这个漂过一次：`endingId === 'break'` 在存档里永远不成立，
 // 于是选了「放手」的玩家拿到的还是「留门」的背面。
-import { endingOf, backCaptionKey } from '../game/postcard/types';
+import { endingOf, backCaptionKey, tierLine } from '../game/postcard/types';
 import { STATIONS } from '../data/route';
 import { ROAD } from '../data/raw';
 import type { UIHooks } from './index';
@@ -100,6 +100,8 @@ export class EndCard {
   private recapBox: HTMLDivElement;
   private joyBox: HTMLDivElement;
   private paperEl: HTMLSpanElement;
+  private tierEl: HTMLSpanElement;
+  private overdueEl: HTMLDivElement;
 
   private editor: HTMLDivElement;
   private ta: HTMLTextAreaElement;
@@ -139,9 +141,14 @@ export class EndCard {
     stage.appendChild(this.canvas);
     left.appendChild(stage);
 
+    // 正反面这两颗是**一组**（互斥、同时只有一个成立），所以给 tablist / tab 语义。
+    // 原来只有 `is-on` 一个视觉信号，而那个信号（底色与卡片底色差 7%）
+    // 对读屏和对灰度屏一样都不存在——`aria-selected` 是零成本的第三道。
     const tabs = el('div', 'g-tabs');
+    tabs.setAttribute('role', 'tablist');
     this.frontTab = button(t('card_side_front'), { cls: 'g-tab', onClick: () => this.setSide('front') });
     this.backTab = button(t('card_side_back'), { cls: 'g-tab', onClick: () => this.setSide('back') });
+    for (const b of [this.frontTab, this.backTab]) b.setAttribute('role', 'tab');
     tabs.appendChild(this.frontTab);
     tabs.appendChild(this.backTab);
     left.appendChild(tabs);
@@ -205,6 +212,10 @@ export class EndCard {
     const paperRow = el('div', 'g-end-paper');
     this.paperEl = el('span', 'g-end-paper-n');
     paperRow.appendChild(this.paperEl);
+    // 评级行与纸面名同格：都是"这张卡是谁"的读数，一行金一行墨。
+    // `tierLine()` 的判定与合成屏、导出 PNG 同一份（postcard/types.ts）。
+    this.tierEl = el('span', 'g-end-tier');
+    paperRow.appendChild(this.tierEl);
     right.appendChild(paperRow);
 
     right.appendChild(el('div', 'g-group-h', t('postcard_joys_title')));
@@ -232,6 +243,12 @@ export class EndCard {
     right.appendChild(rule());
     right.appendChild(el('div', 'g-group-h', t('ending_title')));
     right.appendChild(note(t('ending_hint'), 'g-note-dim'));
+    // 完满 + 过期同时成立时才出现的一句。`day = 1 + 3×圈数 + 打卡数`，
+    // 按每圈三次的节奏刷满五座正好 31 天 > 30——「拿得越满，到期得越干净」
+    // 是这条算术唯一一次被念出来。它不改变任何判定，只让玩家知道
+    // 自己踩中的是什么。efficient 玩家（三圈刷满）不会看到它，那也是真的。
+    this.overdueEl = note(t('ending_overdue_full'), 'g-note-dim g-end-overdue');
+    right.appendChild(this.overdueEl);
     const endRow = el('div', 'g-acts');
     this.endKeep = button(t('ending_keep'), { cls: 'g-btn-major', onClick: () => this.pick('leave_door') });
     this.endBreak = button(t('ending_break'), { cls: 'g-btn-major', onClick: () => this.pick('let_go') });
@@ -349,14 +366,26 @@ export class EndCard {
   // ---------------------------------------------------------------- 画卡
 
   /**
-   * 拼导出输入。
+   * 拼导出输入（**预览**用的那份）。
    *
-   * `main.ts` 里有一份几乎一样的 `buildPostcardInput()`。这一份是**预览**用的，
-   * 少不了一件东西：它必须带上 `seenStations` / `seenCount`，
-   * 否则抬头那张路线图上全是空心点、配着一行「已过 0 驿」——
-   * 那是一张玩家永远拿不到的卡（`postcard/types.ts` 的注释里点名了这个兜底）。
-   * main 那份没传这两项（不在本任务的文件范围里），导出的 PNG 抬头会走
-   * `seenCountOf()` 的兜底分支。**这一处需要 main 侧补上。**
+   * ## 它和导出那张 PNG 不是同一份
+   *
+   * 导出走 `main.ts → buildInputFromState()`（`game/postcard/index.ts`），
+   * 那一份从 `game` 现读；这一份从 `this.game` 读，因为**编辑器还没 commit 时
+   * 宿主那边是旧值**（`backText` 要先 `onWriteBack()` 才同步得到）。
+   * 两份都会带上 `seenStations` / `seenCount`，所以抬头那张路线图
+   * 在预览和导出里长得一样。
+   *
+   * ⚠ **曾经不是这样，而那件事已经修完了**：这段注释的前一版写的是
+   * 「`main.ts` 里有一份几乎一样的 `buildPostcardInput()`……main 那份没传
+   * `seenStations`/`seenCount`，**这一处需要 main 侧补上**」。
+   * **那个前提今天不成立**：`main.ts` 里没有 `buildPostcardInput`，
+   * 导出走的是 `buildInputFromState()`，而它两项都传了
+   * （`game/postcard/index.ts:127-146`）。导出的抬头是对的。
+   *
+   * 留这一段是因为它说明了**当初为什么会有两份**（编辑器未 commit 的时序），
+   * 而删掉它就只剩一句"这里有重复"，下一个人会去把重复合掉——
+   * 那会把 `backText` 的时序问题重新引进来。
    */
   private buildInput(): PostcardInput {
     const seen: boolean[] = [];
@@ -368,7 +397,11 @@ export class EndCard {
       hasInk: this.game.hasItem('ink'),
       hasSeal: this.game.hasItem('seal'),
       hasEnvelope: this.game.hasItem('env'),
-      ending: this.game.endingId === 'let_go' ? 'let_go' : 'leave_door',
+      // 这一格原来是自己写的 `endingId === 'let_go' ? 'let_go' : 'leave_door'`，
+      // 而文件头 :50 那条注释写着「判定不许在这一层再抄一遍」。
+      // **规则写在第 50 行，违反在第 376 行** —— 现在它走 `endingOf()`，
+      // 和导出那张 PNG 的 `endingFromGameState()` 是同一个函数。
+      ending: endingOf(this.game.endingId),
       backText: this.backText,
       lang: isEnglish() ? 'en' : 'zh',
       seenStations: seen,
@@ -480,6 +513,11 @@ export class EndCard {
     setText(this.backTab, t('card_side_back'));
     setFlag(this.frontTab, 'is-on', this.side === 'front');
     setFlag(this.backTab, 'is-on', this.side === 'back');
+    // 「现在看的是哪一面」这句话同时说给视觉和读屏。
+    // 读屏只念文字，而两颗按钮的文字（正面 / 背面）**永远一样**，
+    // 不给 `aria-selected` 的话，键盘用户完全听不出自己切没切过面。
+    setAttr(this.frontTab, 'aria-selected', this.side === 'front' ? 'true' : 'false');
+    setAttr(this.backTab, 'aria-selected', this.side === 'back' ? 'true' : 'false');
     // 背面那一句按结局分支：选了「放手」就把"留白是故意的"说出来。
     // 判定在 `postcard/types.ts` 的 `backCaptionKey(endingOf(id))` 里，
     // 明信片那一侧读的是同一对函数——两边不可能各说各话。
@@ -500,6 +538,15 @@ export class EndCard {
     setText(this.confirmBtn, t('back_confirm'));
     setText(this.skipBtn, t('back_skip'));
     setText(this.frontBtn, t('back_to_front'));
+
+    // 评级行：「此刻的明信片：朝圣者（第 3 档 / 共 5 档）· 完满还差 9 次」。
+    // 判定走 `tierLine()`，和合成屏、导出 PNG 同一份；输入用本屏的
+    // `buildInput()` —— 编辑器未 commit 时 `backText` 是新的，
+    // 但评级只看 `slotVisits`，两份在这里等价。
+    setText(this.tierEl, tierLine(this.buildInput()));
+    // 这句只在完满与过期同时成立时出现（条件与文案的关系见构造处注释）。
+    // 它不增减任何东西，只把玩家踩中的那条算术念出来。
+    setShown(this.overdueEl, this.game.overdue && this.game.allFragmentsMaxed());
 
     // 选了哪一边，那一颗就不再可选。
     // 不这么做的话玩家能反复横跳，而「选一边，另一边就没了」是这一屏的赌注。

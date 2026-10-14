@@ -21,8 +21,6 @@
 import { ECON, SHOPS, ROAD } from '../data/raw';
 import type { GoodDef } from '../data/raw';
 
-export type GameState = 'GIFT_BOX' | 'ROAMING' | 'CHECK_IN' | 'SYNTHESIZING' | 'END_CARD';
-
 export interface SaveBlob {
   version: number;
   collected: Record<string, number>;
@@ -112,7 +110,6 @@ export class GameStateManager {
     lvbi: Listener<{ delta: number; total: number }>;
     mood: Listener<number>;
     item: Listener<string>;
-    state: Listener<GameState>;
     dirty: Listener<void>;
   } = {
     fragment: () => {},
@@ -120,13 +117,65 @@ export class GameStateManager {
     lvbi: () => {},
     mood: () => {},
     item: () => {},
-    state: () => {},
     dirty: () => {},
   };
 
   on<K extends keyof typeof this._l>(k: K, fn: (typeof this._l)[K]) {
     this._l[k] = fn;
     return this;
+  }
+
+  /**
+   * 两种"这一趟没有按你以为的方式被记下来"的一次性信号。
+   *
+   * ## 为什么它们是**取走式**的（`take…`），而不是一个 getter
+   *
+   * `save()` 是在 `checkIn()` / `noteLap()` / `buy()` 内部被调的，
+   * 一趟里能调上几十次。如果只是一个可读的布尔，UI 每一帧读它就会
+   * **每一帧弹一次同样的提示**——而提示该出现的是"发生过一次"这件事，
+   * 不是"现在仍然是这样"。取走式读一次就清掉，天然只响一次。
+   *
+   * 不用事件（`_l.on(…)` 那套）是因为它们都是**坏消息**而不是状态变化：
+   * 事件是"某件事发生了，请响应"，而这里要的是"请在下一帧说一次话"。
+   */
+  private migratedOnce = false;
+  private writeFailedOnce = false;
+
+  /**
+   * 取走"读到了旧版本存档"这个信号。
+   *
+   * ## 原来为什么是静默的
+   *
+   * 版本对不上时 `load()` 直接 `clearSave()` 然后 `return false`，
+   * 于是玩家看到的是：昨天骑到第 12 天，今天打开游戏回到第 1 天，
+   * **没有任何一句话解释这件事**。
+   *
+   * 而"进度没了"在这个游戏里不是小事：那一路有三十天的期限，
+   * 十几天不知道怎么没的，玩家只会以为自己记错了、或者游戏在骗他。
+   * 删档本身必须留着（旧格式读进来只会读到一半的数据，那更糟），
+   * 缺的是**把这件事说出来**。
+   */
+  takeSaveMigrated(): boolean {
+    const v = this.migratedOnce;
+    this.migratedOnce = false;
+    return v;
+  }
+
+  /**
+   * 取走"存档写不下去"这个信号。
+   *
+   * `save()` 与 `clearSave()` 都包在 `try {} catch {}` 里，注释写着
+   * 「无痕模式 / 配额满：不落盘，游戏照跑」——**游戏照跑是对的**，
+   * 玩家不该被一个内部存储问题拦住。
+   *
+   * 但"照跑"不等于"不用说"。隐私模式或空间已满时，玩家玩了两小时，
+   * 关掉浏览器，回来发现进度全没了，而这一趟**没有任何提示**。
+   * 说一次是最小代价：不拦他玩，但要让他知道自己这一趟不会留下存档。
+   */
+  takeWriteFailed(): boolean {
+    const v = this.writeFailedOnce;
+    this.writeFailedOnce = false;
+    return v;
   }
 
   // ---- 状态 ----
@@ -143,7 +192,6 @@ export class GameStateManager {
   endingId = '';
   progressKm = 0;
   onboardingShown = false;
-  currentState: GameState = 'GIFT_BOX';
 
   /**
    * 两个"翻转已发过"的闩锁，只活在本次会话里，不落盘。
@@ -269,9 +317,16 @@ export class GameStateManager {
     return 'collect';
   }
 
-  /** 过期之后的目标文案键。 */
-  get objectiveKey(): 'objective_collect' | 'objective_return' | 'objective_overdue' {
+  /**
+   * 过期之后的目标文案键。
+   *
+   * 第二章开始（`chapter1Done`）之后，目标从"收齐五件"换成
+   * "回十八驿收下这一趟，或者把五座各走满三次"——那扇门背后不是空的，
+   * 它有两条明确的路：拿礼物走，或刷完满。
+   */
+  get objectiveKey(): 'objective_collect' | 'objective_return' | 'objective_overdue' | 'objective_chapter2' {
     if (this.overdue) return 'objective_overdue';
+    if (this.chapter1Done) return 'objective_chapter2';
     return this.objective === 'return' ? 'objective_return' : 'objective_collect';
   }
 
@@ -320,7 +375,6 @@ export class GameStateManager {
     this.endingId = '';
     this.progressKm = 0;
     this.onboardingShown = false;
-    this.currentState = 'GIFT_BOX';
     this.chapter = 1;
     this.chapter1Done = false;
     this.laps = 0;
@@ -628,11 +682,6 @@ export class GameStateManager {
     this.save();
   }
 
-  setState(s: GameState) {
-    this.currentState = s;
-    this._l.state(s);
-  }
-
   /** 展示用：让这一趟补齐成完满评级。演示与"跳过"用。 */
   fillFinishedRun() {
     for (let i = 0; i < 16; i++) this.seenStations.add(i);
@@ -674,7 +723,8 @@ export class GameStateManager {
       this.store.write(SAVE_KEY, JSON.stringify(blob));
       this._l.dirty();
     } catch {
-      /* 无痕模式 / 配额满：不落盘，游戏照跑 */
+      /* 无痕模式 / 配额满：不落盘，游戏照跑——但要说一次（`takeWriteFailed`） */
+      this.writeFailedOnce = true;
     }
   }
 
@@ -684,7 +734,11 @@ export class GameStateManager {
       if (!raw) return false;
       const blob = JSON.parse(raw) as SaveBlob;
       if (blob.version !== ECON.SAVE_VERSION) {
+        // 删档本身留着：旧格式读进来只会读到一半的数据，比删掉更糟。
+        // 补的是**把这件事说出来**（`takeSaveMigrated`）——
+        // 否则玩家的十几天进度无声消失，而这个游戏里进度是有期限的。
         this.clearSave();
+        this.migratedOnce = true;
         return false;
       }
       for (const [k, v] of Object.entries(blob.collected ?? {})) {
@@ -737,7 +791,8 @@ export class GameStateManager {
     try {
       this.store.remove(SAVE_KEY);
     } catch {
-      /* 忽略 */
+      /* 同一套浏览器策略：连删都做不了，那就更存不下了。同样只说一次。 */
+      this.writeFailedOnce = true;
     }
   }
 

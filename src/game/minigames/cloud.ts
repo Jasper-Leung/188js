@@ -85,10 +85,45 @@ const FLAT_Y = 30.7;
 const PATH_TOLERANCE = 45.0;
 const SUCCESS_THRESHOLD = 0.75;
 
-/** 游戏区（描边板）占屏的比例。轨迹的缩放和板子的位置都从它推出来，
- *  两处各写一份 `0.15 / 0.7` 必然漂。 */
+/**
+ * 描绘板（描边区）占屏的比例。轨迹的缩放和板子的位置都从它推出来，
+ * 两处各写一份 `0.15 / 0.7` 必然漂。
+ *
+ * ⚠ 这两个比例**只是上限，不是落点**——真正的落点在 `areaRectInto()`，
+ * 它把比例夹在 `AREA_MAX` / `AREA_MIN` 之间。见那里为什么必须有上下夹。
+ */
 const AREA_POS_FRAC = 0.15;
 const AREA_SIZE_FRAC = 0.70;
+
+/**
+ * 描绘板边长的**上限**（本地像素）。
+ *
+ * ## 为什么平板上要收窄
+ *
+ * 平板是这个游戏最舒服的设备：屏幕大、坐得远、手指点得准。
+ * 于是"把板子铺满屏"这种做法在手机上是对的（大就等于好点），
+ * 在平板上却是**反的**：
+ *
+ * · 1024×768 的横屏平板上，0.7 宽 = 717px。玩家用一根手指按住右下角拖，
+ *   要把手腕伸到屏幕外侧才够得着——**拇指的可达区在平板上比手机更靠内**，
+ *   因为平板握在两手之间而不是托在一只手里。
+ * · 于是描到板子右下角那一段云时，他得换手、或者把平板架在桌上——
+ *   而这一件本来是"随手画两笔就过"的过场。
+ *
+ * 夹到 560px 之后，717 → 560，两只手都够得着整块板子。
+ *
+ * ## 为什么下限是 240 而不是"不夹"
+ *
+ * 240px 是**手指能描**的下限：低于它，一根手指按下去会同时压住
+ * 相邻两段轮廓（`PATH_TOLERANCE` 45px 之外只剩很窄的边），
+ * 于是玩家会反复触发"描过了"却看不出描的是哪一段。
+ *
+ * 手机竖屏 390×844 上 `390 × 0.7 = 273`，本来就高于 240，**一个字都没变**——
+ * 这一条夹的是平板，不是在给手机缩水。
+ */
+const AREA_MAX = 560;
+const AREA_MIN = 240;
+
 /** 轮廓外接盒占板子的几成。留两成余量，免得描边线宽和落笔容差贴到板边。 */
 const FIT_FRAC = 0.88;
 
@@ -113,12 +148,28 @@ const BRUSH_SFX_MIN_SEC = 0.3;
 
 // ---------------------------------------------------------------- 板 / 条
 
-const areaRectInto = (out: Rect, w: number, h: number): void => {
-  out.x = w * AREA_POS_FRAC;
-  out.y = h * AREA_POS_FRAC;
-  out.w = w * AREA_SIZE_FRAC;
-  out.h = h * AREA_SIZE_FRAC;
-};
+/**
+ * 描绘板的落位。**上下都夹**——见 `AREA_MAX` / `AREA_MIN` 那两条理由。
+ *
+ * 横向居中，纵向从 `AREA_POS_FRAC` 起往下摆，再按**可用的那一带**居中：
+ * 上面要给标题让开，下面要给进度条与那行操作提示让开。
+ * 只按屏高乘一个系数的话，板子底沿会顶到条上（那是同一类毛病：
+ * 压在条上和压在图形上，玩家都读不出来）。
+ *
+ * **导出来**：判据要量的是这块板子在手机 / 平板 / 桌面三种尺寸下
+ * 各自的边长与落位，而不是抄一遍这里的算式。
+ */
+export function areaRectInto(out: Rect, w: number, h: number): void {
+  const top = h * AREA_POS_FRAC;
+  // 进度条在 h*0.88，条高 BAR_H。板子底沿留一条 HINT_GAP 就够画提示行。
+  const band = Math.max(0, h * BAR_Y_FRAC - BAR_H - top - HINT_GAP - HINT_LINE_H);
+  const bw = Math.min(Math.max(w * AREA_SIZE_FRAC, AREA_MIN), AREA_MAX);
+  const bh = Math.min(Math.max(Math.min(h * AREA_SIZE_FRAC, band), AREA_MIN), AREA_MAX);
+  out.w = bw;
+  out.h = bh;
+  out.x = (w - bw) * 0.5;
+  out.y = top + Math.max(0, band - bh) * 0.5;
+}
 
 /**
  * 团状轮廓：绕中心每条射线上取**最远**的一处圆周。
@@ -218,6 +269,19 @@ class CloudGame implements MiniGame {
 
   private started = false;
   private dragging = false;
+
+  /**
+   * 玩家刚才用的是指针还是键盘。
+   *
+   * **不读 `matchMedia('(pointer: coarse)')`**——那是宿主已经做过的判断
+   * （`main.ts` 按它决定挂不挂触屏控件），而小游戏这一层拿不到。
+   * 硬要在这一层再判一次就多出一个真相来源，两处迟早不一致，
+   * 症状是"平板上没挂摇杆，可小游戏还在教人用方向键"。
+   *
+   * 所以反过来：**看玩家实际做了什么**。第一下落笔 → 指针模式，
+   * 第一次按键 → 键盘模式。零外部输入，天然和玩家手上的设备对得上。
+   */
+  private usedPointer = false;
 
   /** 键盘光标。 */
   private kx = 0;
@@ -363,6 +427,7 @@ class CloudGame implements MiniGame {
 
   onPointerDown(x: number, y: number): void {
     if (this.finished) return;
+    this.usedPointer = true;
     // 热区判在"当成落笔"之前，顺序反了就变成点了取消反而落一笔。
     if (pointInRect(this.cancelBtn, x, y)) { this.finish('cancel'); return; }
     this.dragging = true;
@@ -385,6 +450,9 @@ class CloudGame implements MiniGame {
 
   onKeyDown(key: string, _shift: boolean): boolean {
     if (this.finished) return false;
+    // 任何一个游戏键都算"键盘模式"——Escape 也算，
+    // 因为触屏玩家看不见键盘上那行提示，而键盘玩家看得见。
+    if (key !== 'Escape') this.usedPointer = false;
     if (key === 'Escape') { this.finish('cancel'); return true; }
     if (key === 'Space') {
       this.kDown = true;
@@ -518,13 +586,21 @@ class CloudGame implements MiniGame {
 
     drawCancel(g, this.cancelBtn, tf(this.sh, 'mg_cancel'));
 
-    // 键盘光标：没有它键盘玩家看不见自己在哪儿，只能盲按方向键
-    line(g, this.kx - 9, this.ky, this.kx + 9, this.ky, accent, 2);
-    line(g, this.kx, this.ky - 9, this.kx, this.ky + 9, accent, 2);
+    // 键盘光标：没有它键盘玩家看不见自己在哪儿，只能盲按方向键。
+    // **只在玩家真的在用键盘时画**：指针模式下一枚十字还杵在板子上，
+    // 而它既不跟着手指走、也不能点——图上读出来是"这里卡了"。
+    if (!this.usedPointer) {
+      line(g, this.kx - 9, this.ky, this.kx + 9, this.ky, accent, 2);
+      line(g, this.kx, this.ky - 9, this.kx, this.ky + 9, accent, 2);
+    }
 
     // 操作提示行。落位走 `hintTop()`：原来它写死 `h * 0.8`，而 720p 上要描的云下缘
     // 在 563px、这行字的基线在 576px——**字横穿在要描的那条轮廓上**。
-    const hintText = tf(this.sh, 'mg_cloud_hint');
+    //
+    // 提示**跟着玩家刚才用的那套输入走**（见 `usedPointer` 的注释）：
+    // 写死"方向键 / 空格"的话，触屏玩家读到的全是自己按不着的键，
+    // 而这一屏的失败模式恰好是"我不知道该怎么描"。
+    const hintText = tf(this.sh, this.usedPointer ? 'mg_cloud_hint_touch' : 'mg_cloud_hint');
     const hintW = Math.max(textW(g, hintText, HINT_FONT), 1) + 4;
     const top = hintTop(h, this.pathBottomY, this.bar);
     // 基线，不是行盒顶：字形要从行盒顶往下长

@@ -19,7 +19,7 @@
  */
 import { Group, Vector3, type PerspectiveCamera } from 'three';
 import { RIDE } from '../data/raw';
-import { CENTERLINE, nearestArcParam } from '../data/route';
+import { distToCenterline, pointAtArcLength, nearestArcParam, TOTAL_ARCLENGTH } from '../data/route';
 import { Terrain } from './terrain';
 import { Road, ROAD } from './road';
 import { Vehicle, MODE_TUNE, type RideMode } from './vehicle';
@@ -77,6 +77,65 @@ export function offRoadFactorFor(lateral: number): number {
   const over = lateral - ROAD.TOTAL_HALF_WIDTH - OFFROAD.GRACE;
   if (over <= 0) return 1;
   return 1 - Math.min(over / OFFROAD.RAMP, 1) * (1 - OFFROAD.FACTOR);
+}
+
+/**
+ * ## 交叉口的"停一拍"
+ *
+ * 8 字自交点是全图唯一一个**空间本身就是台词**的位置（「路自此复」）。
+ * 那句话不锁操作、不停车——这个游戏的力量在"你一直在路上"。
+ * 但什么都不做地骑过去，它就只是地图上的一个岔。
+ *
+ * 所以车**停一拍**：极速被压到四分之一，半秒后放开。
+ * 玩家得到的不是过场，是"车速忽然慢了半拍，而这三个字正好在屏幕上"——
+ * 世界用运动学附和了那句话，然后放玩家继续走。
+ *
+ * 压极速而不 `speed = 0`：和离路惩罚同一条理由（`applyOffRoad` 注释）——
+ * 刹停会把车钉在原地，玩家以为出了 bug；压极速松手就恢复。
+ * 也不叠加：连拍两次取较长的那个（`Math.max`），不会越压越慢。
+ */
+export const MOMENT = {
+  /** 一次停一拍持续多少秒。一秒以内：再长就从"一拍"变成"卡顿"。 */
+  HOLD: 0.6,
+  /** 停一拍期间极速的系数。0.25 ≈ 慢到 clearly 察觉得到，又不至于像撞墙。 */
+  FACTOR: 0.25,
+} as const;
+
+/**
+ * 把 (x, z) 投影到中心线，并给出**顺着这条路**的出生朝向。
+ *
+ * ## 为什么要它，而不是各处自己算
+ *
+ * `spawn(x, z, heading)` 里 `heading = 0` 表示车头朝 **(0, 0, −1)**，
+ * 而 `fixedUpdate` 里前向是 `(−sin h, 0, −cos h)`。于是要让车头沿切向
+ * `(dx, dz)`，必须解出 `h = atan2(−dx, −dz)`——**那个负号漏掉就是整整 180°**，
+ * 而车仍然站在路面正中，`onRoad()` 照样返回 true，什么症状都看不出来。
+ *
+ * 这个换算原来在三个地方各写一遍，三遍都不对：
+ *
+ *   · `World` 构造（**玩家的真实起点**）传的是 `0`，与路面差 158.5°；
+ *   · `teleportToStation` 同上；
+ *   · `teleportToArc` 写了切向但漏了负号，正好朝反。
+ *
+ * 唯一算对的那一处在 `verify/ride.ts` 的测试夹具里——**回归在自己身上
+ * 做了修正，于是它测的就不再是产品给玩家的东西**。
+ * 所以这个函数放在 `Ride` 旁边：朝向和前向的换算是这一类的定义，
+ * 让判据能问真代码，而不是再抄一份公式（抄的那份早晚和实现漂）。
+ *
+ * `verify_spawn_heading` 守它。
+ */
+export function roadHeadingAtArc(s: number): number {
+  const a = pointAtArcLength(Math.max(0, s - 2)).pos;
+  const b = pointAtArcLength(Math.min(TOTAL_ARCLENGTH, s + 2)).pos;
+  // **负号不能少**：`fixedUpdate` 里前向是 (−sin h, 0, −cos h)，
+  // 要让它等于切向 (dx, dz)，解出来的是 atan2(−dx, −dz)。
+  return Math.atan2(-(b.x - a.x), -(b.z - a.z));
+}
+
+export function roadSpawnPose(x: number, z: number): { x: number; z: number; heading: number } {
+  const s = nearestArcParam(x, z) * TOTAL_ARCLENGTH;
+  const p = pointAtArcLength(s).pos;
+  return { x: p.x, z: p.z, heading: roadHeadingAtArc(s) };
 }
 
 /**
@@ -173,6 +232,16 @@ export class Ride {
   private offRoadFactor = 1;
   /** 本帧是否在路肩外。HUD 用它显示/隐藏提示，避免每帧比较浮点数。 */
   private offRoadNow = false;
+  /**
+   * 本帧偏出路面**多少米**（0 = 在路上）。
+   *
+   * 它和 `offRoadNow` **在同一个函数里赋值**，因为这两个数回答的是同一件事：
+   * 分开算的时候它们已经骗过人一次——观测里同时出现
+   * `onRoad: true` 和 `offRoad: 2.81`，一个布尔说在路上，一个数字说偏出去两米八。
+   */
+  private offRoadMetersValue = 0;
+  /** 停一拍还剩多少秒（交叉口那一刹）。归零就恢复极速。 */
+  private momentTimer = 0;
   private camPos = new Vector3();
   private camLook = new Vector3();
   private camInit = false;
@@ -204,6 +273,7 @@ export class Ride {
     this.position.set(x, this.groundHeight(x, z), z);
     this.heading = heading;
     this.speed = 0;
+    this.momentTimer = 0;
     this.camInit = false;
     this.hasLastPos = false;
   }
@@ -238,6 +308,16 @@ export class Ride {
    *  _speed 还在，于是它会贴着墙"蹭"着走：每帧被推回、每帧又往里冲。 */
   dampSpeed(f: number) {
     this.speed *= f;
+  }
+
+  /**
+   * 停一拍（交叉口专用）。连次调用取较长的那次，不叠加。
+   *
+   * 语义是"让世界静半拍来附和一句话"，不是一个 debuff：
+   * 计时器归零即恢复，没有减速尾巴，也不改任何输入状态。
+   */
+  holdMoment(seconds: number) {
+    this.momentTimer = Math.max(this.momentTimer, seconds);
   }
 
   /** 定步长。dt 恒定。 */
@@ -287,7 +367,24 @@ export class Ride {
 
     this.applyCollisions(dt);
     this.applyOffRoad(dt, tune);
+    this.applyMoment(dt, tune);
     this.position.y = this.groundHeight(this.position.x, this.position.z);
+  }
+
+  /**
+   * 停一拍：压极速，计时器归零就恢复（定义见 `MOMENT` 的注释）。
+   *
+   * 排在 `applyOffRoad()` 之后：两者都是"压极速"，而离路惩罚的判据
+   * （`getHeightAt` 不可达）在这一帧已经问过一次——停一拍不看路面，
+   * 只是在已经算好的 `tune.maxSpeed` 上再乘一个系数。谁也不会清零谁。
+   */
+  private applyMoment(dt: number, tune: { maxSpeed: number }) {
+    if (this.momentTimer <= 0) return;
+    this.momentTimer -= dt;
+    const capF = tune.maxSpeed * MOMENT.FACTOR;
+    const capR = REVERSE_SPEED * MOMENT.FACTOR;
+    if (this.speed > capF) this.speed = capF;
+    else if (this.speed < -capR) this.speed = -capR;
   }
 
   /**
@@ -303,6 +400,7 @@ export class Ride {
     if (Number.isFinite(this.road.getHeightAt(p.x, p.z))) {
       this.offRoadFactor = 1;
       this.offRoadNow = false;
+      this.offRoadMetersValue = 0;
       return;
     }
     const lateral = this.lateralDistance(p.x, p.z);
@@ -310,10 +408,12 @@ export class Ride {
     if (k >= 1) {
       this.offRoadFactor = 1;
       this.offRoadNow = false;
+      this.offRoadMetersValue = 0;
       return;
     }
     this.offRoadNow = true;
     this.offRoadFactor = k;
+    this.offRoadMetersValue = Math.max(0, lateral - ROAD.TOTAL_HALF_WIDTH - OFFROAD.GRACE);
     const capF = tune.maxSpeed * k;
     const capR = REVERSE_SPEED * k;
     if (this.speed > capF) this.speed = capF;
@@ -321,19 +421,39 @@ export class Ride {
   }
 
   /**
-   * 到中心线的横向距离（米）。
+   * 到中心线的横向距离（米）。`applyOffRoad()` 判降速用的就是这一个值。
    *
-   * 用 `nearestArcParam` 拿最近中心线**点**再量距离，而不是逐段算垂足：
-   * 中心线每 ~1.28m 一个点，所以这个近似最多偏 **0.64m**——对"要不要降速"
-   * 足够，而它换来的是一次走空间哈希的查询而不是 961 次投影。
+   * ## 为什么是 `distToCenterline()` 而不是"弧长→点→量距离"
    *
-   * 8 字自交点附近会量到**另一支**的距离，于是偏大。偏大意味着多吃一点惩罚，
-   * 方向是安全的（不会让人在自交口白捡一路畅通），所以不做修正。
+   * 原来那一步是 `round(nearestArcParam(x, z) * (CENTERLINE.length - 1))`
+   * 再取那个点——它**假设 961 个点在弧长上是均匀分布的**，而它们不是：
+   * 这条中心线是 48 段曲线各插值 20 个点，加一条长直线，
+   * 于是点距在几厘米到几十米之间差着两个数量级。
+   * 拿弧长比例当下标，取到的点可以离真正最近的那个差好几米。
+   *
+   * 实测：车明明骑在沥青上，`lateral` 却报 **8.31m**，
+   * 于是同一个观测里 `onRoad: true` 和 `offRoad: 2.81` 同时成立——
+   * 一个布尔说在路上，一个数字说偏出去两米八，而它们问的是同一件事。
+   *
+   * `distToCenterline()` 本来就在 `data/route.ts` 里，逐段算垂足、扫全路径
+   * （8 字的两支互相靠近时也正确），是给植被散布判定用的同一份。
+   * 961 次投影是一次几千次的浮点运算，每帧调两次可以忽略，
+   * 而省掉它换来的是一个**自己都不信**的数字。
    */
   private lateralDistance(x: number, z: number): number {
-    const i = Math.round(nearestArcParam(x, z) * (CENTERLINE.length - 1));
-    const c = CENTERLINE[Math.min(Math.max(i, 0), CENTERLINE.length - 1)];
-    return Math.hypot(c.x - x, c.z - z);
+    return distToCenterline(x, z);
+  }
+
+  /**
+   * 到中心线的横向距离（米）。`applyOffRoad()` 判降速用的就是这一个值。
+   *
+   * 导出来是因为 AI 观测要报「离路多少米」。**不许在接口那边重算一遍**：
+   * 重算的那一份早晚会和这一份漂，而漂了以后 AI 会拿到一个
+   * 和游戏实际降速依据**对不上**的数字——
+   * 症状是"AI 觉得已经偏出去很远了，车却还是满速"，极难归因。
+   */
+  get lateral(): number {
+    return this.lateralDistance(this.position.x, this.position.z);
   }
 
   /**
@@ -546,6 +666,18 @@ export class Ride {
   /** 路肩外（正在吃降速惩罚）。 */
   get offRoad() {
     return this.offRoadNow;
+  }
+
+  /**
+   * 偏出路面多少米（0 = 在路上）。
+   *
+   * AI 观测要报「离路多远」，**只准读这里**：
+   * 观测那边自己拿 `lateral` 重算一份的话，两份迟早漂，
+   * 而漂了以后 AI 会拿到一个和游戏实际降速依据对不上的数字——
+   * 症状是"AI 觉得已经偏出去很远了，车却还是满速"，极难归因。
+   */
+  get offRoadMeters(): number {
+    return this.offRoadMetersValue;
   }
 
   get forward(): Vector3 {

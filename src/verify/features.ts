@@ -1,0 +1,814 @@
+/**
+ * 本轮三件新内容的判据 —— 茶倒水 / 路边躲避挑战 / 琴音林自由演奏。
+ *
+ * ## 为什么单独成文件而不是塞回 `entry.ts`
+ *
+ * `entry.ts` 已经连着多轮只涨不跌（见 AGENTS.md §3）。这三族是**新加的**，
+ * 不是从别处搬来的——所以按已有的形状建一个新族（导出
+ * `registerFeatureChecks(check)`，由 `entry.ts` 在原位调用一次），
+ * 而不是让 `entry.ts` 再长三百行。
+ *
+ * 形状与 vehicle / delivery / scenery / ai 那五族一致：
+ * **注册表留在 `entry.ts`**，本文件只拿得到 `CheckFn`。
+ *
+ * ## 这一族量的是「不成立时会怎样」，不是「成立时好不好」
+ *
+ * 三件新东西各自有一条**失败时极安静**的判据：
+ *   · 茶：水柱画在屏外 / 倒水期间就交出结果 → 图上只是"水没对上口"。
+ *   · 躲避：布局把路封死 → 玩家读成"我开得不好"，不会读成"这游戏耍我"。
+ *   · 古琴：某一格小于手指 / 某一键映射不到 → 触屏玩家永远弹不出那一个音。
+ * 这一族量的全是这三条。
+ */
+import { expect, fakeCtx } from './harness';
+import type { CheckFn } from './harness';
+import {
+  BIKE_HALF_WIDTH,
+  DodgeRun,
+  OBSTACLE,
+  SIGN_STANDOFF,
+  planObstacles,
+  signSide,
+  signStandoff,
+  signSite,
+} from '../game/challenge';
+import { ROAD } from '../world/road';
+import { Obstacles, buildSign } from '../world/obstacles';
+import type { Terrain } from '../world/terrain';
+import { TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import {
+  QIN_CELL_MIN,
+  QIN_KEYS,
+  QIN_KEYS_NUMPAD,
+  QIN_NOTES,
+  QIN_OCTAVES,
+  QIN_STRINGS,
+  boardRectInto,
+  cellRectInto,
+  createQinGame,
+  noteForKey,
+  qinHintLayout,
+} from '../game/minigames/qin';
+import { MINI_GAME_IDS, createMiniGame } from '../game/minigames';
+import { areaRectInto } from '../game/minigames/cloud';
+import { POUR_TILT, pourCupRect, pourSpoutTip, createTeaGame } from '../game/minigames/tea';
+import type { MiniGameContext, MiniGameResult } from '../game/minigames/types';
+import type { Rect } from '../game/minigames/chrome';
+
+/** 判据里要量的那几种视口。**必须包含手机竖屏与平板**，因为这三条全是触屏判据。 */
+const VIEWPORTS: readonly (readonly [string, number, number])[] = [
+  ['手机竖屏 390×844', 390, 844],
+  ['手机横屏 844×390', 844, 390],
+  ['平板竖屏 768×1024', 768, 1024],
+  ['平板横屏 1024×768', 1024, 768],
+  ['桌面 1920×1080', 1920, 1080],
+];
+
+/**
+ * 一个空的 `Rect` 盒子。
+ *
+ * 三条落位函数（`boardRectInto` / `cellRectInto` / `areaRectInto`）都是
+ * **就地填**而不是返回新对象——它们每个固定步长/每次 resize 都会调一次，
+ * 而新建对象意味着每帧一次分配。所以调用处一律是「先拿盒子，再让它填」。
+ */
+function rect(x = 0, y = 0, w = 0, h = 0): Rect {
+  return { x, y, w, h };
+}
+
+/**
+ * 木牌 + 二十二块石头的三角面上限。
+ *
+ * 定在这里而不是散在 `obstacles.ts` 里：它是**这一族的契约**，
+ * 而判据与被它量的东西住在两个文件里——放进被测模块就变成自证。
+ *
+ * 参考量：五件旧物合计不到 1200 面（`verify_relics` 量过），
+ * 而石头是**路面上的常客**（车轮旁边那一圈），比路肩上的旧物近得多，
+ * 所以给到 1100 已经比"五件旧物的总量"相当，而实测约 1050。
+ * 第一版实测 1248 —— 超了将近两百面，来源是那个 5×12 的筐环，
+ * 降到 4×9 之后才落进来（见 `obstacles.ts` 里那条注释）。
+ */
+const OBSTACLE_TRI_BUDGET = 1100;
+
+export function registerFeatureChecks(check: CheckFn): void {
+  registerDodgeChecks(check);
+  registerQinChecks(check);
+  registerTeaPourChecks(check);
+  registerBoardChecks(check);
+}
+
+// ---------------------------------------------------------------- 路边躲避挑战
+
+/**
+ * **布局不许把路封死。**这是这一族里唯一真正承重的一条。
+ *
+ * 量的是两条：
+ *   ① 每块石头**连着半径**都还在路面之内（`lateral + radius ≤ 路半宽`）
+ *      ——否则「躲过去」的唯一办法是离路，而离路要吃降速惩罚，
+ *      那一圈会变成"一边掉速一边躲"。
+ *   ② 相邻两块**永不落在同一条车道**——横向永远还剩三条通路。
+ *
+ * 加上"沿路间隔 ≥ MIN_GAP"，玩家读到的才是"几块石头"，不是"一堵墙"。
+ */
+function registerDodgeChecks(check: CheckFn): void {
+  check('verify_dodge_layout', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    const half = ROAD.TOTAL_HALF_WIDTH;
+    for (const seed of [1, 7, 99, 2026, 65535]) {
+      const list = planObstacles(seed, 0);
+
+      asserts++;
+      if (list.length !== OBSTACLE.COUNT) {
+        probs.push(`seed ${seed}：铺了 ${list.length} 块，应为 ${OBSTACLE.COUNT}`);
+      }
+
+      for (const o of list) {
+        asserts++;
+        if (Math.abs(o.lateral) + o.radius > half) {
+          probs.push(
+            `seed ${seed} #${o.index}：横向 ${o.lateral.toFixed(2)}m + 半径 ${o.radius.toFixed(2)}m 越过路沿 ${half}m`,
+          );
+        }
+        asserts++;
+        if (o.radius < OBSTACLE.R_MIN - 1e-9 || o.radius > OBSTACLE.R_MAX + 1e-9) {
+          probs.push(`seed ${seed} #${o.index}：半径 ${o.radius.toFixed(2)} 超出约定区间`);
+        }
+      }
+
+      // 相邻两块不许同车道。按弧长排一遍再比——
+      // `planObstacles` 生成时是按 i 递增的，落盘顺序也就是弧长顺序。
+      for (let i = 1; i < list.length; i++) {
+        asserts++;
+        if (list[i].lateral === list[i - 1].lateral) {
+          probs.push(`seed ${seed}：#${i - 1} 与 #${i} 落在同一条车道（${list[i].lateral}m），横向只剩一条通路`);
+        }
+      }
+
+      // 沿路间隔
+      const gaps = list.map((o, i) => {
+        const d = i === 0 ? o.s - list[list.length - 1].s : o.s - list[i - 1].s;
+        return d + TOTAL_ARCLENGTH;
+      });
+      for (const d of gaps) {
+        asserts++;
+        if (d < OBSTACLE.MIN_GAP - 1e-6) {
+          probs.push(`seed ${seed}：有一对石头只隔 ${d.toFixed(1)}m < ${OBSTACLE.MIN_GAP}m`);
+        }
+      }
+
+      // 起手不能贴脸
+      asserts++;
+      const first = Math.min(...list.map((o) => o.s));
+      if (first < OBSTACLE.LEAD_IN - 1e-6) {
+        probs.push(`seed ${seed}：起手 ${OBSTACLE.LEAD_IN}m 内就有石头（${first.toFixed(1)}m）`);
+      }
+    }
+
+    // 同一个种子必须给出同一套布局：玩家中途退出再回来，
+    // 石头不该换位置——那读起来是"这个游戏在改我的路"。
+    asserts++;
+    const a = planObstacles(42, 0).map((o) => `${o.s.toFixed(4)}:${o.lateral}`).join('|');
+    const b = planObstacles(42, 0).map((o) => `${o.s.toFixed(4)}:${o.lateral}`).join('|');
+    if (a !== b) probs.push('同一个种子给出了两套不同的布局');
+
+    // **三角面预算 + 木牌在撤走之后必须还在**。
+    // 用假地形（`getHeightAt` 恒 0）：面数与高程无关。
+    // 木牌自身的面数单独量一次——撤走之后剩下的**就该**是它，
+    // 而不为零（不为 0）正是"木牌还挂着"这句话的证据。
+    const signOnly = new Obstacles();
+    signOnly.group.add(buildSign());
+    const signCost = signOnly.triangleCount();
+
+    const obs = new Obstacles();
+    const sign = buildSign();
+    obs.group.add(sign);
+    obs.place(planObstacles(3, 0), { getHeightAt: () => 0 } as unknown as Terrain);
+    const tris = obs.triangleCount();
+    asserts++;
+    if (tris > OBSTACLE_TRI_BUDGET) {
+      probs.push(`木牌 + ${OBSTACLE.COUNT} 块石头共 ${tris} 面，超过预算 ${OBSTACLE_TRI_BUDGET}`);
+    }
+    obs.clear();
+    // 撤走之后**木牌仍在**（它挂的是 `group`，`clear()` 只按 `stones.visible`），
+    // 所以剩下的面数恰好是木牌那一块——不为零才是对的。
+    asserts++;
+    if (obs.triangleCount() !== signCost) {
+      probs.push(`撤走石头之后还剩 ${obs.triangleCount()} 面，木牌本身是 ${signCost} 面——石头没撤干净`);
+    }
+    asserts++;
+    if (sign.parent !== obs.group) probs.push('撤走石头之后木牌跟着不见了 —— 路肩上什么都没有了');
+
+    const summary = `${OBSTACLE.COUNT} 块 · 三条车道轮换 · 相邻不同道 · 最小间隔 ${OBSTACLE.MIN_GAP}m · 全在路内 · 木牌+石头 ${tris} 面`;
+    return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+  });
+
+  /**
+   * **绕一圈的判定**——进度怎么涨、碰了怎么收、绕满怎么成。
+   *
+   * 掉头那一支是重点：只把**正的**弧长差累加进去，
+   * 所以往回骑不会把进度推上去。而"骑满 1.0 才算一圈"，
+   * 所以在半路停下永远不算成。
+   */
+  check('verify_dodge_lap', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 一趟干干净净地绕完。
+    //
+    // **必须真的会躲**：正中那一档车道上就摆着石头，
+    // 而骑手骑的是**车把中心**——沿中心线走是必撞的。
+    // 所以这里跑一个最简单的闭环：看前方最近的那块，
+    // 挑离它最远的一条车道过去。这条闭环本身就是一句断言：
+    // 「这一圈有解」。
+    const run = new DodgeRun();
+    run.start(0, 7);
+    asserts++;
+    if (run.state !== 'running') probs.push('起跑之后状态不是 running');
+
+    // N 步走满 1.0 —— 循环上界是 `<= N` 而不是 `< N`：
+    // `arc = (i/N) % 1` 在 i = N-1 时才到 0.99983，**差那 0.00017 就绕不满一圈**，
+    // 而症状是「明明骑完一圈却没判成」，看起来像圈数判定坏了。
+    const N = 6000;
+    let lateral = 0;
+    let won = false;
+    for (let i = 0; i <= N && !won; i++) {
+      const arc = (i / N) % 1;
+      const here = arc * TOTAL_ARCLENGTH;
+      // 前方 2–45m 内的**所有**石头
+      const cands: { lateral: number }[] = [];
+      for (const o of run.obstacles) {
+        let ds = o.s - here;
+        if (ds > TOTAL_ARCLENGTH / 2) ds -= TOTAL_ARCLENGTH;
+        if (ds < -TOTAL_ARCLENGTH / 2) ds += TOTAL_ARCLENGTH;
+        if (ds > 2 && ds < 45) cands.push(o);
+      }
+      // 挑一条「到前方每一块都够远」的车道。
+      // 判据是**最差的那一块**而不是最近的那一块：只看最近一块的话，
+      // 会出现"绕过第一块、第二块正在把车等回来"的那种死法。
+      let want = lateral;
+      if (cands.length) {
+        let best = OBSTACLE.LANES[0];
+        let bd = -Infinity;
+        for (const L of OBSTACLE.LANES) {
+          let worst = Infinity;
+          for (const o of cands) worst = Math.min(worst, Math.abs(L - o.lateral));
+          if (worst > bd) {
+            bd = worst;
+            best = L;
+          }
+        }
+        want = best;
+      }
+      // 前方没有石头时**保持**横向，不回正。
+      // 回正这一下是致命的：刚躲开的那块石头还在身后 1m，
+      // 车一横移就正好插回它身上——第一版就死在这儿。
+      lateral += (want - lateral) * 0.3;
+      const f = frameAt(arc);
+      if (run.step(arc, f.x + f.rx * lateral, f.z + f.rz * lateral)?.type === 'won') won = true;
+    }
+    asserts++;
+    if (!won) probs.push('一个会躲的骑手绕满一圈仍然没有 won —— 这一圈无解，或者圈数判定坏了');
+    asserts++;
+    if (run.progress < 1) probs.push(`won 之后进度是 ${run.progress}，应为 1`);
+    asserts++;
+    if (run.state !== 'won') probs.push(`won 之后状态是 ${run.state}`);
+
+    // **骑中心线必撞**：正中那一档车道上摆着石头，
+    // 而这一条是"没有躲避可言"的反证。
+    const straight = new DodgeRun();
+    straight.start(0, 7);
+    let straightHit = false;
+    for (let i = 0; i < N && !straightHit; i++) {
+      const arc = (i / N) % 1;
+      const f = frameAt(arc);
+      if (straight.step(arc, f.x, f.z)?.type === 'hit') straightHit = true;
+    }
+    asserts++;
+    if (!straightHit) {
+      probs.push('一路骑中心线也撞不到 —— 正中那档车道没摆石头，这一条就没有躲避可言');
+    }
+
+    // 掉头不涨分
+    const back = new DodgeRun();
+    back.start(0, 7);
+    for (let i = 1; i <= 200; i++) {
+      const arc = (((-i * 0.0005) % 1) + 1) % 1;
+      const f = frameAt(arc);
+      back.step(arc, f.x, f.z);
+    }
+    asserts++;
+    if (back.progress > 0.001) {
+      probs.push(`一路往回骑却涨了 ${(back.progress * 100).toFixed(2)}% 的进度——掉头也加分，这一圈就不叫一圈`);
+    }
+
+    // 撞到就收，且不再继续加分
+    const hit = new DodgeRun();
+    hit.start(0, 7);
+    const target = hit.obstacles[5];
+    let ev: ReturnType<DodgeRun['step']> = null;
+    // 从石头前方 6m 骑进它怀里
+    for (let i = -20; i <= 0 && !ev; i++) {
+      ev = hit.step(target.s / TOTAL_ARCLENGTH, target.x, target.z);
+    }
+    asserts++;
+    if (!ev || ev.type !== 'hit') probs.push('把车开到石头正中心却没有判撞');
+    asserts++;
+    if (hit.state !== 'hit') probs.push(`撞了之后状态是 ${hit.state}`);
+    asserts++;
+    if (hit.hitIndex !== target.index) probs.push('撞了但记错了是哪一块');
+
+    // 撞过之后那一趟必须彻底停掉：再走一百圈也不许再报 won
+    const after = hit.state;
+    let rewon = false;
+    for (let i = 0; i < N; i++) {
+      const arc = (i / N) % 1;
+      const f = frameAt(arc);
+      if (hit.step(arc, f.x, f.z)?.type === 'won') rewon = true;
+    }
+    asserts++;
+    if (after !== 'hit' || rewon) probs.push('撞过之后仍然能绕出 won——这一趟没有结束');
+
+    // 车把半宽这一项不能是零：判据要确认"贴上去"真的会判撞
+    asserts++;
+    if (BIKE_HALF_WIDTH <= 0) probs.push('车把半宽是 0，等于没有碰撞');
+
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '会躲的骑手绕满一圈 / 骑中心线必撞 / 掉头不加分 / 撞了即收', asserts);
+  });
+
+  /**
+   * 木牌钉在哪：远的那一侧，而且**真的离得开驿站**。
+   *
+   * 钉错一侧的症状是"木牌落进某座驿站的院子里"——
+   * 玩家远远看见的是一座亭子，走过去才发现地上插了块板子。
+   */
+  check('verify_dodge_sign', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    for (const arcT of [0.42, 0.1, 0.6, 0.85]) {
+      const side = signSide(arcT);
+      const chosen = signStandoff(side, arcT);
+      const other = signStandoff(side === 1 ? -1 : 1, arcT);
+      asserts++;
+      if (chosen < SIGN_STANDOFF) {
+        probs.push(`arcT=${arcT}：选中的那一侧离驿站只有 ${chosen.toFixed(1)}m < ${SIGN_STANDOFF}m`);
+      }
+      asserts++;
+      if (other > chosen) {
+        probs.push(`arcT=${arcT}：选了离驿站 ${chosen.toFixed(1)}m 的那一侧，另一侧有 ${other.toFixed(1)}m——不是更远的那侧`);
+      }
+      // 纯函数：同一个弧长算两次要得到同一个答案
+      asserts++;
+      if (signSide(arcT) !== side) probs.push(`arcT=${arcT}：signSide 不是纯函数`);
+      // 木牌真的在路肩外
+      const p = signSite(arcT, side);
+      asserts++;
+      if (Math.abs(p.x) === 0 && Math.abs(p.z) === 0) probs.push(`arcT=${arcT}：木牌落位是原点`);
+    }
+    const summary = `木牌离最近驿站 ≥ ${SIGN_STANDOFF}m · 取更远的一侧 · 纯函数`;
+    return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
+  });
+}
+
+// ---------------------------------------------------------------- 琴音林自由演奏
+
+function registerQinChecks(check: CheckFn): void {
+  /**
+   * 二十一个音，二十一个键，**一对一**。
+   *
+   * 两个方向都要量：
+   *   · 每个音都被某个键弹得到（漏一条 = 有一个音怎么按都出不来）
+   *   · 每个键只对应一个音（两个键撞成一个音 = 按哪个都一样）
+   */
+  check('verify_qin_keys', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    asserts++;
+    if (QIN_NOTES !== QIN_STRINGS * QIN_OCTAVES) {
+      probs.push(`音数 ${QIN_NOTES} ≠ ${QIN_STRINGS} × ${QIN_OCTAVES}`);
+    }
+    asserts++;
+    if (QIN_NOTES !== 21) probs.push(`三个八度 × 七根弦应是 21 个音，实际 ${QIN_NOTES}`);
+
+    // 键位表逐项验
+    const seen = new Map<string, number>();
+    for (let o = 0; o < QIN_OCTAVES; o++) {
+      asserts++;
+      if (QIN_KEYS[o].length !== QIN_STRINGS) {
+        probs.push(`八度 ${o} 只有 ${QIN_KEYS[o].length} 个键，应为 ${QIN_STRINGS}`);
+      }
+      for (let s = 0; s < QIN_STRINGS; s++) {
+        const key = QIN_KEYS[o][s];
+        const note = o * QIN_STRINGS + s;
+        asserts++;
+        if (noteForKey(key) !== note) {
+          probs.push(`${key} 映射到 ${noteForKey(key)}，应是 ${note}`);
+        }
+        asserts++;
+        if (seen.has(key)) probs.push(`${key} 被两个音抢了（${seen.get(key)} 与 ${note}）`);
+        seen.set(key, note);
+      }
+    }
+
+    // 小键盘只补**高八度**：低/中两行没有小键盘键，
+    // 而把 `Numpad1..7` 填成三行的话，第 0 个八度会先把它认领走——
+    // 于是外接键盘上按小键盘响的是最低那根弦，屏上却写着「高八度」。
+    for (let s = 0; s < QIN_STRINGS; s++) {
+      asserts++;
+      const want = (QIN_OCTAVES - 1) * QIN_STRINGS + s;
+      if (noteForKey(`Numpad${s + 1}`) !== want) {
+        probs.push(`Numpad${s + 1} 映射到 ${noteForKey(`Numpad${s + 1}`)}，应是高八度第 ${s + 1} 弦（${want}）`);
+      }
+    }
+    asserts++;
+    if (QIN_KEYS_NUMPAD.length !== QIN_STRINGS) {
+      probs.push(`小键盘补了 ${QIN_KEYS_NUMPAD.length} 个键，应为 ${QIN_STRINGS}`);
+    }
+    // 不该弹的键
+    for (const k of ['Space', 'Escape', 'KeyA', 'Digit0', 'F5', 'Unidentified']) {
+      if (k === 'Escape') continue; // Esc 是退出，不是音
+      asserts++;
+      if (noteForKey(k) !== -1) probs.push(`${k} 被当成了一个音`);
+    }
+
+    // **它不在轮换表里**：加进去会把 15 局重排成 18 局
+    asserts++;
+    if ((MINI_GAME_IDS as readonly string[]).includes('qin')) {
+      probs.push('`qin` 进了 MINI_GAME_IDS —— 自由演奏会把 15 局重排');
+    }
+    asserts++;
+    if (MINI_GAME_IDS.length !== 5) probs.push(`轮换表变成 ${MINI_GAME_IDS.length} 项了`);
+
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '21 个音 ↔ 21 个键，含小键盘；不进轮换表', asserts);
+  });
+
+  /**
+   * 每一格都要**手指点得中**。
+   *
+   * 量两件事，在五种视口下各量一遍：
+   *   ① 七×三 的格子**正好铺满**板子（不重叠、不留缝）
+   *   ② 每格不小于 `QIN_CELL_MIN`
+   *
+   * ①是几何自洽（重叠的话点上面那格会同时响两下）；
+   * ②才是触屏。横屏手机放不下 44px 时这里会红——那正是它该红的时候。
+   */
+  check('verify_qin_touch', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    for (const [label, w, h] of VIEWPORTS) {
+      const board = rect();
+      boardRectInto(board, w, h);
+
+      asserts++;
+      if (board.x < -0.001 || board.y < -0.001 || board.x + board.w > w + 0.001 || board.y + board.h > h + 0.001) {
+        probs.push(`${label}：板子跑出视口了（${board.x.toFixed(0)},${board.y.toFixed(0)} ${board.w.toFixed(0)}×${board.h.toFixed(0)}）`);
+      }
+
+      const cell = rect();
+      for (let n = 0; n < QIN_NOTES; n++) {
+        cellRectInto(cell, board, n);
+        asserts++;
+        if (cell.w < QIN_CELL_MIN || cell.h < QIN_CELL_MIN) {
+          probs.push(
+            `${label}：第 ${n} 格只有 ${cell.w.toFixed(0)}×${cell.h.toFixed(0)}px，小于 ${QIN_CELL_MIN}px`,
+          );
+        }
+        asserts++;
+        if (cell.x < board.x - 0.001 || cell.x + cell.w > board.x + board.w + 0.001) {
+          probs.push(`${label}：第 ${n} 格横向越过板子`);
+        }
+        asserts++;
+        if (cell.y < board.y - 0.001 || cell.y + cell.h > board.y + board.h + 0.001) {
+          probs.push(`${label}：第 ${n} 格纵向越过板子`);
+        }
+      }
+      // 横向铺满：三列之和 == 板宽（留缝的话最右一列点不到）
+      const last = rect();
+      cellRectInto(last, board, QIN_NOTES - 1);
+      asserts++;
+      if (Math.abs(last.x + last.w - (board.x + board.w)) > 0.001) {
+        probs.push(`${label}：三列没有铺满板子，右边差 ${(board.x + board.w - last.x - last.w).toFixed(2)}px`);
+      }
+      // 纵向铺满
+      asserts++;
+      if (Math.abs(last.y + last.h - (board.y + board.h)) > 0.001) {
+        probs.push(`${label}：七行没有铺满板子`);
+      }
+
+      // 那行操作提示**不许压在弦上**。矮视口上板子吃掉了几乎全部高度，
+      // 所以提示必须挪到板子上面；高视口上它在板子下面。
+      // 判据是「提示基线落在板子的 y 区间之外」，而不是"在某个绝对位置"。
+      const hint = qinHintLayout(h, board.y);
+      const inBoard = hint.y >= board.y - 2 && hint.y <= board.y + board.h + 2;
+      asserts++;
+      if (inBoard) {
+        probs.push(
+          `${label}：提示基线 y=${hint.y.toFixed(0)} 落在板子的 y 区间内（${board.y.toFixed(0)}–${(board.y + board.h).toFixed(0)}）`,
+        );
+      }
+      asserts++;
+      if (hint.y < 0 || hint.y > h) probs.push(`${label}：提示掉出视口（y=${hint.y.toFixed(0)}）`);
+    }
+
+    // 平板上要**收窄**：铺满 768 就够不着边角
+    const tablet = rect();
+    boardRectInto(tablet, 1024, 768);
+    asserts++;
+    if (tablet.w > 620.5) probs.push(`平板横屏板子宽 ${tablet.w.toFixed(0)}px，没收窄`);
+    // 手机竖屏不能被缩：390 × 0.7 = 273，本来就够画
+    const phone = rect();
+    boardRectInto(phone, 390, 844);
+    asserts++;
+    if (phone.w < 240) probs.push(`手机竖屏板子只有 ${phone.w.toFixed(0)}px，描得太小点不准`);
+
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '7×3 铺满板子 · 每格 ≥44px · 平板收窄手机不缩', asserts);
+  });
+
+  /**
+   * 它真的**弹得响**，而且**不会自己结算**。
+   *
+   * 后半条是这一屏最要紧的：自由演奏没有胜负，
+   * 而"弹着弹着被判赢"或者"弹到一半被 30 秒兜底收掉"，
+   * 都会让玩家读到一句他根本没参与过的评价。
+   */
+  check('verify_qin_freeplay', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    let result: MiniGameResult | null = null;
+    const played: number[] = [];
+    const g = createQinGame({
+      ctx: fakeCtx(1024, 768),
+      width: 1024,
+      height: 768,
+      lang: 'zh',
+      palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+      audio: {
+        sfx() {},
+        note() {},
+        // 记下真的弹了哪些音：键位表对得上还不够，
+        // 得确认 `onKeyDown` 真的走到了 `pluck()`。
+        noteFree(i: number) {
+          played.push(i);
+        },
+        duckAmbient() {},
+      },
+      t: (k: string) => k,
+      seed: 1,
+      onDone: (r: MiniGameResult) => {
+        result = r;
+      },
+    } as unknown as MiniGameContext);
+    g.resize(1024, 768);
+
+    // 全部二十一个键挨个按一遍
+    for (let o = 0; o < QIN_OCTAVES; o++) {
+      for (let s = 0; s < QIN_STRINGS; s++) {
+        g.onKeyDown(QIN_KEYS[o][s], false);
+        g.onKeyUp(QIN_KEYS[o][s]);
+        g.step(1 / 60);
+        g.draw();
+      }
+    }
+    asserts++;
+    if (played.length !== QIN_NOTES) {
+      probs.push(`按遍 21 个键只响了 ${played.length} 声`);
+    }
+    asserts++;
+    if (new Set(played).size !== QIN_NOTES) {
+      probs.push(`21 个键只响了 ${new Set(played).size} 个不同的音——有键位撞车`);
+    }
+
+    // 什么都不按、不弹，走满 40 秒也不许自己结算
+    for (let i = 0; i < 60 * 40; i++) {
+      g.step(1 / 60);
+      if (i % 10 === 0) g.draw();
+    }
+    asserts++;
+    if (result !== null) {
+      probs.push(`什么都不弹就收到了终局「${result}」——这一屏没有胜负`);
+    }
+
+    // 触屏：每一格点一下都要响。**必须在 Esc 之前**——
+    // 退出之后这一局就 finished 了，而 `onPointerDown` 会早退，
+    // 于是这一步会数出 0 格——那不是"触屏弹不了"，是判据自己放错了顺序。
+    const board = rect();
+    boardRectInto(board, 1024, 768);
+    const cell = rect();
+    let taps = 0;
+    for (let n = 0; n < QIN_NOTES; n++) {
+      cellRectInto(cell, board, n);
+      played.length = 0;
+      g.onPointerDown(cell.x + cell.w * 0.5, cell.y + cell.h * 0.5);
+      g.onPointerUp(cell.x + cell.w * 0.5, cell.y + cell.h * 0.5);
+      if (played.length === 1 && played[0] === n) taps++;
+    }
+    asserts++;
+    if (taps !== QIN_NOTES) probs.push(`${QIN_NOTES} 格里只有 ${taps} 格点得响（或响错了音）`);
+
+    // Esc 退出
+    g.onKeyDown('Escape', false);
+    asserts++;
+    if (result !== 'cancel') probs.push(`Esc 之后的结果是 ${result}，应为 cancel`);
+
+    // 同一个实例也必须由 `createMiniGame` 造得出来（宿主走的是那条路）
+    asserts++;
+    try {
+      createMiniGame('qin', {
+        ctx: fakeCtx(800, 600),
+        width: 800,
+        height: 600,
+        lang: 'en',
+        palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+        audio: { sfx() {}, note() {}, duckAmbient() {} },
+        t: (k: string) => k,
+        seed: 2,
+        onDone() {},
+      } as unknown as MiniGameContext);
+    } catch (e) {
+      probs.push(`createMiniGame('qin') 抛异常：${String((e as Error)?.message ?? e).split('\n')[0]}`);
+    }
+
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '21 键 21 音 · 触屏 21 格 · 不自判 · Esc 退出', asserts);
+  });
+}
+
+// ---------------------------------------------------------------- 茶：倒水
+
+function registerTeaPourChecks(check: CheckFn): void {
+  /**
+   * 水柱**落进盏里**，而盏**在屏内**。
+   *
+   * 壶嘴尖随倾角转，盏的位置是从"转到底的壶嘴尖"推出来的——
+   * 两处各算一次的话，倾角一改水就画到别处去了，
+   * 而图上的症状只是"水在半空中没了"。
+   */
+  check('verify_tea_pour_geometry', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    for (const [label, w, h] of VIEWPORTS) {
+      const sc = Math.min(w, h) / 400;
+      const rx = 78 * sc;
+      const ry = 60 * sc;
+      const cx = w * 0.5;
+      const cy = h * 0.44;
+      const tip = pourSpoutTip(cx, cy, rx, ry, POUR_TILT);
+      const cup = pourCupRect(cx, cy, rx, ry);
+
+      asserts++;
+      if (cup.x < -0.5 || cup.x + cup.w > w + 0.5) {
+        probs.push(`${label}：盏跑出屏外（x=${cup.x.toFixed(0)} w=${cup.w.toFixed(0)}）`);
+      }
+      asserts++;
+      if (cup.y + cup.h > h + 0.5) {
+        probs.push(`${label}：盏掉到屏底下面了（y=${cup.y.toFixed(0)} h=${cup.h.toFixed(0)}）`);
+      }
+      asserts++;
+      if (!(tip.y < cup.y)) {
+        probs.push(`${label}：壶嘴尖（y=${tip.y.toFixed(0)}）不在盏口（y=${cup.y.toFixed(0)}）上方——水会往上流`);
+      }
+      asserts++;
+      if (!(tip.y <= cup.y + cup.h)) {
+        probs.push(`${label}：壶嘴尖压在盏底以下，水柱落不进盏里`);
+      }
+      // 水平方向：壶嘴尖与盏心不许差出一整个盏宽，
+      // 否则水柱是横着甩过去的，而那在图上读成"泼出去"。
+      asserts++;
+      const cupCx = cup.x + cup.w * 0.5;
+      if (Math.abs(tip.x - cupCx) > cup.w) {
+        probs.push(`${label}：盏心离壶嘴尖 ${Math.abs(tip.x - cupCx).toFixed(0)}px，超过一个盏宽 ${cup.w.toFixed(0)}px`);
+      }
+    }
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '五种视口下，水都从壶嘴落进盏里', asserts);
+  });
+
+  /**
+   * 倒水**要占掉时间**，而那一段时间里不许已经交出结果。
+   *
+   * ## 为什么这条要钉
+   *
+   * 原来这一屏是「按满 3 秒 → 立刻 `onDone`」，玩家看到的是
+   * 「我按了，然后什么也没发生」。加了倒水之后它终于有一个落幕，
+   * 但**顺序不能反**：如果壶刚一动就交出结果，
+   * 结算屏会把整段倒水盖住——那一屏等于没做。
+   */
+  check('verify_tea_pour_timing', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    let result: MiniGameResult | null = null;
+    const g = createTeaGame({
+      ctx: fakeCtx(960, 540),
+      width: 960,
+      height: 540,
+      lang: 'zh',
+      palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+      audio: { sfx() {}, note() {}, duckAmbient() {} },
+      t: (k: string) => k,
+      seed: 1,
+      onDone: (r: MiniGameResult) => {
+        result = r;
+      },
+    } as unknown as MiniGameContext);
+    g.resize(960, 540);
+
+    // 按住空格
+    g.onKeyDown('Space', false);
+
+    // 3.05 秒：按满了，但倒水还没走完 —— **不许**已经交出结果
+    for (let i = 0; i < Math.floor(3.05 * 60); i++) g.step(1 / 60);
+    asserts++;
+    if (result !== null) {
+      probs.push(`按满 3.05 秒就已经交出「${result}」了——结算屏会把整段倒水盖住`);
+    }
+
+    // 一路走到 5 秒：必须交出，而且交出的是 win
+    for (let i = 0; i < Math.floor(2 * 60) && result === null; i++) g.step(1 / 60);
+    asserts++;
+    if (result !== 'win') probs.push(`5 秒之后的结果是 ${result}，应为 win`);
+
+    // 继续推进不抛异常（收尾动画走完之后仍每帧 draw）
+    for (let i = 0; i < 60; i++) {
+      g.step(1 / 60);
+      g.draw();
+    }
+
+    // **总时长必须留在 `verify_minigame_playable` 那个 5 秒窗口之内**。
+    // 3s 注水 + 收尾 > 5s 的话，那条判据会把茶报成"卡死"——
+    // 而它其实好好的，只是收尾比它以为的长。
+    asserts++;
+    const total = 3.0 + 1.95;
+    if (total > 5.0) {
+      probs.push(`注水 3s + 收尾后共 ${total.toFixed(2)}s，超过判据给的 5 秒窗口`);
+    }
+
+    g.onKeyUp('Space');
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '按满不立刻交 · 5 秒内交出 win', asserts);
+  });
+}
+
+// ---------------------------------------------------------------- 描云：响应式板子
+
+/**
+ * 平板收窄、手机不缩——**两边都必须成立**。
+ *
+ * 只钉"平板变小了"会漏掉另一半：把板子一并缩到手机上也点不准，
+ * 而那种退化在平板上看不出来，只有真机上才骂人。
+ */
+function registerBoardChecks(check: CheckFn): void {
+  check('verify_cloud_board', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    for (const [label, w, h] of VIEWPORTS) {
+      const b = rect();
+      areaRectInto(b, w, h);
+      asserts++;
+      if (b.x < -0.001 || b.y < -0.001 || b.x + b.w > w + 0.001 || b.y + b.h > h + 0.001) {
+        probs.push(`${label}：板子跑出视口了`);
+      }
+      asserts++;
+      if (b.w < 240) probs.push(`${label}：板子宽 ${b.w.toFixed(0)}px < 240px，手机上描不准`);
+      asserts++;
+      if (b.w > 560.5) probs.push(`${label}：板子宽 ${b.w.toFixed(0)}px > 560px，平板上够不着边角`);
+      // 板子不能压到进度条上（条在 h*0.88）
+      asserts++;
+      if (b.y + b.h > h * 0.88) {
+        probs.push(`${label}：板子底沿 ${(b.y + b.h).toFixed(0)} 压在进度条 ${(h * 0.88).toFixed(0)} 上`);
+      }
+    }
+
+    // 手机竖屏**一个字都没变**：390 × 0.70 = 273，本来就在夹取区间内
+    const phone = rect();
+    areaRectInto(phone, 390, 844);
+    asserts++;
+    if (Math.abs(phone.w - 390 * 0.7) > 0.01) {
+      probs.push(`手机竖屏板子宽 ${phone.w.toFixed(1)}，应为 ${(390 * 0.7).toFixed(1)}（不受收窄影响）`);
+    }
+    // 平板横屏真的被收了
+    const tablet = rect();
+    areaRectInto(tablet, 1024, 768);
+    asserts++;
+    if (tablet.w >= 1024 * 0.7) {
+      probs.push(`平板横屏板子宽 ${tablet.w.toFixed(0)}，没收窄`);
+    }
+    asserts++;
+    if (tablet.w !== 560) probs.push(`平板横屏板子宽 ${tablet.w.toFixed(1)}，应为 560`);
+
+    return expect(probs.length === 0, probs.length ? probs.join('；') : '手机 273px 不变 · 平板收到 560px', asserts);
+  });
+}
+
+/**
+ * 中心线在某处的**局部标架**：中心点 + 右法向。
+ *
+ * 躲避的仿真是"横向偏移着骑"，而横向偏移必须沿着**路的右法向**推出去——
+ * 直接往 +x 加是错的：8 字的上半支与下半支朝向不同，
+ * 于是"骑左边"在那两段会变成"骑右边"，而测试照样绿。
+ */
+function frameAt(arc: number): { x: number; z: number; rx: number; rz: number } {
+  const s = (((arc % 1) + 1) % 1) * TOTAL_ARCLENGTH;
+  const a = pointAtArcLength(Math.max(0, s - 1.5)).pos;
+  const b = pointAtArcLength(Math.min(TOTAL_ARCLENGTH, s + 1.5)).pos;
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const l = Math.hypot(dx, dz) || 1;
+  return { x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5, rx: dz / l, rz: -dx / l };
+}
