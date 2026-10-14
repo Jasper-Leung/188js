@@ -71,3 +71,10 @@ $RECYCLE.BIN/
 src-tauri/target/
 # Tauri 自动生成的能力 schema
 src-tauri/gen/schemas/
+
+# AI 工具的本地状态目录 / Local state of the AI tooling
+# `.workbuddy-ai/` 里是工具自己的记忆与草稿（`memory/*.md`），
+# 既不是本工程的源码，也不是任何一条 `verify_*` 的产物。
+# 它每次运行都在变，提交上去只会让下一个 AI 把里面的临时结论
+# 当成项目约定 —— 那比留着它不提交更糟。
+.workbuddy-ai/
