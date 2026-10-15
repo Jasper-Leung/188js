@@ -309,7 +309,8 @@ card.appendChild(rule());
     const sw = (labelKey: string, on: boolean, fn: (v: boolean) => void) => {
       const b = button(on ? t('on') : t('off'), {
         cls: 'g-btn-toggle',
-        onClick: () => fn(b.dataset.isOn !== 'on'),
+        // 读的是 `setFlag` 写的那个类：`dataset.isOn` 从来没人写过，开了就关不掉
+        onClick: () => fn(!b.classList.contains('is-on')),
       });
       setFlag(b, 'is-on', on);
       return { b, label: labelKey };
