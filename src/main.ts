@@ -28,7 +28,7 @@ import { Water } from './world/water';
 import { Vegetation } from './world/vegetation';
 import { Stations } from './world/stations';
 import { Sky } from './world/sky';
-import { Scene, PerspectiveCamera } from 'three';
+import { Scene, PerspectiveCamera, Vector3 } from 'three';
 import { game, GameStateManager } from './game/state';
 import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
@@ -56,6 +56,9 @@ const bootEl = document.getElementById('boot') as HTMLElement;
 const bootSub = document.getElementById('boot-sub') as HTMLElement;
 const bootFill = document.getElementById('boot-fill') as HTMLElement;
 const bootPct = document.getElementById('boot-pct') as HTMLElement;
+
+/** XR 会话开始时读一次湖边的站姿。复用的小对象——见 `onXrSession()`。 */
+const _xrEye = new Vector3();
 
 /**
  * 把 `data-i18n="键名"` 的静态骨架按当前语言填上。
@@ -1535,6 +1538,10 @@ private onConfirm() {
     this.ui.syncFromState();
     // `foreign` 那一组不属于主世界：这一次遍历不能把它按 `v` 摆弄。
     this.world.setWorldVisible(false, this.lakeside.group);
+    // 全景顶掉了程序化天穹。两个都是"跟着相机的大球"，同时开着只是白画一遍；
+    // 而天穹在 `setWorldVisible()` 里有"永远可见"的特例，所以只能在这里关。
+    // 出来时不用管——`exitLakeside()` 那次 `setWorldVisible(true, …)` 会把它打开。
+    this.world.sky.setVisible(false);
     this.lakeside.enter();
     this.lakeside.seedFor(this.world.ride.pos.x, this.world.ride.pos.z);
     // 进这一屏才开 XR。理由见字段上那条注释。
@@ -1679,13 +1686,31 @@ private onConfirm() {
    * `setManual(true)` 让主循环的 rAF 停摆（`tick()` 开头就返回，不再排下一帧），
    * 帧改由渲染器推——`stepOnce()` 一次跑完定步长与渲染，正是录制模式
    * （`?cine=1`）用的那个组合。会话结束时原样换回来。
+   *
+   * ## 还要把头显的**原点**摆到湖边
+   *
+   * 光换帧源不够。`renderer.xr` 把头显位姿当成 `camera.parent` 下的局部变换
+   * （见 `World.setXrOrigin()`），所以进了会话之后 `Lakeside.applyCamera()`
+   * 那一句就再也够不着相机了：参考空间原点恒在世界原点，而湖岸在 320m 外。
+   * 头显里于是是一座远处的浮岛，桌面上一切正常——这两条路读的从来不是同一个量。
+   *
+   * 会话结束时把挂架收回原点：不收回的话，桌面那一帧会从挂架偏移处起算，
+   * 而 `applyCamera()` 写的是世界坐标，两下一叠加人就飘了。
    */
   private onXrSession(started: boolean): void {
     const gl = this.world.renderer.gl;
     if (started) {
+      if (this.phase === 'lakeside') {
+        const eye = _xrEye;
+        const yaw = this.lakeside.xrPose(eye);
+        this.world.setXrOrigin({ x: eye.x, y: eye.y, z: eye.z, yaw });
+      } else {
+        this.world.setXrOrigin(null);
+      }
       this.loop.setManual(true);
       gl.setAnimationLoop(() => this.loop.stepOnce());
     } else {
+      this.world.setXrOrigin(null);
       gl.setAnimationLoop(null);
       this.loop.setManual(false);
       this.loop.start();

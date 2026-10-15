@@ -102,6 +102,15 @@ export class World {
   readonly ride: Ride;
   readonly camera: PerspectiveCamera;
 
+  /**
+   * 相机挂架 —— **XR 会话的原点**。
+   *
+   * 存在的唯一理由见 `setXrOrigin()`：three 用 `camera.parent` 当参考空间的
+   * 父节点，所以"把头显摆到湖边"这件事只能靠一个能移动的父节点做到。
+   * 平时它留在单位变换上，桌面路径读到的东西与没有它时一模一样。
+   */
+  readonly rig = new Object3D();
+
   private listeners = new Set<(e: WorldEvent) => void>();
   private preset: QualityPreset;
 
@@ -249,6 +258,12 @@ export class World {
 
     this.renderer = new Renderer(canvas, tier, preset, camera);
     this.scene = this.renderer.scene;
+
+    // 相机从 scene 挪到挂架下（`Object3D.add()` 会自动把它从旧父节点摘掉）。
+    // 顺序不能反：`Renderer` 构造里刚 `scene.add(camera)` 过一次。
+    this.rig.name = 'camera-rig';
+    this.rig.add(camera);
+    this.scene.add(this.rig);
 
     // 构造耗时逐段记账。启动慢在这台机器上占了 8 秒以上，
     // 而"哪一段慢"和"整体慢"是完全不同的两种问题——不记就永远只能猜。
@@ -829,7 +844,9 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
   setWorldVisible(v: boolean, foreign?: Object3D | null): void {
     for (const child of this.scene.children) {
       const o = child as Object3D;
-      if (o === this.camera) continue;
+      // 相机与它的挂架都不是"世界里的东西"：可见性开关对它们没有意义，
+      // 而按 `v` 去摆挂架只会多一份和 `setXrOrigin()` 抢的状态。
+      if (o === this.camera || o === this.rig) continue;
       // 不是主世界的东西：可见性归它自己的主人管，这里一律"收起来"。
       if (foreign && o === foreign) {
         o.visible = false;
@@ -841,6 +858,33 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
       }
       o.visible = v;
     }
+  }
+
+  /**
+   * XR 会话的**原点**摆到哪儿。`null` = 回到世界原点。
+   *
+   * ## 为什么需要这个东西
+   *
+   * `renderer.xr` 拿 `camera.parent` 当参考空间的父节点
+   * （`WebXRManager.js` 的 `updateCamera()`：`matrixWorld = parent.matrixWorld × 头显位姿`），
+   * 所以进了沉浸式会话之后，**桌面那套写 `camera.position` 的代码一律失效**：
+   * 头显的位姿是相对参考空间原点的，而原点永远是 `(0,0,0)`。
+   *
+   * 湖边那一屏的岸在 `(-232, 40, -36)` 附近、离世界原点 320m，于是头显里
+   * 看到的是天边一座浮岛，而桌面上一切正常——两条路读的本来就不是同一个量。
+   *
+   * 摆挂架是**唯一**不改 three 的办法，也是标准做法。挂架留在单位变换时
+   * 桌面路径一个字节都不受影响（`camera.position` 仍然就是世界坐标）。
+   */
+  setXrOrigin(pose: { x: number; y: number; z: number; yaw: number } | null): void {
+    if (pose) {
+      this.rig.position.set(pose.x, pose.y, pose.z);
+      this.rig.rotation.set(0, pose.yaw, 0);
+    } else {
+      this.rig.position.set(0, 0, 0);
+      this.rig.rotation.set(0, 0, 0);
+    }
+    this.rig.updateMatrixWorld(true);
   }
 
   /** 撤走石头。无论成功、失败还是被别的东西打断。 */

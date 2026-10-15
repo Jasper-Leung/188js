@@ -27,8 +27,22 @@ const SKY_VERT = /* glsl */ `
 varying vec3 vDir;
 void main() {
   vDir = normalize(position);
-  // 天穹永远跟着相机，不做平移
-  vec4 mv = modelViewMatrix * vec4(position + cameraPosition, 1.0);
+  /**
+   * 天穹永远跟着相机，不做平移——平移由 attachTo() 写进 mesh.position，
+   * modelViewMatrix 里已经带上它了。
+   *
+   * ⚠ 这里原来写的是 vec4(position + cameraPosition, 1.0)，而且是在
+   * 模型矩阵**之前**加的。两个后果叠在一起：cameraPosition 先被
+   * mesh.scale（= camera.far * 0.9，810）放大，再被 mesh.position
+   * 加上一遍，球心跑到 cameraPosition 的 811 倍那么远——相机离球面
+   * 六万多米，而球半径只有 810m。
+   *
+   * 也就是说**这个天空球从来没有出现在画面里过**：玩家看到的那片均匀浅蓝
+   * 是 renderer 的 clearColor（0x9ab6d8），不是天空。渐变、云、日轮、
+   * 星星、月亮、黄昏染色全是死代码。只有在世界原点附近（cameraPosition ≈ 0）
+   * 它才偶尔露一下脸，所以这个 bug 在首屏看不出来。
+   */
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   gl_Position.z = gl_Position.w * 0.999999;
 }
@@ -145,6 +159,9 @@ void main() {
   #include <colorspace_fragment>
 }
 `;
+
+/** `attachTo()` 每帧要读一次相机的世界位置，别在热路径里 new。 */
+const _skyPos = new Vector3();
 
 export interface DayState {
   /** 0 = 白天, 1 = 黄昏 */
@@ -360,7 +377,11 @@ export class Sky {
 
   /** 天空球挂在相机上，避免玩家走出球外看到黑 */
   attachTo(camera: import('three').PerspectiveCamera) {
-    this.mesh.position.copy(camera.position);
+    // **用世界位置**，不是 `camera.position`。相机可能挂在挂架下
+    // （`World.rig`，XR 会话里它是非零的），那时 `position` 是挂架内的
+    // 局部坐标，拿它当世界坐标摆天穹会让球心偏出去一整个挂架位移。
+    camera.getWorldPosition(_skyPos);
+    this.mesh.position.copy(_skyPos);
     this.mesh.scale.setScalar(camera.far * 0.9);
   }
 
@@ -370,5 +391,18 @@ export class Sky {
 
   setShadowsEnabled(on: boolean) {
     this.sun.castShadow = on;
+  }
+
+  /**
+   * 开/关天穹本身。
+   *
+   * 湖边那一屏用全景照片当背景（`Lakeside` 的 `LAKESIDE_PANO`），
+   * 而两个都是"跟着相机的大球"——同时开着只是白画一遍满屏。
+   *
+   * ⚠ 关掉之后要**靠 `World.setWorldVisible()` 打开**：那个方法里
+   * 对 `sky.mesh` 有一条"永远可见"的特例。所以从湖边出来不必再调一次。
+   */
+  setVisible(on: boolean) {
+    this.mesh.visible = on;
   }
 }
