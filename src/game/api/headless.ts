@@ -42,7 +42,7 @@ import { GameStateManager } from '../state';
 import type { Phase } from '../phase';
 import { getLang, initLang, stationNameOf, t } from '../../i18n';
 import { AiSession, type AiAdapter } from './session';
-import { AI_KEYS, arrowGlyph, type AiAction, type AiEvent, type AiObservation } from './types';
+import { arrowGlyph, keysOf, type AiAction, type AiEvent, type AiObservation } from './types';
 
 /** 一个不碰 WebGL 的相机替身。骑行只写它的 position / lookAt。 */
 function fakeCamera() {
@@ -165,7 +165,7 @@ export class HeadlessAdapter implements AiAdapter {
    * 那边也是往 `keys` 里塞 code，由游戏自己的监听去消费。
    */
   send(action: AiAction, down: boolean): void {
-    for (const code of AI_KEYS[action]) {
+    for (const code of keysOf(action)) {
       if (down) this.keys.add(code);
       else this.keys.delete(code);
     }

@@ -12,6 +12,7 @@
  * 的取舍。每一档的注释都写清楚"这一刀砍掉什么、为什么这台机器必须砍"。
  */
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH, type Tier } from './capability';
+import { DEFAULT_KEYMAP } from './keymap';
 import { t } from '../i18n';
 
 export interface QualityPreset {
@@ -136,6 +137,32 @@ export const PRESETS: Record<Tier, QualityPreset> = {
 export const TIER_KEYS = ['quality_low', 'quality_medium', 'quality_high'] as const;
 export const TIER_COUNT = 3;
 
+/**
+ * 色觉友好的碎片配色。
+ *
+ * ## 为什么默认配色对某些读者不够用
+ *
+ * 五件乐事各有一个色（`hud.ts` 的 `FRAGMENT_COLORS`），而这个游戏里
+ * 「碎片栏的那几个格子」和「五个图标」是**唯一的辨识线索**——没有文字标签，
+ * 没有形状差异。所以「哪个是茶」这件事**完全由色相承担**。
+ *
+ * 默认五色里云与茶都在绿—青区间、竹与禽都在黄—绿区间，
+ * 红绿色觉障碍者看到的相邻两格是同一个颜色。
+ *
+ * ## 这一套怎么改的
+ *
+ * 不是把色相乱换一遍，而是**换成亮度阶梯**：相邻两槽的明度差 ≥ 0.18，
+ * 于是它们在**灰度**下也分得开。代价是这一套没那么"水墨"——
+ * 所以它是**可选的**，不是替代默认。
+ */
+export const COLORBLIND_FRAGMENTS: readonly [number, number, number][] = [
+  [0.36, 0.52, 0.72], // 云 · 深蓝
+  [0.88, 0.76, 0.32], // 茶 · 亮黄
+  [0.52, 0.38, 0.64], // 琴 · 紫
+  [0.86, 0.52, 0.28], // 竹 · 橙
+  [0.34, 0.36, 0.38], // 禽 · 深灰
+];
+
 export interface SettingsData {
   tier: Tier;
   /** 自适应分辨率：目标帧率，0 = 关 */
@@ -146,9 +173,44 @@ export interface SettingsData {
   onboardingDone: boolean;
   /** 玩家是否手动动过画质（动过就不再被探测结果覆盖） */
   qualityTouched: boolean;
+
+  // ---- 无障碍 / 音量（下面五项都是**持久**的，AGENTS 早期版本一个都没有）----
+  /** 音乐音量 0~1 */
+  volBgm: number;
+  /** 音效音量 0~1 */
+  volSfx: number;
+  mutedAll: boolean;
+  mutedBgm: boolean;
+  mutedSfx: boolean;
+  /** 色觉友好配色 */
+  colorblind: boolean;
+  /** 减弱动效 */
+  reduceMotion: boolean;
+  /** 按住生效的键（云 / 茶 / 钓鱼）改为点一下切换 */
+  holdToToggle: boolean;
+  /** 键位重映射：动作 → `KeyboardEvent.code` */
+  keymap: Record<string, string>;
 }
 
 const STORAGE_KEY = 'gift188.settings.v1';
+
+const FALLBACK_SETTINGS = {
+  volBgm: 1,
+  volSfx: 1,
+  mutedAll: false,
+  mutedBgm: false,
+  mutedSfx: false,
+  colorblind: false,
+  reduceMotion: false,
+  holdToToggle: false,
+};
+
+/** 体积/颜色的取值范围钳制。设置来自 `localStorage`，那是个玩家可以手改的文件。 */
+const clamp01 = (v: unknown, d: number): number => {
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return d;
+  return Math.min(Math.max(n, 0), 1);
+};
 
 export function loadSettings(defaultTier: Tier): SettingsData {
   const fallback: SettingsData = {
@@ -157,6 +219,8 @@ export function loadSettings(defaultTier: Tier): SettingsData {
     adaptiveMinScale: 0.5,
     onboardingDone: false,
     qualityTouched: false,
+    ...FALLBACK_SETTINGS,
+    keymap: { ...DEFAULT_KEYMAP },
   };
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -171,6 +235,18 @@ export function loadSettings(defaultTier: Tier): SettingsData {
           : 0.5,
       onboardingDone: !!parsed.onboardingDone,
       qualityTouched: !!parsed.qualityTouched,
+      volBgm: clamp01(parsed.volBgm, FALLBACK_SETTINGS.volBgm),
+      volSfx: clamp01(parsed.volSfx, FALLBACK_SETTINGS.volSfx),
+      mutedAll: !!parsed.mutedAll,
+      mutedBgm: !!parsed.mutedBgm,
+      mutedSfx: !!parsed.mutedSfx,
+      colorblind: !!parsed.colorblind,
+      reduceMotion: !!parsed.reduceMotion,
+      holdToToggle: !!parsed.holdToToggle,
+      // **逐项合并，不整体替换。** 手改过的存档可能只写了其中一个动作，
+      // 而整体替换会把其余七个一起清成默认值——于是"我只改了一个键，
+      // 回来发现其余的全没了"。
+      keymap: { ...DEFAULT_KEYMAP, ...(parsed.keymap ?? {}) },
     };
   } catch {
     // 存档坏了就当没有，不要让一个坏 JSON 卡在标题屏

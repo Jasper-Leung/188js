@@ -32,6 +32,7 @@ import { wireKeyActivate } from './hud';
 import type { Tier } from '../core/capability';
 import { touchMode, setTouchMode, touchModeLabel, type TouchMode } from '../core/touch';
 import type { UIHooks } from './index';
+import { ACTIONS, codeLabel, codeOf, getKeymap, tryBind, type GameAction } from '../core/keymap';
 
 /** 自适应目标帧率的候选。纯数字，语言中立，不需要文案。 */
 const ADAPTIVE_TARGETS = [24, 30, 45, 60] as const;
@@ -191,6 +192,15 @@ export class PausePanel {
     mu.appendChild(muSeg);
     card.appendChild(mu);
 
+    // ---- 无障碍：音量 / 配色 / 动效 / 按住改切换 / 改键 ----
+//
+// **放在静音的下面、语言上面。** 顺序是按「多久会用一次」排的：
+// 静音与音量是所有玩家都会看的，语言其次，而改键与色觉是
+// 「知道自己需要」的人才会找的——把它们摆在下面，
+// 不会让每次进来调音量的人都先滚过十行键位。
+card.appendChild(this.buildAccessibility());
+card.appendChild(rule());
+
     // ---- 明信片 / 语言 / 操作说明 ----
     // 明信片放最左：暂停的那一秒是玩家唯一会停下来想"我到底在攒什么"的时刻，
     // 而这一屏是三十天里唯一能回答那个问题的地方。
@@ -214,8 +224,224 @@ export class PausePanel {
     for (const b of this.root.querySelectorAll<HTMLElement>('.g-btn')) {
       wireKeyActivate(b, () => b.click());
     }
+    // 改键要**吃掉的键不能同时激活别的按钮**：收键的那一下如果还会
+    // click 到「继续」，玩家想改键结果把游戏关了。捕获阶段拦下并 `stopPropagation`。
+    this.root.addEventListener('keydown', (e) => {
+      if (this.capturing) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
     o.parent.appendChild(this.root);
     this.sync();
+  }
+
+  // ---------------------------------------------------------------- 无障碍
+
+  private volBgm!: HTMLInputElement;
+  private volSfx!: HTMLInputElement;
+  private volBgmOut!: HTMLSpanElement;
+  private volSfxOut!: HTMLSpanElement;
+  private cbBtn!: HTMLButtonElement;
+  private motionBtn!: HTMLButtonElement;
+  private holdBtn!: HTMLButtonElement;
+  private keyRowBtns = new Map<GameAction, HTMLButtonElement>();
+  private capturing: GameAction | null = null;
+  /** 改键冲突那句话。**留在原地**而不是飘走。 */
+  private keyConflictEl!: HTMLElement;
+  private colorblind = false;
+  private reduceMotion = false;
+  private holdToToggle = false;
+
+  /**
+   * 音量 / 配色 / 动效 / 按住改切换 / 改键。
+   *
+   * ## 为什么音量是 `input[type=range]` 而不是三档按钮
+   *
+   * 三档（静音 / 30% / 100%）听上去够用，而实际上最需要调音量的人是
+   * 戴耳机的那个——他们要的是**连续**的推子，因为"能听见"和"听不见"
+   * 之间那一大段对耳机用户全是"太吵"。三档把那一段整段跳过了。
+   *
+   * ## 改键为什么是「点一下然后按下一颗」
+   *
+   * 弹一个捕获输入的模态框是另一条路，而它要新造一个焦点陷阱——
+   * 这个面板里已经有别的东西在管焦点了。此处更简单也更可靠：
+   * 点那颗按钮之后**面板就地变成捕获态**，下一颗按下的键就是绑定。
+   * 再按一次「取消」或按 Esc 退出捕获。
+   */
+  private buildAccessibility(): HTMLDivElement {
+    const box = el('div', 'g-group g-a11y');
+    box.appendChild(el('div', 'g-group-h', t('accessibility')));
+
+    // ---- 音量 ----
+    const volRow = (labelKey: string, which: 'bgm' | 'sfx') => {
+      const wrap = el('div', 'g-vol');
+      const lab = el('label', 'g-vol-l', t(labelKey));
+      const input = document.createElement('input');
+      input.type = 'range';
+      input.min = '0';
+      input.max = '100';
+      input.step = '5';
+      input.className = 'g-vol-r';
+      // 滑块必须有关联标签，否则读屏只会念出「滑块」。
+      input.setAttribute('aria-label', t(labelKey));
+      const out = el('span', 'g-vol-v', '100%');
+      input.addEventListener('input', () => {
+        const v = Number(input.value) / 100;
+        setText(out, `${Math.round(v * 100)}%`);
+        this.hooks.onAccessibilityChange({ [which === 'bgm' ? 'volBgm' : 'volSfx']: v });
+      });
+      wrap.appendChild(lab);
+      wrap.appendChild(input);
+      wrap.appendChild(out);
+      return { wrap, input, out };
+    };
+    const bgm = volRow('vol_bgm', 'bgm');
+    const sfx = volRow('vol_sfx', 'sfx');
+    this.volBgm = bgm.input;
+    this.volBgmOut = bgm.out;
+    this.volSfx = sfx.input;
+    this.volSfxOut = sfx.out;
+    box.appendChild(bgm.wrap);
+    box.appendChild(sfx.wrap);
+
+    // ---- 三个开关 ----
+    const sw = (labelKey: string, on: boolean, fn: (v: boolean) => void) => {
+      const b = button(on ? t('on') : t('off'), {
+        cls: 'g-btn-toggle',
+        onClick: () => fn(b.dataset.isOn !== 'on'),
+      });
+      setFlag(b, 'is-on', on);
+      return { b, label: labelKey };
+    };
+    const cb = sw('colorblind', false, (v) => {
+      this.colorblind = v;
+      this.syncAccessibility();
+      this.hooks.onAccessibilityChange({ colorblind: v });
+    });
+    const mo = sw('reduce_motion', false, (v) => {
+      this.reduceMotion = v;
+      this.syncAccessibility();
+      this.hooks.onAccessibilityChange({ reduceMotion: v });
+    });
+    const ho = sw('hold_to_toggle', false, (v) => {
+      this.holdToToggle = v;
+      this.syncAccessibility();
+      this.hooks.onAccessibilityChange({ holdToToggle: v });
+    });
+    this.cbBtn = cb.b;
+    this.motionBtn = mo.b;
+    this.holdBtn = ho.b;
+
+    for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motionBtn], ['hold_to_toggle', this.holdBtn]] as const) {
+      const head = el('div', 'g-group-h g-group-h-sm');
+      head.appendChild(el('span', null, t(key)));
+      head.appendChild(b);
+      box.appendChild(head);
+    }
+    box.appendChild(note(t('accessibility_why'), 'g-note-dim'));
+
+    // ---- 改键 ----
+    const kr = el('div', 'g-keys');
+    for (const a of ACTIONS) {
+      const r = el('div', 'g-keyrow');
+      r.appendChild(el('span', 'g-keyrow-l', t(`key_${a}`)));
+      const b = button(codeLabel(codeOf(a)), {
+        cls: 'g-btn-toggle g-keycap',
+        onClick: () => this.beginCapture(a),
+      });
+      this.keyRowBtns.set(a, b);
+      r.appendChild(b);
+      kr.appendChild(r);
+    }
+    box.appendChild(el('div', 'g-group-h g-group-h-sm', t('keymap_title')));
+    box.appendChild(kr);
+    // 冲突那句话留在原地而不是飘走——见 `captureKeys` 里那一句。
+    this.keyConflictEl = note('', 'g-note-why');
+    setShown(this.keyConflictEl, false);
+    box.appendChild(this.keyConflictEl);
+
+    // 捕获态的全局监听挂在**窗口**上而不是这一行：
+    // 焦点在面板里，但按键目标是 `window`，而这一屏本来就在监听键盘。
+    this.captureKeys = (e: KeyboardEvent) => {
+      if (!this.capturing) return;
+      // Shift / Control / Alt 单独按下不算绑定——那是组合键的修饰键，
+      // 而这个游戏没有组合键。
+      if (['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].includes(e.code)) return;
+      const act = this.capturing;
+      e.preventDefault();
+      e.stopPropagation();
+      this.capturing = null;
+      if (e.code === 'Escape') {
+        this.syncKeyRow();
+        return;
+      }
+      const clash = tryBind(act, e.code);
+      if (clash) {
+        // 冲突要说出来。这里**不用 toast**：toast 会飘走，而这一刻玩家
+        // 的注意力全在那颗键帽上——那句话得**留在原地**，
+        // 旁边就是刚按下的那一颗。
+        setText(
+          this.keyConflictEl,
+          t('key_conflict', { action: t(`key_${act}`), other: t(`key_${clash}`) }),
+        );
+        setShown(this.keyConflictEl, true);
+      } else {
+        setShown(this.keyConflictEl, false);
+      }
+      this.syncKeyRow();
+      this.hooks.onKeymapChange(getKeymap() as unknown as Record<string, string>);
+    };
+    window.addEventListener('keydown', this.captureKeys, true);
+
+    return box;
+  }
+
+  private captureKeys!: (e: KeyboardEvent) => void;
+
+  private beginCapture(action: GameAction): void {
+    this.capturing = action;
+    this.syncKeyRow();
+  }
+
+  private syncKeyRow(): void {
+    for (const [a, b] of this.keyRowBtns) {
+      if (this.capturing === a) {
+        setText(b, t('key_press_now'));
+        setFlag(b, 'is-capturing', true);
+      } else {
+        setText(b, codeLabel(codeOf(a)));
+        setFlag(b, 'is-capturing', false);
+      }
+    }
+  }
+
+  /** 从宿主灌一次（构造时与 `sync()` 都调）。设置面板是**读这份**的唯一地方。 */
+  setAccessibilityState(v: {
+    volBgm: number;
+    volSfx: number;
+    colorblind: boolean;
+    reduceMotion: boolean;
+    holdToToggle: boolean;
+  }): void {
+    this.volBgm.value = String(Math.round(v.volBgm * 100));
+    this.volSfx.value = String(Math.round(v.volSfx * 100));
+    setText(this.volBgmOut, `${Math.round(v.volBgm * 100)}%`);
+    setText(this.volSfxOut, `${Math.round(v.volSfx * 100)}%`);
+    this.colorblind = v.colorblind;
+    this.reduceMotion = v.reduceMotion;
+    this.holdToToggle = v.holdToToggle;
+    this.syncAccessibility();
+  }
+
+  private syncAccessibility(): void {
+    setFlag(this.cbBtn, 'is-on', this.colorblind);
+    setText(this.cbBtn, this.colorblind ? t('on') : t('off'));
+    setFlag(this.motionBtn, 'is-on', this.reduceMotion);
+    setText(this.motionBtn, this.reduceMotion ? t('on') : t('off'));
+    setFlag(this.holdBtn, 'is-on', this.holdToToggle);
+    setText(this.holdBtn, this.holdToToggle ? t('on') : t('off'));
+    this.syncKeyRow();
   }
 
   // ---------------------------------------------------------------- 画质

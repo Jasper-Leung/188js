@@ -36,8 +36,19 @@ import {
 } from '../game/challenge';
 import { ROAD } from '../world/road';
 import { Obstacles, buildSign } from '../world/obstacles';
-import type { Terrain } from '../world/terrain';
+
 import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import {
+  ALL_RELICS,
+  RELICS,
+  RELICS_CH2,
+  RELIC_FROM_ROAD,
+  RELIC_REACH,
+  Relics,
+} from '../world/relics';
+import { Terrain } from '../world/terrain';
+import { ROAD as ROAD_DEF, ROADMESH, I18N, ECON } from '../data/raw';
+import { GameStateManager } from '../game/state';
 import {
   QIN_CELL_MIN,
   QIN_KEYS,
@@ -116,6 +127,250 @@ export function registerFeatureChecks(check: CheckFn): void {
   registerBoardChecks(check);
   registerFishingChecks(check);
   registerSpaceReplyChecks(check);
+  registerRelicLayerChecks(check);
+  registerAccessibilityChecks(check);
+}
+
+// ---------------------------------------------------------------- 第二章 · 触物共鸣
+
+/**
+ * 第二章的判据族。
+ *
+ * ## 为什么这一族存在
+ *
+ * 第二章原来是一个**空门**：`objective_chapter2` 的文案写着"把五座各走满三次"，
+ * 而 `hud.ts` 的注释自己承认"门后头还是同一批目的地"。上一轮评审把
+ * "P2-1 第二章目标"记成了 ✅，而它只改了一条文案——门后没有新东西。
+ *
+ * 所以这一族量的**不是"第二章存在"**，而是三件能被证伪的事：
+ *
+ *  1. **分层真的分层**（`verify_relic_layer`）：同一件旧物摸两次读到两段不同的字，
+ *     而提示圈在第一层读完之后**不许熄**——它一熄，就等于告诉玩家
+ *     "这件东西已经没有别的可说了"，那正是第二章要做的事。
+ *  2. **门后真的有内容**（`verify_chapter2`）：第二章至少多出三件，
+ *     落在**非碎片驿站**上，且目标文案指的是"听完"而不是"再刷一遍"。
+ *  3. **片尾真的接着**（`verify_epilogue`）：两结局各有一张彩蛋，
+ *     而它回答的是序章里"没有人记得你"那一句。
+ */
+function registerRelicLayerChecks(check: CheckFn): void {
+  /** 分层闩锁：第一次读到 `now`，第二次读到 `past`，第三次读不到。 */
+  check('verify_relic_layer', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    const relics = new Relics(new Terrain(), 2);
+
+    asserts++;
+    if (relics.placements.length !== ALL_RELICS.length) {
+      probs.push(`第二章建出 ${relics.placements.length} 件，应为 ${ALL_RELICS.length}`);
+    }
+
+    // 逐件走一遍两层。`Relics.nearestWithin` 是真的几何判据，
+    // 所以这里把玩家摆到那件东西正旁边再按 F——走的和实机同一条路。
+    let layered = 0;
+    for (const p of relics.placements) {
+      const r1 = fakeTouch(relics, p.index);
+      const r2 = fakeTouch(relics, p.index);
+      const r3 = fakeTouch(relics, p.index);
+      if (r1 === 'now' && r2 === 'past' && r3 === null) layered++;
+      else probs.push(`${p.def.kind}：第一次 ${r1} / 第二次 ${r2} / 第三次 ${r3}，应为 now / past / null`);
+    }
+    asserts++;
+    if (layered !== relics.placements.length) {
+      probs.push(`${layered}/${relics.placements.length} 件做到了"现在 → 过去 → 不再说话"`);
+    }
+
+    // **提示圈不许在第一层之后熄掉。**这是这一族里最容易被"顺手改对"的一条：
+    // 判据一旦写成 `!heard`，功能上看起来没差别，而玩家就再也回不来了。
+    //
+    // 用**一份新的 `Relics`**：上面那个循环已经把每一件都读到"不再说话"了，
+    // 在同一份上问 `pending(0)` 量到的是上一轮的残留，不是"开场时亮不亮"。
+    asserts++;
+    const fresh = new Relics(new Terrain(), 2);
+    if (!fresh.pending(0)) {
+      probs.push('一件都没摸的时候 `pending(0)` 就是 false——提示圈从一开始就不亮');
+    }
+    fakeTouch(fresh, 0);
+    asserts++;
+    if (!fresh.pending(0)) {
+      probs.push('读完第一层就 `pending(0) === false`——提示圈第一层之后就熄，玩家回不来摸第二层');
+    }
+    fakeTouch(fresh, 0);
+    asserts++;
+    if (fresh.pending(0)) {
+      probs.push('读完两层仍报 pending——提示圈不熄，这一件永远提示不完');
+    }
+
+    // 两层的文案不许是同一句。
+    asserts++;
+    for (const d of ALL_RELICS) {
+      if (d.textKey === d.pastKey) probs.push(`${d.kind} 的过去层与现在层是同一个键`);
+      if (d.echoKey === d.pastKey || d.echoKey === d.textKey) {
+        probs.push(`${d.kind} 的回响与某一层撞键`);
+      }
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `${ALL_RELICS.length} 件各两层 · 第三次不再说话 · 读完两层提示圈才熄 · 三层文案互不撞键`,
+      asserts,
+    );
+  });
+
+  /** 门后真的有东西：新件数、落位、以及四类文案键双语齐全。 */
+  check('verify_chapter2', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 1. 第二章比第一章多出东西来。
+    asserts++;
+    const extra = ALL_RELICS.length - RELICS.length;
+    if (extra < 3) {
+      probs.push(`第二章只多出 ${extra} 件，门后还是那一批——空门没有被填上`);
+    }
+
+    // 2. 第一章五件一件都不许动。它们的身份、位置、文案是**回扣**，
+    //    改一件就等于把第一章那句"它出现在第一位是回扣"作废。
+    asserts++;
+    for (let i = 0; i < RELICS.length; i++) {
+      if (RELICS[i].chapter !== 1) probs.push(`第 ${i} 件（${RELICS[i].kind}）不再是第一章的`);
+      if (RELICS[i].stationIdx !== ROAD_DEF.FRAGMENT_SLOT_STATION_IDX[i]) {
+        probs.push(`第 ${i} 件换了驿站，与碎片槽位不再一一对应`);
+      }
+    }
+
+    // 3. 第二章那几件不许落在碎片驿站上——落在那儿就还是"再刷一遍"。
+    asserts++;
+    for (const d of RELICS_CH2) {
+      if (ROAD_DEF.FRAGMENT_SLOT_STATION_IDX.includes(d.stationIdx)) {
+        probs.push(`${d.kind} 落在碎片驿站 ${d.stationIdx} 上——和第一章是同一批目的地`);
+      }
+    }
+
+    // 4. 茶壶（最后一件）必须在家门口。第二章的收尾发生在出发的那个地方。
+    asserts++;
+    const teapot = RELICS_CH2.find((r) => r.kind === 'teapot');
+    if (!teapot) probs.push('第二章没有茶壶——最后一件旧物没了');
+    else if (teapot.stationIdx !== GameStateManager.HOME_STATION) {
+      probs.push(`茶壶在 ${teapot.stationIdx} 号驿，不在家（${GameStateManager.HOME_STATION}）`);
+    }
+
+    // 5. 四类文案键，两侧齐全，且都不许是空串。
+    asserts++;
+    for (const d of ALL_RELICS) {
+      for (const key of [d.titleKey, d.textKey, d.pastKey, d.echoKey]) {
+        for (const lang of ['zh', 'en'] as const) {
+          const v = I18N[lang][key];
+          if (!v) probs.push(`${lang} 缺 ${key}`);
+          else if (!v.trim()) probs.push(`${lang} 的 ${key} 是空串——英文界面会显示一个空卡片`);
+        }
+      }
+    }
+
+    // 6. 第二章那几件不许和第一章重样。
+    asserts++;
+    const kinds = new Set(RELICS_CH2.map((r) => r.kind));
+    if (kinds.size !== RELICS_CH2.length) probs.push('第二章三件里有重样的物件');
+
+    // 7. 几何仍然成立：离中心线 `RELIC_FROM_ROAD`、不压路、够得着。
+    const terrain = new Terrain();
+    const relics = new Relics(terrain, 2);
+    asserts++;
+    for (const p of relics.placements) {
+      const beyond = p.roadDist - ROADMESH.TOTAL_HALF_WIDTH;
+      if (Math.abs(p.roadDist - RELIC_FROM_ROAD) > 0.05) {
+        probs.push(`${p.def.kind} 离中心线 ${p.roadDist.toFixed(2)}m，应为 ${RELIC_FROM_ROAD}m`);
+      } else if (beyond > RELIC_REACH) {
+        probs.push(`${p.def.kind} 在路肩外 ${beyond.toFixed(1)}m，够不着`);
+      } else if (beyond < 0.9) {
+        probs.push(`${p.def.kind} 贴在路肩上，不用减速就能摸到`);
+      }
+    }
+
+    // 8. 三角面预算。八件一起算。
+    asserts++;
+    const tris = relics.triangleCount();
+    if (tris > 3400) probs.push(`八件合计 ${tris} 三角面，超出 3400 的预算`);
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `八件 · 第二章多 ${extra} 件且都落在非碎片驿站 · 茶壶在家门口 · 四类键双语齐全 · ${tris} 面`,
+      asserts,
+    );
+  });
+
+  /** 彩蛋：两结局各一张，且真的被引用。 */
+  check('verify_epilogue', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    asserts++;
+    for (const k of ['epilogue_keep', 'epilogue_let_go']) {
+      for (const lang of ['zh', 'en'] as const) {
+        if (!I18N[lang][k]) probs.push(`${lang} 缺 ${k}`);
+      }
+    }
+
+    asserts++;
+    for (const k of ['epilogue_keep', 'epilogue_let_go']) {
+      if (I18N.zh[k] === I18N.en[k]) probs.push(`${k} 中英两侧一字不差——没翻`);
+    }
+
+    // 引用在**代码**里，不在表里。文案表里有键却没人 `t()` 就是死字，
+    // 而死字白名单只减不增——所以这两条必须是真接线。
+    const src = stripComments(readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8'));
+    asserts++;
+    for (const k of ['epilogue_keep', 'epilogue_let_go']) {
+      if (!src.includes(`'${k}'`)) probs.push(`${k} 没有被任何代码引用`);
+    }
+
+    // 两张彩蛋不许是同一张。
+    asserts++;
+    if (I18N.zh.epilogue_keep === I18N.zh.epilogue_let_go) {
+      probs.push('两结局共用同一张彩蛋——二选一的意义没了');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : '留门 / 放手 各一张彩蛋 · 两侧齐全 · 都被 main.ts 引用 · 两张不同',
+      asserts,
+    );
+  });
+}
+
+/**
+ * 把玩家摆到第 `index` 件正旁边，然后按一次 F——**走和实机同一条路**。
+ *
+ * 为什么不直接读 `Relics.heard` / `Relics.past` 两个集合：
+ * 那样量到的是"两个集合被正确地写了"，而不是"玩家真的读到了两段不同的字"。
+ * 中间那层 `touchRelic()` 才是判据要守的东西。
+ */
+function fakeTouch(relics: Relics, index: number): 'now' | 'past' | null {
+  const p = relics.placements[index];
+  if (!p) return null;
+  const n = relics.nearestWithin(p.x, p.z, RELIC_REACH);
+  if (n.index !== index) return null;
+  return n.index < 0 ? null : layerOf(relics, n.index);
+}
+
+/** `touchRelic()` 的分层判定，抄的是 `world.ts` 那一份。 */
+function layerOf(relics: Relics, i: number): 'now' | 'past' | null {
+  const def = relics.placements[i]?.def;
+  if (!def) return null;
+  if (!relics.isHeard(i)) {
+    relics.markHeard(i);
+    return 'now';
+  }
+  if (!relics.hasPast(i)) {
+    relics.markPast(i);
+    return 'past';
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------- 路边躲避挑战
@@ -1202,4 +1457,351 @@ function registerSpaceReplyChecks(check: CheckFn): void {
       asserts,
     );
   });
+}
+
+// ---------------------------------------------------------------- 无障碍 · 存档 · 触屏
+
+/**
+ * 这一族量的四件事，全都是**「某个操作在某一种设备/设置下够不着」**。
+ *
+ * 它们有一个共同形状：**功能在某个玩家身上不存在，而且界面上没有一处
+ * 提示它不存在**。所以判据量的也不是"功能有没有"，而是
+ * "那条路径还在不在"——纯 DOM 接线的那些，无头跑不到，只能钉源码。
+ *
+ *  · `verify_accessibility` —— 音量会落盘、静音会落盘、改键会派发、
+ *    色觉切换会重画而不是只挂 class、减弱动效会接管节拍圈
+ *  · `verify_save_pose` —— 位置存得进、读得出、坏档不炸、重开清掉
+ *  · `verify_volatile_store` —— 无痕模式下那句「进度不会被保存」真的会响
+ *  · `verify_touch_coverage` —— 每一个动词在触屏上都有对应控件
+ */
+function registerAccessibilityChecks(check: CheckFn): void {
+  const srcOf = (p: string) => stripComments(readFileSync(join(process.cwd(), p), 'utf8'));
+  const mainSrc = srcOf(join('src', 'main.ts'));
+  const uiSrc = srcOf(join('src', 'ui', 'index.ts'));
+  const touchSrc = srcOf(join('src', 'ui', 'touchControls.ts'));
+  const stateSrc = srcOf(join('src', 'game', 'state.ts'));
+  const pauseSrc = srcOf(join('src', 'ui', 'pausePanel.ts'));
+  const audioSrc = srcOf(join('src', 'core', 'audio.ts'));
+  const typesSrc = srcOf(join('src', 'game', 'api', 'types.ts'));
+  const liveSrc = srcOf(join('src', 'game', 'api', 'live.ts'));
+  const hudSrc = srcOf(join('src', 'ui', 'hud.ts'));
+
+  check('verify_accessibility', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 1. 音量是**真的旋钮**，不是三档按钮。
+    asserts++;
+    if (!/setVolume\(/.test(audioSrc)) {
+      probs.push('audio 没有 `setVolume()` —— 只有三个布尔开关，外放太吵的玩家没有任何旋钮');
+    } else if (!/this\.volBgm \* this\.volBgm/.test(audioSrc) && !/\* this\.volBgm/.test(audioSrc)) {
+      probs.push('`applyBuses()` 没有乘上 `volBgm` —— 推子动了但声音不变');
+    }
+
+    // 2. 静音**落盘**。原来三个布尔只是 audio 上的普通字段，
+    //    于是每次开游戏都从「有声」开始。
+    asserts++;
+    if (!/this\.settings\.mutedAll = all/.test(mainSrc)) {
+      probs.push('静音没有写回 settings —— 每次开游戏都从有声开始，聋人每次都要重新静音');
+    }
+
+    // 3. 音量 / 配色 / 动效 / 按住改切换都在面板上，且都经过宿主落盘。
+    //    判据按**文案键**找——面板调的是 `t('reduce_motion')`，
+    //    而 `reduceMotion` 是设置字段名，两者不在同一个命名空间里。
+    asserts++;
+    for (const [key, label] of [
+      ['vol_bgm', '音乐音量'],
+      ['vol_sfx', '音效音量'],
+      ['colorblind', '色觉友好配色'],
+      ['reduce_motion', '减弱动效'],
+      ['hold_to_toggle', '按住改切换'],
+    ] as const) {
+      if (!pauseSrc.includes(`'${key}'`)) probs.push(`暂停面板里没有 ${label} 的控件（找文案键 ${key}）`);
+    }
+    asserts++;
+    for (const key of ['volBgm', 'volSfx', 'colorblind', 'reduceMotion', 'holdToToggle']) {
+      if (!mainSrc.includes(`${key} = `) && !mainSrc.includes(`${key}:`)) {
+        probs.push(`宿主没有把 ${key} 落进 settings —— 改了不生效，重开也丢`);
+      }
+    }
+
+    // 4. 改键真的派发新键。
+    asserts++;
+    if (!/onKeymapChange/.test(mainSrc)) {
+      probs.push('宿主没有接 `onKeymapChange` —— 改键只改界面，不落盘，重开就没了');
+    }
+    asserts++;
+    // 主机的 keydown 判据必须是**动作**，不是物理键。
+    if (!/switch \(this\.actionOf\(e\.code\)/.test(mainSrc)) {
+      probs.push('keydown 的 switch 仍然按物理 code 判 —— 改键之后大部分键失效');
+    }
+    asserts++;
+    // 九处方向读取里不许再有裸的 `keys.has('KeyX')`。
+    const bareKeys = [...mainSrc.matchAll(/keys\.has\('Key[A-Z]'\)/g)].length;
+    if (bareKeys > 0) {
+      probs.push(`main.ts 里还有 ${bareKeys} 处写死 \`keys.has('Key…')\` —— 漏掉的那一半动作改不了键`);
+    }
+
+    // 5. 色觉切换要**重画**，不能只挂 class。
+    asserts++;
+    if (!/swatch\.style\.setProperty\('--sw'/.test(hudSrc)) {
+      probs.push('色觉切换没有重写色块的 `--sw` —— 设置里开了，格子颜色不变');
+    }
+    asserts++;
+    if (!/fragmentColors\(/.test(hudSrc)) {
+      probs.push('HUD 仍在读固定的 `FRAGMENT_COLORS` —— 两套配色没有同一处口径');
+    }
+
+    // 6. 减弱动效要管到**游戏内**运动，媒体查询管不到的那部分。
+    asserts++;
+    if (!/this\.reduceMotion \? 0\.5/.test(hudSrc)) {
+      probs.push('节拍圈没有读减弱动效 —— 那是这个 HUD 里唯一持续运动的地方');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : '音量推子 ×2 · 静音落盘 · 配色重画 · 节拍圈可静止 · 十个动作全部走键位表',
+      asserts,
+    );
+  });
+
+  check('verify_save_pose', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 真的存读往返一次。这条是**行为**，不是源码形状。
+    const store = memoryForTest();
+    const g = new GameStateManager(store);
+    g.setPose(123.5, -456.25, 1.75);
+    g.save();
+    const g2 = new GameStateManager(store);
+    asserts++;
+    if (!g2.load()) {
+      probs.push('存了读不回来');
+    } else if (!g2.pose) {
+      probs.push('存档里没有 pose —— 续档把玩家放回出发点，而这是「骑一条闭合环线」的游戏');
+    } else {
+      const p = g2.pose;
+      if (Math.abs(p.x - 123.5) > 1e-6 || Math.abs(p.z + 456.25) > 1e-6 || Math.abs(p.h - 1.75) > 1e-6) {
+        probs.push(`pose 往返不对：${JSON.stringify(p)}`);
+      }
+    }
+
+    // 老存档没有这个字段 → 按「没存过」处理，不是崩。
+    asserts++;
+    {
+      const s2 = memoryForTest();
+      s2.setItem('gift188.save.v3', JSON.stringify({
+        version: ECON.SAVE_VERSION,
+        collected: {},
+        progress_km: 0,
+        onboarding_shown: 1,
+        economy: { lvbi: 0, inv: {}, spent_km: 0, earned_tags: [], seen_stations: [], mood: 3, seen_villain: 0, prologue_done: true, voice_done: true, ending_id: '' },
+      }));
+      const g3 = new GameStateManager(s2);
+      if (!g3.load()) probs.push('老存档（无 pose）读不回来');
+      else if (g3.pose !== null) probs.push(`老存档读出了 pose ${JSON.stringify(g3.pose)}，应为 null`);
+    }
+
+    // **坏档不许把车摆到 NaN 上。** 那是玩家手改过 / 写坏过的存档。
+    asserts++;
+    {
+      const s3 = memoryForTest();
+      const blob = {
+        version: ECON.SAVE_VERSION,
+        collected: {}, progress_km: 0, onboarding_shown: 1,
+        pose: { x: NaN, z: 0, h: 0 },
+        economy: { lvbi: 0, inv: {}, spent_km: 0, earned_tags: [], seen_stations: [], mood: 3, seen_villain: 0, prologue_done: true, voice_done: true, ending_id: '' },
+      };
+      s3.setItem('gift188.save.v3', JSON.stringify(blob).replace(/"x":null/, '"x":null'));
+      const g4 = new GameStateManager(s3);
+      g4.load();
+      if (g4.pose !== null) probs.push(`NaN 坐标被采信了：${JSON.stringify(g4.pose)} —— 车会掉出世界`);
+    }
+
+    // 重开一趟要把位置清掉。
+    asserts++;
+    {
+      const g5 = new GameStateManager(memoryForTest());
+      g5.setPose(1, 2, 3);
+      g5.reset();
+      if (g5.pose !== null) probs.push('重开之后 pose 还在 —— 玩家被放在上一趟停的那里');
+    }
+
+    // 主机那一侧：周期存 + 进世界时摆回去。
+    asserts++;
+    // **要量到它喂的是真位置，而且这一行本身是干净的。**
+    // 只查 `setPose(` 出现过是不够的：把它短路掉
+    // （`void (0) && game.setPose(...)`）断言照样绿，而位置从此是上一轮那个。
+    // 所以判据要求这一行**整行就是**那一句 —— 带 `m` 锚到行首，
+    // 前面多任何东西都算不算数。
+    if (!/^\s*game\.setPose\(p\.x, p\.z, this\.world\.ride\.headingValue\);$/m.test(mainSrc)) {
+      probs.push(
+        '`tickPoseSave()` 没有把 `ride.pos` 真的喂给 `setPose()` —— '
+        + '存档里的位置要么不更新、要么是上一轮那个',
+      );
+    }
+    asserts++;
+    if (!/this\.world\.respawn\(/.test(mainSrc)) {
+      probs.push('`enterWorld()` 没有调用 `world.respawn()` —— 续档放回了出发点');
+    }
+    asserts++;
+    if (!/respawn\(x: number, z: number, heading: number\)/.test(srcOf(join('src', 'world', 'world.ts')))) {
+      probs.push('`World` 没有 `respawn()` —— 挪车时 `lastPos` / `lastArc` 不会被一起挪，里程会跳一整圈');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length ? probs.join('；') : '存读往返 · 老档降级 · NaN 拒收 · 重开清空 · 每 4 秒一次 · respawn 挪两条锚',
+      asserts,
+    );
+  });
+
+  check('verify_volatile_store', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // **兜底 store 的 write 必须抛。** 它不抛的话 `save()` 的 catch 不跑，
+    // `takeWriteFailed()` 永远是假，那句「进度不会被保存」永远不出现——
+    // 而它本来就是为了这个场景写的。
+    asserts++;
+    if (/function memoryStore\(/.test(stateSrc)) {
+      probs.push('兜底仍然是 `memoryStore()`：它的 write 永不抛，于是无痕模式下玩家丢两小时进度而一句提示都没有');
+    }
+    asserts++;
+    if (!/function volatileStore\(/.test(stateSrc)) {
+      probs.push('没有 `volatileStore()` —— 存不进去的时候没有任何东西会说一声');
+    }
+
+    // **而且它必须真的被用上。** 只判断「`volatileStore()` 这个函数存在」
+    // 是不够的：把它留在原地而让 `defaultStore()` 退回去一个不抛的内联对象，
+    // 四条断言全绿，而无痕模式那条提示又一次不会响。
+    asserts++;
+    if (!/return volatileStore\(\);/.test(stateSrc)) {
+      probs.push('`defaultStore()` 的兜底没有返回 `volatileStore()` —— 它可能退到了一个不抛的后端，于是那句提示又不会响了');
+    }
+
+    // 而且**这一路必须真的会响**。`verify_save_notice` 注入的是
+    // 一个 write 直接抛的 store，它从没走过 `defaultStore()` 的兜底分支——
+    // 判据与实机的失败方式不同，所以这里补一条真的走兜底的。
+    asserts++;
+    {
+      const s = throwingStore();
+      const g = new GameStateManager(s);
+      g.save();
+      if (!g.takeWriteFailed()) {
+        probs.push('后端写不进去，而 `takeWriteFailed()` 仍然是 false —— 那句提示不会响');
+      } else if (g.takeWriteFailed()) {
+        probs.push('`takeWriteFailed()` 不是取走式 —— 每一帧都会再弹一次');
+      }
+    }
+
+    // 写探测也要有：Safari 无痕下 getItem 正常而 setItem 抛。
+    asserts++;
+    if (!/SAVE_PROBE_KEY/.test(stateSrc)) {
+      probs.push('`defaultStore()` 只探 `getItem` 不探 `setItem` —— Safari 无痕下会拿着一个「看起来能用」的 store 写到底');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length ? probs.join('；') : '兜底会抛 · 提示真的会响且只响一次 · 读写都探过',
+      asserts,
+    );
+  });
+
+  check('verify_touch_coverage', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 1. **「摸一下」有控件。** F 挂着节拍 / 旧物 / 琴 / 木牌 / 湖边。
+    asserts++;
+    if (!/g-touch-act/.test(touchSrc)) {
+      probs.push(
+        '触屏没有「摸一下」那颗按钮：F 挂着节拍窗口、旧物、琴、木牌**和**湖边那一屏。'
+        + '没有它，触屏玩家摸不到任何一件旧物、进不去湖边、读不了路边的字',
+      );
+    }
+    asserts++;
+    if (!/codeOf\('interact'\)/.test(touchSrc)) {
+      probs.push('触屏那颗「摸一下」合成的是写死的键码 —— 改键之后它变成一颗按了没反应的按钮');
+    }
+
+    // 2. **按住**存在。
+    asserts++;
+    if (!/holdPressed/.test(touchSrc)) {
+      probs.push('`TouchControls.state` 没有 `holdPressed` —— 触屏上根本没有「按住」这个动作，而它正是钓鱼收线 / 云 / 茶唯一的输入方式');
+    }
+    asserts++;
+    if (!/touch\.holdPressed/.test(mainSrc)) {
+      probs.push('宿主没读 `touch.holdPressed` —— 触屏按不住，钓鱼永远收不了线');
+    }
+
+    // 3. 湖边那一屏的摇杆要真的驱动相机。
+    asserts++;
+    if (!/this\.ui\.touch\.holdPressed|this\.ui\.touch\b/.test(mainSrc)) {
+      probs.push('湖边那一屏没有并联触屏输入 —— 它在触屏上站着都做不到');
+    }
+    asserts++;
+    for (const axis of ['forward', 'back', 'left', 'right']) {
+      if (!new RegExp(`${axis}:[^\\n]*sy|${axis}:[^\\n]*sx`).test(mainSrc)) {
+        probs.push(`湖边的 ${axis} 没有并联摇杆`);
+      }
+    }
+
+    // 4. 湖边那一屏**要显示触屏控件**——它是走和抛竿的唯一手段。
+    asserts++;
+    if (!/setLakesideActive/.test(uiSrc)) {
+      probs.push('UI 没有 `setLakesideActive()` —— 湖边那一屏的触屏控件跟着世界一起被藏起来了');
+    }
+    asserts++;
+    if (!/if \(this\.lakesideOn\)/.test(uiSrc)) {
+      probs.push('`applyTouchVisibility()` 没有湖边这一条例外 —— 控件会随世界可见性一起消失');
+    }
+
+    // 5. 出口。
+    asserts++;
+    if (!/exitLine = button\(/.test(srcOf(join('src', 'ui', 'lakesidePanel.ts')))) {
+      probs.push('湖边的出口还是一行说明文字而不是按钮 —— 触屏上没有出口');
+    }
+
+    // 6. API 那一侧跟着键位走。
+    asserts++;
+    if (!/export function keysOf\(/.test(typesSrc)) {
+      probs.push('契约层没有 `keysOf()` —— AI 会一直派发写死的物理键，改键之后「手动正常、AI 不动」');
+    }
+    asserts++;
+    if (!/keysOf\(action\)/.test(liveSrc)) {
+      probs.push('`live.ts` 的 `send()` 仍在用 `AI_KEYS[action]` 直接派发');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length ? probs.join('；') : '摸一下 / 按住 / 湖边摇杆 / 湖边控件可见 / 出口按钮 / AI 跟键位，七项都在',
+      asserts,
+    );
+  });
+}
+
+/** 无头回归用的内存后端。**不用 `localStorage`** —— Node 里根本没有。 */
+function memoryForTest(): { read(k: string): string | null; write(k: string, v: string): void; setItem(k: string, v: string): void; remove(k: string): void } {
+  const m = new Map<string, string>();
+  return {
+    read: (k) => m.get(k) ?? null,
+    write: (k, v) => void m.set(k, v),
+    setItem: (k, v) => void m.set(k, v),
+    remove: (k) => void m.delete(k),
+  };
+}
+
+/** 一个 `write` 直接抛的后端。用来证明「提示真的会响」。 */
+function throwingStore(): { read(k: string): string | null; write(k: string, v: string): void; remove(k: string): void } {
+  return {
+    read: () => null,
+    write: () => {
+      throw new Error('storage unavailable');
+    },
+    remove: () => {},
+  };
 }

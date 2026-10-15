@@ -315,6 +315,28 @@ export class World {
     this.lastArc = nearestArcParam(start0.x, start0.z);
   }
 
+  /**
+   * 把车挪到别处，并**把两条"上一帧在哪"的记录一起挪过去**。
+   *
+   * ## 为什么不能只调 `ride.spawn()`
+   *
+   * `lastPos` / `lastArc` 是拿来判"离路了没有"和"里程走了多少"的，
+   * 它们量的是**这一帧和上一帧之间的差**。只挪车不挪它们的话，
+   * 差值会变成"从存档点一路冲回起点"的整段距离，于是：
+   *
+   * · 里程（`progress_km`）瞬间跳掉一整圈；
+   * · 而更要紧的是 `hasLastPos` 那条离路判定会读到一次巨大的位移，
+   *   玩家一进世界就吃一次降速。
+   *
+   * 所以挪车必须连着挪这两条。**只有构造器那条路漏过它**，
+   * 而那里刚好是两条初值都还没被用过的地方。
+   */
+  respawn(x: number, z: number, heading: number): void {
+    this.ride.spawn(x, z, heading);
+    this.lastPos.copy(this.ride.pos);
+    this.lastArc = nearestArcParam(x, z);
+  }
+
   on(fn: (e: WorldEvent) => void) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
@@ -362,8 +384,8 @@ export class World {
   }
 
   // ---------------------------------------------------------------- 每帧
-  render(dt: number) {
-    this.ride.render(dt);
+  render(dt: number, driveCamera = true) {
+    this.ride.render(dt, driveCamera);
     this.sky.attachTo(this.ride.camera);
     this.sky.updateShadowFocus(this.ride.pos.x, this.ride.pos.y, this.ride.pos.z);
     // 主体补光必须排在 `ride.render()` 之后：那一步才把相机的
@@ -664,14 +686,33 @@ export class World {
    * 它不是剧情进度，是"这一趟我有没有停下来听"。重开一趟重新摸一遍，
    * 那是玩家自己的选择，不该被存档替他做。
    */
-  touchRelic(): { titleKey: string; textKey: string; index: number } | null {
+  /**
+ * 摸一件旧物。**分层**：第一次是现在，第二次是过去。
+ *
+ * 返回的 `layer` 告诉调用侧这次读到的是哪一层，界面据此决定
+ * 是弹一张普通故事卡，还是走"共鸣"那套（褪色 + 一句回响）。
+ */
+touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' | 'past'; echoKey: string } | null {
     const i = this.relicNearby;
     if (i < 0) return null;
-    if (this.relics.isHeard(i)) return null;
     const def = this.relics.placements[i]?.def;
     if (!def) return null;
-    this.relics.markHeard(i);
-    return { titleKey: def.titleKey, textKey: def.textKey, index: i };
+    const relics = this.relics;
+    if (!relics.isHeard(i)) {
+      // 第一层：**现在**。主角此刻摸到它想到的事（`relic_*_text` 全部照旧）。
+      relics.markHeard(i);
+      return { titleKey: def.titleKey, textKey: def.textKey, index: i, layer: 'now', echoKey: def.echoKey };
+    }
+    if (!relics.hasPast(i)) {
+      // 第二层：**过去**。它记得的别人（`relic_*_past`）。
+      //
+      // 这里**不**接着弹——两层之间必须隔着一次"骑走、掉头、再停回来"。
+      // 序章那句"它自己会讲它是谁、在哪儿待过"要兑现，靠的是第二次
+      // 玩家自己选择回来，而不是系统在他还没走开时把话说完。
+      relics.markPast(i);
+      return { titleKey: def.titleKey, textKey: def.pastKey, index: i, layer: 'past', echoKey: def.echoKey };
+    }
+    return null;
   }
 
   /** 离上一次打卡的位置有多远。反刷门唯一的度量，只此一处。 */
@@ -774,11 +815,26 @@ export class World {
    * 光源一起被藏掉是**有意的**：湖边那块地形是 `KHR_materials_unlit`
    * （顶点色已经是烘好的最终色），走 `MeshBasicMaterial`，不吃光；
    * 水面是自定义着色器，也不吃场景光。所以藏灯对这一屏没有任何影响。
+   *
+   * ## `foreign`：不属于主世界的场景子节点
+   *
+   * 湖岸那一组是 `main.ts` 直接 `scene.add()` 进去的，所以**遍历一定会碰到它**。
+   * 而 `v = true`（回主世界）那一次如果无差别置为可见，5.8 万面的湖岸地形与
+   * 水面就会**永久留在骑行世界里**——症状是"离开湖边之后，路边多了一片湖"。
+   *
+   * 收在这里而不是让调用方自己先 `group.visible = false`：那条路要**调用方记得**，
+   * 而 `exitLakeside()` 里已经有 `this.lakeside.exit()` 了，两份状态各管各的，
+   * 少一份都不会报错。
    */
-  setWorldVisible(v: boolean): void {
+  setWorldVisible(v: boolean, foreign?: Object3D | null): void {
     for (const child of this.scene.children) {
       const o = child as Object3D;
       if (o === this.camera) continue;
+      // 不是主世界的东西：可见性归它自己的主人管，这里一律"收起来"。
+      if (foreign && o === foreign) {
+        o.visible = false;
+        continue;
+      }
       if (child === this.sky.mesh) {
         o.visible = true;
         continue;

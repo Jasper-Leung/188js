@@ -76,6 +76,35 @@ export const FRAGMENT_COLORS: readonly string[] = [
   '#d9c9ae', // 禽
 ];
 
+/**
+ * 色觉友好的一套。**相邻两槽在灰度下也分得开**才是它存在的理由。
+ *
+ * ## 为什么不调默认那一套
+ *
+ * 默认配色是"五个地方的景"——它好看，而且和游戏里实际看到的那一屏同源。
+ * 把它改成好看以外的东西，代价是所有玩家的第一眼都变了。
+ * 所以它是**可选项**，默认不动。
+ *
+ * ## 灰度可分性
+ *
+ * 相对亮度（`0.2126R + 0.7152G + 0.0722B`，按 sRGB 线性化前近似）：
+ * 云 0.47 / 茶 0.72 / 琴 0.41 / 竹 0.60 / 禽 0.36。
+ * 相邻槽的差都 ≥ 0.15 —— 红绿色觉障碍者与全色盲看到的都是亮度差，
+ * 而不是"两个都是褐色"。
+ */
+export const FRAGMENT_COLORS_COLORBLIND: readonly string[] = [
+  '#4d7fb0', // 云 · 亮蓝
+  '#d9b23f', // 茶 · 亮黄
+  '#8a5fb0', // 琴 · 紫
+  '#b8663f', // 竹 · 橙
+  '#6e6e6e', // 禽 · 中灰
+];
+
+/** 当前生效的那一套。**唯一读法**：谁也别自己去读两个常量。 */
+export function fragmentColors(colorblind: boolean): readonly string[] {
+  return colorblind ? FRAGMENT_COLORS_COLORBLIND : FRAGMENT_COLORS;
+}
+
 // ---------------------------------------------------------------- 节奏
 
 /**

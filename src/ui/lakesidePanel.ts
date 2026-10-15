@@ -17,8 +17,9 @@
  * **鱼种名也必须进文案表**，不能图省事在 `byLang()` 里硬写。
  * 键补在 `tools/i18n-supplement.json` **和** `src/data/generated/i18n.json` 两侧。
  */
-import { el, button, setShown } from './dom';
+import { el, button, setShown, setText } from './dom';
 import { t, isEnglish } from '../i18n';
+import { codeOf } from '../core/keymap';
 import type { LakesideFrame } from '../world/lakeside';
 
 function kindName(kind: string): string {
@@ -37,25 +38,45 @@ export class LakesidePanel {
   private bar: HTMLDivElement;
   private barFill: HTMLDivElement;
   private barText: HTMLDivElement;
-  private exitLine: HTMLDivElement;
-  /** VR 入口。**只有这台机器真的支持 `immersive-vr` 时才出现。** */
+  private exitLine: HTMLButtonElement;
+  /** VR 入口。**只有这台机器真的支持 `immersive-vr` 时才出现**。 */
   private vrBtn: HTMLButtonElement;
   /** 上一次同步的「提示 + 鱼种 + 语言」，用来判断这一屏该不该重写 DOM。 */
   private lastKey = '';
+  /**
+   * 出口那颗按钮上一次写的文案。
+   *
+   * 单独记一份而不在 `lastKey` 里：`lastKey` 只在提示语变化时重写，
+   * 而切语言 / 切触屏模式都要改出口那颗——它们和鱼种没关系。
+   */
+  private lastExitKey = '';
 
   constructor(parent: HTMLElement, onVr: () => void) {
     this.root = el('div', 'g-lakeside');
     this.root.setAttribute('role', 'status');
     this.root.setAttribute('aria-live', 'polite');
 
-    this.hint = el('div', 'g-lakeside-hint');
+this.hint = el('div', 'g-lakeside-hint');
     this.bar = el('div', 'g-lakeside-bar');
     this.barFill = el('div', 'g-lakeside-bar-fill');
     this.barText = el('div', 'g-lakeside-bar-text');
-    this.exitLine = el('div', 'g-lakeside-exit');
-    this.exitLine.textContent = t('lake_exit');
+    // **出口是一颗真的按钮**，而不是一行"按 Esc 回路上"的说明。
+    //
+    // 原因很具体：触屏玩家看不见键盘，而这一屏**唯一**的出口是 Esc。
+    // `readLakesideInput()` 只从 `this.keys` 读，触屏控件又因为
+    // `applyTouchVisibility()` 随世界可见性一起被藏掉了——
+    // 于是触屏玩家进得来（如果他进得来），**出不去**。
+    //
+    // 点它 = 合成一次 `Escape`，和 `touchControls.ts` 的 `requestPause()`
+    // 走同一条路。不新开一条退出通道，是因为 `main.ts` 里判 `Escape`
+    // 的地方已经有一份相位表（湖边 / 暂停 / 面板各不相同），
+    // 复制一份早晚会和它漂。
+    this.exitLine = button(t('lake_exit'), {
+      cls: 'g-lakeside-exit',
+      onClick: () => requestExit(),
+    });
     // `requestSession()` 要用户激活，所以这一路只能从一次点击进来——
-    // 按钮而不是键盘，就是这个原因（见 `core/xr.ts` 的 `enter()`）。
+    // 按钮而不是键盘，就是这个原因（见 `core/xr.ts` 的 `enter()`）
     this.vrBtn = button(t('lake_vr_enter'), { cls: 'g-lakeside-vr', onClick: () => onVr() });
     setShown(this.vrBtn, false);
 
@@ -72,6 +93,24 @@ export class LakesidePanel {
   hide(): void {
     this.root.style.display = 'none';
     this.lastKey = '';
+    this.lastExitKey = '';
+  }
+
+  /**
+   * 触屏模式：出口那一行的文案换掉。
+   *
+   * 「Esc 回路上」在触屏上是**一句谎话**——那台设备上没有 Esc 可按。
+   * 而控件藏起来之后那一行就是玩家唯一能看到的方向，所以它必须说实话。
+   *
+   * 与 `applyTouchVisibility()` 同一个判据（`SettingsData.touchMode`
+   * 三态 → `Auto` 时看是否粗指针设备），两条读的是同一个值。
+   */
+  setTouchMode(on: boolean): void {
+    this.touchMode = on;
+    const key = `${isEnglish() ? 'en' : 'zh'}|${on ? 'touch' : 'keys'}`;
+    if (key === this.lastExitKey) return;
+    this.lastExitKey = key;
+    setText(this.exitLine, t(on ? 'lake_exit_touch' : 'lake_exit'));
   }
 
   /**
@@ -102,7 +141,6 @@ export class LakesidePanel {
       // 状态写进 data 属性而不是 class：配色走 CSS 变量，
       // 换语言 / 换主题时不用重刷一遍类名。
       this.hint.dataset.state = f.hint;
-      this.exitLine.textContent = t('lake_exit');
     }
 
     // 张力条只在收线时出现。没有鱼在拉的时候给一条空的条，
@@ -138,7 +176,28 @@ export class LakesidePanel {
    */
   setLang(): void {
     this.lastKey = '';
-    this.exitLine.textContent = t('lake_exit');
-    this.vrBtn.textContent = t('lake_vr_enter');
+    this.lastExitKey = '';
+    setText(this.exitLine, t(this.touchMode ? 'lake_exit_touch' : 'lake_exit'));
+    setText(this.vrBtn, t('lake_vr_enter'));
   }
+
+  /** 记着当前的触屏态，好让 `setLang()` 不用再问一遍宿主。 */
+  private touchMode = false;
+}
+
+/**
+ * 合成一次「暂停」键，交给 `main.ts` 里那一个判据。
+ *
+ * 与 `touchControls.ts` 的 `requestPause()` **同一个做法、同一段代码形状**：
+ * 这一屏不新开退出通道，因为那里已经有一张按相位分流的 `Escape` 表
+ * （湖边 / 暂停 / 各面板各不相同），复制一份早晚会和它漂。
+ *
+ * 键码同样走 `codeOf('pause')`——写死 `Escape` 的话，
+ * 改键之后这颗按钮会变成按了没反应的那个。
+ */
+function requestExit(): void {
+  const code = codeOf('pause');
+  window.dispatchEvent(
+    new KeyboardEvent('keydown', { code, key: code, bubbles: true }),
+  );
 }

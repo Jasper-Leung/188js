@@ -512,7 +512,19 @@ export class Ride {
   }
 
   /** 每帧：姿态、轮子、相机 */
-  render(dt: number) {
+  /**
+   * @param driveCamera 这一帧由**本类**驱动相机吗。
+   *
+   * 湖边那一屏由 `Lakeside.applyCamera()` 摆机位，而它跑在**定步长**里，
+   * 本类跑在**渲染**里——同一次 `Loop` 推进里定步长先走、渲染后走（`loop.ts`），
+   * 所以渲染里不松手的话，**最后画出来的那一帧拿的是车的跟随机位**，
+   * 湖岸的走位与转头全部没有视觉反馈，而日志里一行错都没有。
+   *
+   * 原来靠 `cameraLocked` 挡，而它只由打卡过场设置，湖边根本没碰过。
+   * 与其让每个"相机被别人接管"的场景都记得去抢那个闩锁，
+   * 不如把归属权做成**这一帧的显式参数**。
+   */
+  render(dt: number, driveCamera = true) {
     const p = this.position;
     // 第一视角要把角色藏起来。`first` 机位在 `back: 0.15 / up: 1.62`，
     // 也就是**贴在头后面**——而 `FOOT_LATERAL_OFFSET` 现在是 0，角色就坐在
@@ -535,7 +547,7 @@ export class Ride {
     const pitch = Math.atan2(hF - hB, 2.4);
     this.bikePivot.rotation.x = -pitch;
 
-    if (this.cameraLocked) return;
+    if (this.cameraLocked || !driveCamera) return;
 
     // 机位参数。**这里只读不写**：切换机位绝不能动到任何输入相关的量
     // （见 CamMode 的注释）。

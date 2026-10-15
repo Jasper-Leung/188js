@@ -44,17 +44,34 @@ import {
   TorusGeometry,
   Color,
 } from 'three';
-import { CENTERLINE, FRAGMENT_STATIONS, type StationPlacement } from '../data/route';
+import { CENTERLINE, STATIONS, type StationPlacement } from '../data/route';
 import { ROADMESH } from '../data/raw';
 import type { Terrain } from './terrain';
 
-export type RelicKind = 'bowl' | 'ring' | 'ledger' | 'shoe' | 'key';
+export type RelicKind =
+  | 'bowl' | 'ring' | 'ledger' | 'shoe' | 'key'
+  // ---- 第二章新增三件（`RELICS_CH2`）
+  | 'teapot' | 'lamp' | 'chop';
 
 export interface RelicDef {
   kind: RelicKind;
   /** 文案键。标题与正文分开取，标题是这件东西的名字，正文是它讲的话。 */
   titleKey: string;
+  /** 现在层：第一次摸到，它讲的是**主角此刻**想到的事。 */
   textKey: string;
+  /**
+   * 过去层：第二次摸到，它讲的是**它自己记得的别人**。
+   *
+   * 第一层是回忆，第二层才是过去——序章承诺的是"它自己会讲它是谁、
+   * 在哪儿待过"，而回忆不等于过去。这条键是那个承诺的兑现。
+   */
+  pastKey: string;
+  /** 回响：听完之后，骑回去的路上看得见的那一处变化。 */
+  echoKey: string;
+  /** 落在第几座驿站旁边（索引）。 */
+  stationIdx: number;
+  /** 第几章才出现。 */
+  chapter: 1 | 2;
   /** 本体颜色（sRGB） */
   color: [number, number, number];
 }
@@ -70,33 +87,114 @@ export const RELICS: RelicDef[] = [
     kind: 'bowl',
     titleKey: 'relic_bowl_title',
     textKey: 'relic_bowl_text',
+    pastKey: 'relic_bowl_past',
+    echoKey: 'relic_bowl_echo',
+    stationIdx: 7,
+    chapter: 1,
     color: [0.72, 0.78, 0.74],
   },
   {
     kind: 'ring',
     titleKey: 'relic_ring_title',
     textKey: 'relic_ring_text',
+    pastKey: 'relic_ring_past',
+    echoKey: 'relic_ring_echo',
+    stationIdx: 10,
+    chapter: 1,
     color: [0.55, 0.42, 0.24],
   },
   {
     kind: 'ledger',
     titleKey: 'relic_ledger_title',
     textKey: 'relic_ledger_text',
+    pastKey: 'relic_ledger_past',
+    echoKey: 'relic_ledger_echo',
+    stationIdx: 13,
+    chapter: 1,
     color: [0.58, 0.48, 0.36],
   },
   {
     kind: 'shoe',
     titleKey: 'relic_shoe_title',
     textKey: 'relic_shoe_text',
+    pastKey: 'relic_shoe_past',
+    echoKey: 'relic_shoe_echo',
+    stationIdx: 14,
+    chapter: 1,
     color: [0.34, 0.26, 0.24],
   },
   {
     kind: 'key',
     titleKey: 'relic_key_title',
     textKey: 'relic_key_text',
+    pastKey: 'relic_key_past',
+    echoKey: 'relic_key_echo',
+    stationIdx: 4,
+    chapter: 1,
     color: [0.60, 0.46, 0.26],
   },
 ];
+
+/**
+ * 第二章的三件。
+ *
+ * ## 为什么是三件、为什么落在这些驿站
+ *
+ * 第二章原来是一个空门：门后还是同一批目的地，五件乐事再刷一遍。
+ * 补法不是"加更多乐事"（那会撞上第一章的十六赏心乐事，一件名字收两遍），
+ * 而是**把第一章已经铺好的旧物线做完**——序章承诺"修之前我要先摸一遍"，
+ * 第一章只给了五件、每件只讲一层、听完世界一处不变。
+ *
+ * 三件的落位各有一条理由，不是随手挑的：
+ *
+ * · **茶壶（家，0 号驿）**——全剧**最新的**一件，也是最后一件。
+ *   它放在十八驿门口，于是"回到出发的地方"与"摸到最后一件东西"
+ *   变成同一个动作。守驿人 `voice_3` 在此引爆。
+ * · **驿灯（2 号驿）**——一件**还在用**的东西。它没坏，所以主角的
+ *   手艺在它身上第一次派不上用场，而它照样讲得出往事。
+ * · **刻刀（6 号驿）**——工具。第一章五件都是"留下来的"，
+ *   这一件是"用来做事的"，回扣"我这双手只会做一件事"。
+ */
+export const RELICS_CH2: RelicDef[] = [
+  {
+    kind: 'teapot',
+    titleKey: 'relic_teapot_title',
+    textKey: 'relic_teapot_text',
+    pastKey: 'relic_teapot_past',
+    echoKey: 'relic_teapot_echo',
+    stationIdx: 0,
+    chapter: 2,
+    color: [0.46, 0.38, 0.30],
+  },
+  {
+    kind: 'lamp',
+    titleKey: 'relic_lamp_title',
+    textKey: 'relic_lamp_text',
+    pastKey: 'relic_lamp_past',
+    echoKey: 'relic_lamp_echo',
+    stationIdx: 2,
+    chapter: 2,
+    color: [0.58, 0.52, 0.36],
+  },
+  {
+    kind: 'chop',
+    titleKey: 'relic_chop_title',
+    textKey: 'relic_chop_text',
+    pastKey: 'relic_chop_past',
+    echoKey: 'relic_chop_echo',
+    stationIdx: 6,
+    chapter: 2,
+    color: [0.50, 0.44, 0.34],
+  },
+];
+
+/** 全部八件，按"第一章五件 → 第二章三件"排好。 */
+export const ALL_RELICS: RelicDef[] = [...RELICS, ...RELICS_CH2];
+
+/** 第 n 章一共该有几件。门后的内容量由它回答，而不是由 `RELICS.length` 猜。 */
+export function relicsOfChapter(chapter: number): RelicDef[] {
+  return ALL_RELICS.filter((r) => r.chapter <= chapter);
+}
 
 /**
  * 旧物中心离中心线多少米。**由路宽推出来，不是一个孤立的数。**
@@ -127,6 +225,12 @@ export const RELIC_REACH = 2.8;
 
 /** 多少米内亮起"这儿有东西"的提示圈。再远就该靠眼睛找了。 */
 export const RELIC_CUE_RADIUS = 18;
+
+/**
+ * 听完之后那圈青灰亮多远。比 `RELIC_CUE_RADIUS` 远一倍——
+ * 它要回答的是"我一共听了几件"，那个问题在**几十米外**就该看得见答案。
+ */
+export const RELIC_ECHO_RADIUS = 34;
 
 // ---------------------------------------------------------------- 几何
 
@@ -217,6 +321,72 @@ function buildRelicBody(kind: RelicKind, color: [number, number, number]): Group
       }
       break;
     }
+    // ---- 第二章三件。面数与上面五件同一量级（各 ≤200 面）。
+    case 'teapot': {
+      // 茶壶：壶身 + 壶盖 + 把手 + 壶嘴。**倒扣着放的**——
+      // 一件被收起来的东西不该是"摆好待用"的姿态。
+      const body = new Mesh(new SphereGeometry(0.15, 12, 8), mat);
+      body.position.y = 0.15;
+      body.scale.set(1, 0.78, 1);
+      g.add(body);
+      const lid = new Mesh(new CylinderGeometry(0.075, 0.085, 0.03, 10), mat);
+      lid.position.set(0, 0.27, 0);
+      g.add(lid);
+      const knob = new Mesh(new SphereGeometry(0.022, 6, 5), mat);
+      knob.position.set(0, 0.3, 0);
+      g.add(knob);
+      // 把手：一个半环压在侧面。
+      const handle = new Mesh(new TorusGeometry(0.07, 0.014, 4, 12), mat);
+      handle.position.set(-0.15, 0.17, 0);
+      handle.rotation.y = Math.PI / 2;
+      g.add(handle);
+      // 壶嘴。
+      const spout = new Mesh(new CylinderGeometry(0.018, 0.028, 0.13, 6), mat);
+      spout.position.set(0.14, 0.2, 0);
+      spout.rotation.z = -0.6;
+      g.add(spout);
+      break;
+    }
+    case 'lamp': {
+      // 驿灯：底座 + 灯身 + 提梁。**灯还亮着**——用一点自发光当唯一的
+      // "它是活的"信号，不加光源（加了要跟 `setWorldVisible` 打架）。
+      const base = new Mesh(new CylinderGeometry(0.09, 0.11, 0.04, 10), mat);
+      base.position.y = 0.02;
+      g.add(base);
+      const glass = new Mesh(
+        new CylinderGeometry(0.065, 0.075, 0.16, 10),
+        new MeshStandardMaterial({
+          color: new Color(0.94, 0.86, 0.62),
+          emissive: new Color(0.72, 0.58, 0.26),
+          emissiveIntensity: 0.85,
+          roughness: 0.4,
+        }),
+      );
+      glass.position.y = 0.13;
+      g.add(glass);
+      const bail = new Mesh(new TorusGeometry(0.05, 0.009, 4, 10, Math.PI), mat);
+      bail.position.y = 0.23;
+      bail.rotation.y = Math.PI / 2;
+      g.add(bail);
+      break;
+    }
+    case 'chop': {
+      // 刻刀：刀身 + 柄。斜插在地上，刀口朝外——
+      // 它不是被扔下的，是被人插在那儿等下一个人来拿。
+      const blade = new Mesh(new BoxGeometry(0.028, 0.24, 0.09), new MeshStandardMaterial({
+        color: new Color(0.72, 0.70, 0.66),
+        roughness: 0.34,
+        metalness: 0.6,
+      }));
+      blade.position.set(0, 0.2, 0);
+      blade.rotation.z = 0.16;
+      g.add(blade);
+      const grip = new Mesh(new CylinderGeometry(0.022, 0.026, 0.13, 8), mat);
+      grip.position.set(0.02, 0.05, 0);
+      grip.rotation.z = 0.16;
+      g.add(grip);
+      break;
+    }
   }
   return g;
 }
@@ -235,6 +405,10 @@ function buildCueRing(): Mesh {
   ring.renderOrder = 2;
   return ring;
 }
+
+/** 回响之后那圈的颜色：暖黄（"还有东西没听"）→ 青灰（"这一件讲完了"）。 */
+const CUE_PENDING = new Color(0.92, 0.86, 0.66);
+const CUE_SETTLED = new Color(0.62, 0.74, 0.72);
 
 // ---------------------------------------------------------------- 落位
 
@@ -316,17 +490,54 @@ export class Relics {
   readonly placements: RelicPlacement[] = [];
   private cues: Mesh[] = [];
   private bodies: Object3D[] = [];
+  /**
+   * 分层闩锁，两个集合。
+   *
+   * 原来只有 `heard`，于是每件旧物**一生只讲一次**——而序章承诺的是
+   * "它自己会讲它是谁、在哪儿待过"，一遍独白兑现不了后半句。
+   * 现在第一次进 `heard`，第二次进 `past`。
+   *
+   * 两个集合都**不进存档**（旧物是"这一趟听过的"，不是"这个人知道的"）：
+   * 重开一趟要重新停下来听一遍，而这正是它值钱的原因。
+   */
   private heard = new Set<number>();
+  private past = new Set<number>();
   private time = 0;
+  private chapter: number;
+  private terrain: Terrain;
 
-  constructor(terrain: Terrain) {
+  constructor(terrain: Terrain, chapter = 1) {
+    this.terrain = terrain;
+    this.chapter = chapter;
     this.group.name = 'relics';
-    for (let i = 0; i < RELICS.length; i++) {
-      const st = FRAGMENT_STATIONS[i];
+    this.build();
+  }
+
+  /**
+   * 换章时把第二章那三件**建出来**。
+   *
+   * ## 为什么不一开始全建好、只用 visible 开关
+   *
+   * 两个原因，一个是为了几何预算（`verify_relics` 给五件 2000 面，
+   * 八件建完就超了，而它们在屏幕上只有几十个像素）；
+   * 另一个更实际：**第一章的玩家不该在路边看见一件还摸不了的东西**。
+   * 藏着的东西会在小地图与"这边有东西"的提示圈里露馅。
+   */
+  setChapter(chapter: number): void {
+    if (chapter <= this.chapter) return;
+    this.chapter = chapter;
+    this.build();
+  }
+
+  private build(): void {
+    const want = relicsOfChapter(this.chapter);
+    if (want.length <= this.placements.length) return;
+    for (let i = this.placements.length; i < want.length; i++) {
+      const def = want[i];
+      const st = STATIONS[def.stationIdx];
       if (!st) continue;
-      const def = RELICS[i];
       const site = relicSite(st);
-      const y = terrain.getHeightAt(site.x, site.z);
+      const y = this.terrain.getHeightAt(site.x, site.z);
 
       const holder = new Group();
       holder.position.set(site.x, y, site.z);
@@ -361,13 +572,22 @@ export class Relics {
       const p = this.placements[i];
       const d = Math.hypot(px - p.x, pz - p.z);
       const cue = this.cues[i];
-      const show = !this.heard.has(i) && d < RELIC_CUE_RADIUS;
+      // **两层都听完才熄。**原来判据是 `!heard`，现在只听了第一层的话
+      // 圈就没了——那等于告诉玩家"这件东西已经没有别的可说了"，
+      // 而那正是第二章要做的事。
+      const settled = !this.pending(i);
+      // 听完的那一件留一圈**常亮**的青灰：骑回去时看得见自己听过了几件。
+      // 这是"回响"里唯一不要新系统的那部分（另一部分是一句 `echoKey` 文案）。
+      const show = (this.pending(i) && d < RELIC_CUE_RADIUS) || (settled && d < RELIC_ECHO_RADIUS);
       cue.visible = show;
+      const m = cue.material as MeshBasicMaterial;
       if (show) {
         // 越近越实。远处是一圈很淡的提示，近处才像"这儿有东西"。
-        const k = 1 - d / RELIC_CUE_RADIUS;
-        (cue.material as MeshBasicMaterial).opacity = 0.18 + 0.52 * k;
-        const s = 0.9 + 0.1 * Math.sin(this.time * 1.6 + i);
+        const range = settled ? RELIC_ECHO_RADIUS : RELIC_CUE_RADIUS;
+        const k = 1 - d / range;
+        m.opacity = settled ? 0.16 + 0.2 * k : 0.18 + 0.52 * k;
+        m.color.copy(settled ? CUE_SETTLED : CUE_PENDING);
+        const s = settled ? 1 : 0.9 + 0.1 * Math.sin(this.time * 1.6 + i);
         cue.scale.setScalar(s);
       }
       // 旧物在轻轻转。静止的东西读成道具，转的才读成"可以碰"。
@@ -412,6 +632,40 @@ export class Relics {
 
   isHeard(i: number): boolean {
     return this.heard.has(i);
+  }
+
+  /** 第二层已听过。 */
+  hasPast(i: number): boolean {
+    return this.past.has(i);
+  }
+
+  markPast(i: number) {
+    this.past.add(i);
+  }
+
+  /**
+   * 还没听完 —— 也就是"这里还欠一次停车"。
+   *
+   * 提示圈与 F 键的候选都读它。**第一层听过不算听完**，
+   * 而这是第二章那三件与第一章五件唯一的行为差异。
+   */
+  pending(i: number): boolean {
+    return !this.past.has(i);
+  }
+
+  /** 全部两层都听完的件数（给 HUD 与判据）。 */
+  get listenedCount(): number {
+    return this.past.size;
+  }
+
+  /** 本章一共该听几件。 */
+  get totalCount(): number {
+    return relicsOfChapter(this.chapter).length;
+  }
+
+  /** 本章还有几件没听完。目标文案与结算屏读它。 */
+  get remainingCount(): number {
+    return Math.max(0, this.totalCount - this.past.size);
   }
 
   get heardCount(): number {

@@ -48,7 +48,8 @@ import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, de
 import { createLiveApi, type LiveApiHost } from './game/api';
 import type { AiObservation } from './game/api';
 import type { BeatEvent } from './game/beat';
-import type { RideInput } from './world/ride';
+import { roadSpawnPose, type RideInput } from './world/ride';
+import { actionOf, codeOf, setKeymap, type GameAction } from './core/keymap';
 import { MODE_TUNE } from './world/vehicle';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
@@ -546,6 +547,24 @@ class App {
   private keys = new Set<string>();
 
   /**
+   * 某个**动作**此刻按住了没有。
+   *
+   * 原来这一类是九处 `this.keys.has('KeyW')`，而键位一可重映射，
+   * 那九处就必须跟着改——漏一处就得到"方向能重映射、刹车不能"这种
+   * 半生不熟的状态，而玩家没有办法从界面上看出是哪一半坏了。
+   *
+   * 所以**物理键一律不在这条路径上出现**，全部走 `codeOf(action)`。
+   */
+  private held(action: GameAction): boolean {
+    return this.keys.has(codeOf(action));
+  }
+
+  /** 物理键 → 动作（`null` = 没绑到任何可重映射动作）。 */
+  private actionOf(code: string): GameAction | null {
+    return actionOf(code);
+  }
+
+  /**
    * 湖边一屏。
    *
    * **它不是一颗"场景"，是一个挂在同一棵场景树上的 group**——
@@ -563,9 +582,11 @@ class App {
   private xrEndHooks: Array<() => void> = [];
 
   /** 已经弹过"那边有东西"的旧物。**只活在本次会话**，不落盘。 */
-  private relicHinted = new Set<number>();
+  private relicHinted = new Set<string>();
+  /** 片尾彩蛋只放一次。反复结算（反复点「结束这一趟」）不该被彩蛋刷屏。 */
+  private epilogueShown = false;
   /** 已经报出过名字的旧物。和上面那个分开，理由见 `updateRelicHint`。 */
-  private relicNamed = new Set<number>();
+  private relicNamed = new Set<string>();
   private touchMode = false;
   private demoActive = false;
   private demoT = 0;
@@ -598,6 +619,38 @@ class App {
     this.world = world;
     this.settings = settings;
     this.capability = capability;
+    // **设置在构造时就生效**，不等玩家打开暂停面板。
+    // 键位必须赶在第一次 `keydown` 之前灌进去——
+    // 而 `this.keys` 在建世界那一刻就已经开始收键了。
+    this.applyAccessibilitySettings();
+  }
+
+  /**
+   * 把设置里那些"不是画质"的部分推到运行时。
+   *
+   * ## 为什么要单独一个方法而不是散在面板回调里
+   *
+   * 四样东西各有各的"生效时机"：
+   *
+   * · **音量 / 静音** —— 必须在 `AudioContext` 建起来**之前**摆好，
+   *   否则首次解锁那一瞬间会先按默认音量放一段再被拉低。
+   * · **键位** —— 必须在第一次 `keydown` 之前灌进去。
+   * · **色觉** —— 一次 DOM 属性 + 一次 HUD 重绘。
+   * · **减弱动效** —— 一次 DOM 属性，CSS 与 3D 两侧都读它。
+   *
+   * 而它们的**共同点**是：都能从设置面板之外的路径被触发
+   * （启动、读档、切语言）。散在面板回调里的话，
+   * "切语言之后静音没了"这种 bug 就会在两年后出现而没人想得起来为什么。
+   */
+  private applyAccessibilitySettings(): void {
+    setKeymap(this.settings.keymap as Partial<Record<GameAction, string>>);
+    audio.volBgm = this.settings.volBgm;
+    audio.volSfx = this.settings.volSfx;
+    audio.setFullyMuted(this.settings.mutedAll);
+    if (audio.bgmMuted !== this.settings.mutedBgm) audio.setBgmMuted(this.settings.mutedBgm);
+    if (audio.sfxMuted !== this.settings.mutedSfx) audio.setSfxMuted(this.settings.mutedSfx);
+    this.ui.setColorblind(this.settings.colorblind);
+    this.ui.setReduceMotion(this.settings.reduceMotion);
   }
 
   /**
@@ -653,6 +706,37 @@ class App {
           audio.setBgmMuted(bgm);
           audio.setSfxMuted(sfx);
           audio.setFullyMuted(all);
+          // **静音现在落盘。** 原来三个布尔只是 `audio` 上的普通字段，
+          // 于是**每一次开游戏都从"有声"开始**——
+          // 聋人 / 听力不佳的玩家每次都要重新静音一次。
+          // 这是「把静音当开关」和「把静音当设置」的区别。
+          this.settings.mutedBgm = bgm;
+          this.settings.mutedSfx = sfx;
+          this.settings.mutedAll = all;
+          saveSettings(this.settings);
+        },
+        onAccessibilityChange: (patch) => {
+          // 音量滑块**每拖一下都调一次**，所以只有非音量的三项才落盘；
+          // 音量由 `onVolumeCommit` 在松手时落一次——写 localStorage
+          // 一次 60Hz 的拖拽会在弱机上造成可测量的卡顿。
+          if (patch.volBgm !== undefined) audio.setVolume('bgm', patch.volBgm);
+          if (patch.volSfx !== undefined) audio.setVolume('sfx', patch.volSfx);
+          if (patch.colorblind !== undefined) {
+            this.settings.colorblind = patch.colorblind;
+            this.ui.setColorblind(patch.colorblind);
+          }
+          if (patch.reduceMotion !== undefined) {
+            this.settings.reduceMotion = patch.reduceMotion;
+            this.ui.setReduceMotion(patch.reduceMotion);
+          }
+          if (patch.holdToToggle !== undefined) {
+            this.settings.holdToToggle = patch.holdToToggle;
+          }
+          saveSettings(this.settings);
+        },
+        onKeymapChange: (keymap) => {
+          this.settings.keymap = keymap;
+          saveSettings(this.settings);
         },
         onLangToggle: () => this.toggleLang(),
         onCheckIn: () => this.tryCheckIn(),
@@ -1000,8 +1084,11 @@ class App {
 
       this.keys.add(e.code);
 
-      switch (e.code) {
-        case 'Escape':
+      // switch 的判据是**动作**而不是物理键——可重映射的十个动作走这张表，
+      // 而 F8/F9/F10/KeyP/KeyB/Digit1~4 这些固定功能键在 switch 的下半段
+      // 按物理 code 直接匹配（它们不给重映射，理由见 keymap.ts）。
+      switch (this.actionOf(e.code) ?? e.code) {
+        case 'pause':
           e.preventDefault();
           // **先问面板，再问相位。**
           //
@@ -1017,12 +1104,11 @@ class App {
           else if (this.phase === 'paused') this.resume();
           else if (this.phase === 'roaming') this.pause();
           break;
-        case 'Space':
-        case 'Enter':
+        case 'confirm':
           e.preventDefault();
           this.onConfirm();
           break;
-        case 'KeyM':
+        case 'mute':
           audio.setFullyMuted(!audio.fullyMuted);
           this.ui.syncFromState();
           break;
@@ -1054,12 +1140,12 @@ class App {
         case 'KeyB':
           if (this.debug?.isShown) this.debug.setMode('buildings');
           break;
-        case 'KeyV':
+        case 'camera':
           // 切视角。`world.ride.cycleCamera()` **只改机位**，
           // 不碰任何运动状态 —— 见 ride.ts 的 CamMode 注释。
           this.ui.showToast(t('cam_switched', { mode: t(`cam_${this.world.ride.cycleCamera()}`) }), 1200);
           break;
-        case 'KeyE':
+        case 'vehicle':
           // 切载具。滑板模型没加载成功时不切，并说清为什么——
           // 按了键没反应而不解释，玩家会以为 E 坏了。
           //
@@ -1074,7 +1160,7 @@ class App {
             );
           }
           break;
-        case 'KeyF': {
+        case 'interact': {
           // **F 同时服务四件事**，而顺序是有讲究的：先节拍，后路边。
           //
           // 节拍窗口只有 1.15s，而路边那些要停下来才够得着——
@@ -1085,11 +1171,11 @@ class App {
             this.ui.setBeat(this.world.beats.state);
             break;
           }
-          this.touchRoadside();
-          // 湖边一屏挂在这一串的**最后**：F 已经是"摸一下眼前这个"的唯一落点，
-          // 而它按节拍窗口 → 路边的顺序问下来，轮到湖边时前面都没有抢走。
-          // 刻意不占用确认键（空格）：那条链是打卡与小游戏共用的，
-          // 插进去等于让"在湖边站着"和"在驿站门口站着"抢同一个动词。
+          // **短路**：路边这一排接住了就不再往下问。湖边一屏挂在这一串的
+          // **最后**，而它的门槛（碗心 + 半径 + 60m）宽到碎片驿站旁就够得着——
+          // 碎片驿站本来就临水，于是不短路的话「摸一下旧物」和「走进湖边」
+          // 会在同一次按键里一起发生，而玩家只以为按了一下。
+          if (this.touchRoadside()) break;
           this.tryEnterLakeside();
           break;
         }
@@ -1115,14 +1201,12 @@ class App {
     window.addEventListener('blur', () => this.keys.clear());
   }
 
-  /**
- * 「摸一下眼前这个」。F 键唯一的落点。
- *
- * ## 三样东西共用一个动词，是刻意的
- *
- * 旧物、琴音林那张琴、路肩上的木牌——三样都不是 UI 上的按钮，
- * 都是"世界里的东西，伸手碰一下"。主角的设定是
- * 「东西坏了我修，修之前我要先摸一遍」，
+/**
+   * 「摸一下眼前这个」。F 键唯一的落点。
+   *
+   * 旧物、琴音林那张琴、路肩上的木牌——三样都不是 UI 上的按钮，
+   * 都是"世界里的东西，伸手碰一下"。主角的设定是
+   * 「东西坏了我修，修之前我要先摸一遍」，
  * 所以它们共用一把键、共用一种手感，比各配一个键更像**这个人**。
  *
  * ## 顺序：按距离，近的优先
@@ -1133,34 +1217,89 @@ class App {
  * 而那种 bug 的症状是"我站在木牌前面，按 F 弹出来的却是旧物"——
  * 界面上没有任何东西能解释它。
  *
- * 一样都够不着时**什么都不做，也不解释**：玩家正对着它，按了没反应
- * 本身就是"我得再靠近一点"的反馈，一句提示反而是在教他读界面。
- */
-private touchRoadside() {
+* 一样都够不着时**什么都不做，也不解释**：玩家正对着它，按了没反应
+   * 本身就是"我得再靠近一点"的反馈，一句提示反而是在教他读界面。
+   *
+   * ## 返回 `true` = 这一排接住了，链子到此为止
+   *
+   * 原来它返回 `void`，而调用处无条件接着问湖边。于是按一次 F 可以
+   * **同时**吃掉遗物故事卡并把玩家传送进湖边：在碎片驿站旁两边都够得着
+   * （驿站本来就临水，而湖边的门槛是「碗心 + 半径 + 60m」）。
+   * 症状是"我摸了一下那件东西，然后画面突然变成湖"——两件事都发生了，
+   * 而玩家只以为按了一下。
+   *
+   * 这一排内部本来**就是**互斥的（`cands.sort` 取最近的那一个），
+   * 所以"要么接住、要么没接住"一直是它真实的形状，缺的只是说出来。
+   *
+   * @returns 这一排里有东西被触发了。
+   */
+private touchRoadside(): boolean {
   const w = this.world;
   const cands: { kind: 'relic' | 'qin' | 'sign'; d: number }[] = [];
-  if (w.relicNearby >= 0 && !w.relics.isHeard(w.relicNearby)) {
+  if (w.relicNearby >= 0 && w.relics.pending(w.relicNearby)) {
     cands.push({ kind: 'relic', d: w.relicDistance });
   }
   if (w.qinInReach) cands.push({ kind: 'qin', d: w.qinDistance });
   if (w.signInReach) cands.push({ kind: 'sign', d: w.signDistance });
-  if (cands.length === 0) return;
+  if (cands.length === 0) return false;
   cands.sort((a, b) => a.d - b.d);
 
   switch (cands[0].kind) {
     case 'relic': {
       // 摸旧物。**主角唯一属于自己的那件事**——序章里他明说
       // "我这双手只会做一件事"，而那三张卡之后游戏再也没给过他一次机会。
+      //
+      // 分层：第一次读到 `textKey`（现在），第二次读到 `pastKey`（过去）。
+      // 两层之间隔着一次"骑走、掉头、再停回来"，所以这里**一次只出一张卡**。
       const r = w.touchRelic();
-      if (r) this.ui.showStoryCard(t(r.textKey), t(r.titleKey));
-      return;
+      if (!r) return false;
+      this.ui.showStoryCard(t(r.textKey), t(r.titleKey));
+      this.onRelicListened(r.layer, r.echoKey);
+      return true;
     }
     case 'qin':
       void this.runGuqin();
-      return;
+      return true;
     case 'sign':
       this.touchSign();
-      return;
+      return true;
+  }
+}
+
+/**
+ * 听见一件旧物之后。
+ *
+ * ## 过去层要"多一句"，因为倾听原本没有后果
+ *
+ * 计划书 §2 的缺口之三是"倾听不回响任何东西"：听完一件旧物，世界一处不变，
+ * 于是摸它这件事**没有后果**，也就没有理由回来摸第二遍。
+ * 回响给两样东西，都不新造系统：
+ *
+ * · **一句 `echoKey`**——这是一件东西在"世界这边"留下的痕迹。
+ * · **一圈常亮的青灰**——骑回去时看得见自己听过了几件（`Relics.update`）。
+ *
+ * ## 这里**故意不再引 `voice_*`**
+ *
+ * `voice_1` / `voice_2` / `voice_3` 已经在第一次靠近十八驿时整段播过了
+ * （`world.ts` 的 `claimVoiceGuide()` 一次性闩锁）。再引一遍的结果是
+ * 同一段话玩家听两次——而它们本来就不是"每件旧物附赠的一句"，
+ * 那是守驿人的独白，重复只会把那句话稀释掉。
+ *
+ * 收束交给 `relic_teapot_echo`（"茶还温着"）与结算后的彩蛋，
+ * 后者正面回答序章那句"代价是没有人记得你"。
+ */
+private onRelicListened(layer: 'now' | 'past', echoKey: string): void {
+  const relics = this.world.relics;
+  // 顶栏那一行「还剩 %d 件」每听完一件就要掉一格。
+  // 不刷的话它会一直停在打开这一章时的数——而玩家刚在路上数过。
+  game.setChapter2Remaining(relics.remainingCount);
+  const index = this.world.relicNearby;
+  const def = index >= 0 ? relics.placements[index]?.def : undefined;
+
+  if (layer === 'past') {
+    this.ui.showStoryCard(t(echoKey), t('relic_echo_title'), 5200);
+    // 爷爷的茶壶是全剧最新的一件，也是最后一件——第二章到此闭合。
+    if (def && def.kind === 'teapot') game.claimChapter2Complete();
   }
 }
 
@@ -1285,7 +1424,21 @@ private onConfirm() {
     const p = this.world.ride.pos;
     const near = getBasins().some((b) => Math.hypot(p.x - b.cx, p.z - b.cz) < b.radius + 60);
     if (!near) return;
-    await this.enterLakeside();
+    // **调用点是 keydown 处理器，它不会 await，也不会 catch。**
+    //
+    // `load()` 内部那条 Promise 可以在 `ensureMeshopt()` 上 reject，
+    // 而那个 reject 会被 `Lakeside.loading` 与 `assets.ts` 的 `cache`
+    // **两边都记住**——于是 `failed` 永远是假、每一次按 F 都再抛一次，
+    // 而界面上是"在加载…"飘了一次又一次。
+    //
+    // 兜在这里而不是把 `load()` 改成永不 reject：加载失败是要让玩家
+    // 知道的（`lake_missing`），问题只在于那个 reject 顺着调用栈跑掉了。
+    try {
+      await this.enterLakeside();
+    } catch (e) {
+      console.warn('[gift188]', t('lake_missing'), e);
+      this.ui.showToast(t('lake_missing'), 2600);
+    }
   }
 
   /**
@@ -1329,14 +1482,35 @@ private onConfirm() {
         this.ui.showToast(t('lake_missing'), 2600);
         return;
       }
+      // ↓↓ 模型到位时世界可能已经不在骑行相位了。
+      //
+      // `tryEnterLakeside()` 只在 `await` **之前**问过一次 `phase === 'roaming'`。
+      // 这几秒里玩家完全可以按 Esc（→ `paused`）、在驿站门口按空格
+      // （→ `checkin`）、甚至重新开始。于是 `goPhase('lakeside')` 会从
+      // 那两个相位发起——**两条边都不在 `PHASE_EDGES` 里**，而症状都很难归因：
+      //
+      // · 暂停面板盖在湖面上，而 `fixed()` 只认 `lakeside`：
+      //   主循环推进了、湖边在跑，可玩家看见的是一层遮罩；
+      // · 打卡过场冻在半截：`world.advanceCheckIn` 不再被调用，
+      //   那个 Promise 永远不 resolve。
+      //
+      // 所以这里**再问一次**，不在就安静地退回骑行——
+      // 玩家刚按过一次 F，什么都没发生，那本来就该是什么都没发生。
+      if (this.phase !== 'roaming') return;
     }
     this.goPhase('lakeside');
-    // 主世界的 HUD、小地图、道具栏全收掉。走 `syncFromState()` 而不是
-    // 直接调 UI 那个私有的可见性开关：HUD 该不该显示由 `isInWorld(phase)`
-    // 说了算，而 `lakeside` 不在那个集合里——这正是我们要的效果。
-    // 绕过它的话，这一屏出来之后整套骑行 HUD 会浮在一片湖岸上。
+    // 主世界的 HUD、小地图、道具栏全收掉。
+    //
+    // ⚠ **必须显式调 `setWorldChromeVisible()`**：`syncFromState()` 只同步**内容**，
+    // 一行可见性都不碰。原来这里写的是"`isInWorld(phase)` 说了算"——那句话是错的，
+    // `isInWorld` 在整个 `ui/` 里没有任何调用点，只有判据在用。
+    this.ui.setWorldChromeVisible(false);
+    // **必须在 setWorldVisible 之前**：applyTouchVisibility() 读它决定
+    // 控件藏不藏，而它自己是在 setWorldVisible() 里被调用的。
+    this.ui.setLakesideActive(true);
     this.ui.syncFromState();
-    this.world.setWorldVisible(false);
+    // `foreign` 那一组不属于主世界：这一次遍历不能把它按 `v` 摆弄。
+    this.world.setWorldVisible(false, this.lakeside.group);
     this.lakeside.enter();
     this.lakeside.seedFor(this.world.ride.pos.x, this.world.ride.pos.z);
     // 进这一屏才开 XR。理由见字段上那条注释。
@@ -1357,7 +1531,11 @@ private onConfirm() {
     this.lakeside.exit();
     this.ui.hideLakeside();
     this.xr?.disable();
-    this.world.setWorldVisible(true);
+    // 顺序有讲究：**先收湖岸，再开主世界**。反过来的话 `setWorldVisible(true)`
+    // 那一次遍历会把湖岸这一组也按 `true` 摆上，5.8 万面的地形就永久留在路上了。
+    this.ui.setLakesideActive(false);
+    this.world.setWorldVisible(true, this.lakeside.group);
+    this.ui.setWorldChromeVisible(true);
     this.ui.syncFromState();
     this.lookDx = 0;
     this.lookDy = 0;
@@ -1414,16 +1592,31 @@ private onConfirm() {
    * 而**不是**在这一屏另开一条手柄通道——两条通道早晚会漂。
    */
   private readLakesideInput(dt: number): void {
-    const f = this.confirmPressed;
+    const touch = this.ui.touch;
+    // 触屏的边沿与键盘的边沿**并联**，读完都要清。
+    // 漏清触屏那一份的症状是"进湖边自动抛一次竿"——
+    // 而那一竿落下去之后玩家还没站稳。
+    const f = this.confirmPressed || touch.checkInPressed;
     this.confirmPressed = false;
+    touch.checkInPressed = false;
+    // 摇杆是**模拟量**，这里过一道死区再当方向用。
+    // 0.35 不是随手取的：`stickVector()` 的死区是 0.16，
+    // 而 0.35 是"拇指自然摆过去的最小位移"——低于它玩家觉得自己没推。
+    const sx = touch.moveX;
+    const sy = touch.moveY;
+    const axis = (v: number) => (v > 0.35 ? 1 : v < -0.35 ? -1 : 0);
+    // 方向与确认键都走 `codeOf()`：改了键位之后，这一屏要跟着一起改，
+    // 而不是变成「只有骑行是新的、湖边还是旧的」。
+    // 方向键（Arrow*）**永远并联**——它们是系统级的方向，
+    // 不在重映射表里（见 `keymap.ts`），而让它们继续有效是纯收益。
     this.lakeFrame = this.lakeside.update(dt, {
-      forward: this.keys.has('KeyW') || this.keys.has('ArrowUp'),
-      back: this.keys.has('KeyS') || this.keys.has('ArrowDown'),
-      left: this.keys.has('KeyA') || this.keys.has('ArrowLeft'),
-      right: this.keys.has('KeyD') || this.keys.has('ArrowRight'),
+      forward: this.held('forward') || this.keys.has('ArrowUp') || sy < -0.35,
+      back: this.held('back') || this.keys.has('ArrowDown') || sy > 0.35,
+      left: this.held('left') || this.keys.has('ArrowLeft') || axis(sx) < 0,
+      right: this.held('right') || this.keys.has('ArrowRight') || axis(sx) > 0,
       yawDelta: this.lookDx,
       pitchDelta: this.lookDy,
-      hold: this.keys.has('Space') || this.keys.has('Enter'),
+      hold: this.held('confirm') || this.keys.has('Enter') || touch.holdPressed,
       press: f,
     }, this.xr?.presenting() ?? false);
     this.lookDx = 0;
@@ -1535,13 +1728,59 @@ private onConfirm() {
     // 而 hook 是从 UI 内部发出来的，所以这条路径可能被走两次
     if (this.phase === 'roaming') {
       this.ui.enterWorld();
+      this.refreshRelicsForChapter();
       return;
     }
     this.goPhase('roaming');
     this.ui.enterWorld();
     this.ui.syncFromState();
+    // 续档进世界时 `chapter` 可能是 2（玩家打完第一章存了档、退出、重进）。
+    // 旧档没有这个字段时它读作 1，于是建三件那一步被跳过——正确的降级。
+    this.refreshRelicsForChapter();
+    // **把人放回他上次停的地方。** 这一步必须在序章之后——
+    // `playPrologue()` 走的是打卡过场，它自己会摆车。
+    // 只在"续档"这一条路上生效：标题页的「开始旅程」已经把
+    // `resetState()` 跑过一遍，`pose` 是 null，于是这一次是空操作。
+    this.restorePose();
     this.playPrologue();
   }
+
+  /**
+   * 把车放回存档里那个位置。
+   *
+   * ## 为什么放在 `enterWorld()` 的最后而不是建世界时
+   *
+   * `World` 构造时就 `spawn()` 在起点驿站，那是**新的一趟**该有的样子。
+   * 读档是这一趟的**中途**，两件事的时序必须分开：先让世界按新一趟建好
+   * （地形、植被、驿站模型都在它该在的地方），再把车挪过去。
+   *
+   * ## 为什么要落到**路面上**
+   *
+   * 存档记的是玩家停的地方，而那个地方可能压在路肩上、甚至在草里。
+   * 直接照搬的话，玩家会从一个歪着的姿态开始，而第一个症状是
+   * "按 W 之后车斜着离开沥青"——和 `roadSpawnPose()` 那段注释里
+   * 记的是同一种病。所以把 x/z 投回最近的**中心线点**再重建朝向，
+   * 等于「他停在了这儿，他面朝路」。
+   */
+  private restorePose(): void {
+    const p = game.pose;
+    if (!p) return;
+    const here = roadSpawnPose(p.x, p.z);
+    this.world.respawn(here.x, here.z, here.heading);
+  }
+
+  /**
+   * 骑行中定期把位置写进存档。
+   *
+   * ## 为什么是 4 秒而不是"退出时才存"
+   *
+   * 关标签页、崩浏览器、设备没电——这三种都拿不到退出钩子，
+   * 而它们的症状都是同一个："我骑了半小时，回来还在出发点"。
+   * 4 秒的代价是一次几百字节的 `localStorage` 写入（`progress_km`
+   * 之类本来就每帧在写），换来的是最坏情况下只丢 4 秒。
+   */
+  private poseSaveClock = 0;
+  private static readonly POSE_SAVE_S = 4;
 
   /**
    * **序章**：只在 `prologueDone` 为假时播，播完立刻落盘。
@@ -1749,6 +1988,32 @@ private onConfirm() {
     this.loop.suspend();
     this.ui.showEndCard();
     audio.sfx('export', 0.6);
+    this.queueEpilogue();
+  }
+
+  /**
+   * 片尾彩蛋：结算屏之后**再补一张故事卡**，两结局各一版。
+   *
+   * ## 为什么它回答的是序章那一句
+   *
+   * `prologue_1` 说"守驿人记路，不记己……代价是没有人记得你"。
+   * 全作到结算为止**没有一处正面回答它**——而这一张是正面回答：
+   * 留门那一支里，一个孩子在很多年以后摸到了那把茶壶。
+   *
+   * ## 为什么是「一张卡」而不是新面板
+   *
+   * 计划书 §8 写死了：新输入不造、面板不造、双场景叠化不做。
+   * 彩蛋用现成的 `showStoryCard` 队列，零新系统。
+   *
+   * 排队而不是直接弹：此刻结算屏正压在最上面，直接弹会被它盖住，
+   * 而故事卡队列会在面板收起之后才放出来（`StoryCards` 的既有行为）。
+   */
+  private queueEpilogue(): void {
+    const ending: EndingId = endingFromGameState();
+    const key = ending === 'let_go' ? 'epilogue_let_go' : 'epilogue_keep';
+    if (this.epilogueShown) return;
+    this.epilogueShown = true;
+    this.ui.showStoryCard(t(key), t('ending_title'), 9000);
   }
 
   /**
@@ -1946,6 +2211,7 @@ private onConfirm() {
     if (!game.claimChapter1Complete()) {
       // 已经完成过（重复触发 / 读档后旧存档）：直接回到骑行，不重放
       this.toRoaming();
+      this.refreshRelicsForChapter();
       return;
     }
     this.ui.syncFromState();
@@ -1954,6 +2220,24 @@ private onConfirm() {
     await this.ui.whenDialogueIdle();
     this.goPhase('synthesis');
     this.ui.showSynthesis('chapter');
+    // 门开得有仪式。合成屏收起之后补这一张——它是"你本可以把它卖掉"
+    // 这句**唯一一次**出现在玩家眼前的机会，而下一屏就是重新骑出去。
+    this.ui.showStoryCard(t('chapter2_door_text'), t('chapter2_door_title'), 7600);
+    this.refreshRelicsForChapter();
+  }
+
+  /**
+   * 把旧物系统推到当前章该有的样子。
+   *
+   * **为什么不在 `claimChapter1Complete()` 里直接建**：那三件是第二章的东西，
+   * 而玩家此刻正看着第一章的合成屏。它们要在他**重新骑出去**的路上出现，
+   * 而不是在这一屏上抢一句「下一章」。
+   *
+   * 读档进来时也走这一条：旧档里 `chapter` 可能是 2 而世界里一件都没建。
+   */
+  private refreshRelicsForChapter(): void {
+    this.world.relics.setChapter(game.chapter);
+    game.setChapter2Remaining(this.world.relics.remainingCount);
   }
 
   private async runMiniGame(stationIdx: number) {
@@ -2514,7 +2798,23 @@ private onConfirm() {
       left: TOTAL_ARCLENGTH - this.world.dodgeTravelledMeters,
     });
     this.updateDayToast();
+    this.tickPoseSave(dt);
     this.announceSaveState();
+  }
+
+  /**
+   * 每 4 秒把位置写进存档一次。**只在骑行相位写**——
+   * 对白、打卡、小游戏、湖边都不写：那几处车是不动的，
+   * 而在它们期间存位置只会把玩家冻结在打卡圈里。
+   */
+  private tickPoseSave(dt: number): void {
+    if (this.phase !== 'roaming') return;
+    this.poseSaveClock += dt;
+    if (this.poseSaveClock < App.POSE_SAVE_S) return;
+    this.poseSaveClock = 0;
+    const p = this.world.ride.pos;
+    game.setPose(p.x, p.z, this.world.ride.headingValue);
+    game.save();
   }
 
   /**
@@ -2586,10 +2886,10 @@ private onConfirm() {
     let throttle = 0;
     let steer = 0;
     if (this.phase === 'roaming') {
-      if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) throttle -= 1;
-      if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) throttle += 1;
-      if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) steer -= 1;
-      if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) steer += 1;
+      if (this.held('forward') || this.keys.has('ArrowUp')) throttle -= 1;
+      if (this.held('back') || this.keys.has('ArrowDown')) throttle += 1;
+      if (this.held('left') || this.keys.has('ArrowLeft')) steer -= 1;
+      if (this.held('right') || this.keys.has('ArrowRight')) steer += 1;
       throttle += this.ui.touch.moveY;
       steer += this.ui.touch.moveX;
     }
@@ -2643,15 +2943,26 @@ private onConfirm() {
    */
   private updateRelicHint() {
     if (this.phase !== 'roaming') return;
+    const relics = this.world.relics;
+    // **提示也分两层**：一件旧物要提醒两次（"路边有东西" + "按 F"），
+    // 而每件现在有**两次**可读。记号因此带上层号——
+    // 只按 index 记的话，第二层永远拿不到提示，
+    // 症状是"那圈青灰一直亮着，可我站在旁边什么提示都没有"。
+    const layer = (i: number) => (relics.isHeard(i) ? 'past' : 'now');
     const spotted = this.world.relicSpotted;
-    if (spotted >= 0 && !this.world.relics.isHeard(spotted) && !this.relicHinted.has(spotted)) {
-      this.relicHinted.add(spotted);
-      this.ui.showToast(t('relic_near'), 1800);
+    if (spotted >= 0 && relics.pending(spotted)) {
+      const k = `${spotted}:${layer(spotted)}`;
+      if (!this.relicHinted.has(k)) {
+        this.relicHinted.add(k);
+        this.ui.showToast(t('relic_near'), 1800);
+      }
     }
     const i = this.world.relicNearby;
-    if (i < 0 || this.world.relics.isHeard(i) || this.relicNamed.has(i)) return;
-    this.relicNamed.add(i);
-    const title = t(this.world.relics.placements[i].def.titleKey);
+    if (i < 0 || !relics.pending(i)) return;
+    const nk = `${i}:${layer(i)}`;
+    if (this.relicNamed.has(nk)) return;
+    this.relicNamed.add(nk);
+    const title = t(relics.placements[i].def.titleKey);
     this.ui.showToast(t('relic_hint', { name: title }), 2200);
   }
 
@@ -2698,7 +3009,10 @@ private onConfirm() {
   }
 
   private render(dt: number) {
-    this.world.render(dt);
+    // 湖边那一屏的相机归 `Lakeside` 管，而它跑在定步长里——所以这里必须把
+    // 相机的归属权**交出去**。不交的话 `Ride.render()` 会用跟随机位把它覆盖回去，
+    // 而 `renderer` 画的是最后一次写入：症状是"这一屏能进、能走、就是看不见自己动"。
+    this.world.render(dt, this.phase !== 'lakeside');
     if (this.mg.isRunning) this.mg.render();
     this.ui.update(dt);
     this.dump?.update(dt);

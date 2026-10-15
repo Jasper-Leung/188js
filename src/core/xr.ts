@@ -29,6 +29,7 @@
  * `host.presenting()` 是那道闸。
  */
 import { WebGLRenderer, Group } from 'three';
+import { codeOf, type GameAction } from './keymap';
 
 export type XrHost = {
   readonly gl: WebGLRenderer;
@@ -43,27 +44,35 @@ export type XrHost = {
   onEnd(fn: () => void): void;
 };
 
-/** 手柄上各按钮映射到的键码。刻意只用键盘上真实存在的键。 */
-const BUTTON_KEYS: Record<string, string> = {
-  trigger: 'Space',
-  grip: 'KeyF',
-  menu: 'Escape',
-};
+/**
+ * 手柄上各按钮映射到哪个**动作**。
+ *
+ * ⚠ 存**动作**而不是 `KeyboardEvent.code`：玩家可以在设置里改键，
+ * 而 `keymap.ts` 的 `codeOf()` 是唯一的读法。
+ * 这里写死 `Escape` / `Space` 的后果是改键之后头显里的
+ * 「扳机抛竿」「菜单退出」变成按了没反应——而头显里没有任何
+ * 提示告诉玩家键被换掉了。
+ */
+const BUTTON_ACTIONS = {
+  trigger: 'confirm',
+  grip: 'interact',
+  menu: 'pause',
+} as const satisfies Record<string, GameAction>;
 
 /**
  * 手柄的**模拟摇杆**在头显里没有键盘对应物。
  * 用来在湖边走动，轴值超阈值时按一次方向键（连发由手柄自己决定频率）。
  */
-const AXIS_KEYS: { axis: number; pos: string; neg: string; dead: number }[] = [
-  { axis: 2, pos: 'KeyW', neg: 'KeyS', dead: 0.6 },
-  { axis: 0, pos: 'KeyD', neg: 'KeyA', dead: 0.6 },
+const AXIS_KEYS: { axis: number; pos: GameAction; neg: GameAction; dead: number }[] = [
+  { axis: 2, pos: 'forward', neg: 'back', dead: 0.6 },
+  { axis: 0, pos: 'right', neg: 'left', dead: 0.6 },
 ];
 
 export class XrSession {
   private gl: WebGLRenderer;
   private host: XrHost;
   private buttons = new Map<string, boolean>();
-  private axes = new Map<number, string>();
+  private axes = new Map<number, GameAction | null>();
   private controllers: Group[] = [];
   private endFns: Array<() => void> = [];
   /** 按钮的**边沿**：`Space` 是点一下，按住和点一下要分开派发。 */
@@ -134,9 +143,38 @@ export class XrSession {
     });
   }
 
+  /**
+   * 退出这一层。
+   *
+   * ## 这里原来只做了自己的记账
+   *
+   * 原来 `disable()` 是「把 `enabled` 按回假 + 调自己的 `onSessionEnd()`」，
+   * 而**浏览器那边的沉浸式会话仍然开着**——全仓库没有一处 session.end()。
+   * 三个后果，每一个都是玩家看得见的：
+   *
+   * · 头显里冻住。three 只在自己的 `onAnimationFrameCallback` 里绑头显的
+   *   framebuffer，而那个回调已经被我们设成了 `null`；`isPresenting` 却还是
+   *   true，于是桌面正常、头显黑着或定住。
+   * · `presenting()` 永远返回 true，于是下一次进湖边时 `Lakeside.update()`
+   *   整段让位（`inXR` 为真 → 不摆相机），玩家在一个**冻住的相机**里站着。
+   * · `enter()` 的 `if (isPresenting) return true` 直接短路，
+   *   `onSessionChange(true)` 再也不会触发。
+   *
+   * 所以现在真的去结束会话。`end()` 是异步的，而调用方（`exitLakeside`）
+   * 是同步的——**不能 await**：那一路正处在相位切换的中途，
+   * 而 `onSessionChange(false)` → 换回 rAF 帧源这件事必须立刻做完。
+   * 于是顺序是「先把键松开、通知宿主换帧源，再异步去结束会话」：
+   * 桌面侧立刻可玩，头显侧由浏览器自己收尾（它会补发 `sessionend`，
+   * 那个事件是幂等的）。
+   */
   disable(): void {
     this.gl.xr.enabled = false;
     this.onSessionEnd();
+    // 先记账再结束会话：`onSessionEnd()` 已经把 `wasPresenting` 按成 false，
+    // 而浏览器补发的 `sessionend` 会再走一遍这里——幂等，两遍都对。
+    void this.gl.xr.getSession()?.end().catch(() => {
+      // 浏览器拒绝结束（设备被拔、会话已在收尾中）不该把游戏弄坏。
+    });
   }
 
   get enabled(): boolean {
@@ -228,10 +266,10 @@ export class XrSession {
       addEventListener(t: string, fn: (ev: unknown) => void): void;
       userData: Record<string, unknown>;
     };
-    s.addEventListener('selectstart', () => this.down(BUTTON_KEYS.trigger));
-    s.addEventListener('selectend', () => this.up(BUTTON_KEYS.trigger));
-    s.addEventListener('squeezestart', () => this.down(BUTTON_KEYS.grip));
-    s.addEventListener('squeezeend', () => this.up(BUTTON_KEYS.grip));
+    s.addEventListener('selectstart', () => this.down(codeOf(BUTTON_ACTIONS.trigger)));
+    s.addEventListener('selectend', () => this.up(codeOf(BUTTON_ACTIONS.trigger)));
+    s.addEventListener('squeezestart', () => this.down(codeOf(BUTTON_ACTIONS.grip)));
+    s.addEventListener('squeezeend', () => this.up(codeOf(BUTTON_ACTIONS.grip)));
     // 模拟摇杆：把轴值当成方向键，跨过死区时**按下**、回到死区内时**松开**。
     s.addEventListener('axismove', (ev) => {
       const e = ev as { axis?: number; value?: number };
@@ -240,12 +278,14 @@ export class XrSession {
       const rule = AXIS_KEYS.find((r) => r.axis === idx);
       if (!rule) return;
       const v = e.value ?? 0;
-      const key = v > rule.dead ? rule.pos : v < -rule.dead ? rule.neg : null;
+      // 轴值存的是**动作**，派发时才翻成物理键。这样"改键之后摇杆跟着改"
+      // 不需要动这里——而如果这里存了物理键，它就会是最后一个漏掉的地方。
+      const act: GameAction | null = v > rule.dead ? rule.pos : v < -rule.dead ? rule.neg : null;
       const cur = this.axes.get(idx);
-      if (cur === key) return;
-      if (cur) this.up(cur);
-      if (key) this.down(key);
-      this.axes.set(idx, key ?? '');
+      if (cur === act) return;
+      if (cur) this.up(codeOf(cur));
+      if (act) this.down(codeOf(act));
+      this.axes.set(idx, act);
     });
     this.controllers.push(src);
   }

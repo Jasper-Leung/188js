@@ -48,14 +48,6 @@
     "why": "同上，画面分组同理"
   },
   {
-    "key": "vol_bgm",
-    "why": "BGM 静音与音量都并进 mute / bgm_mute / bgm_short 三条；再摆一条「音乐」会与 bgm_mute 指向同一个开关"
-  },
-  {
-    "key": "vol_sfx",
-    "why": "同上"
-  },
-  {
     "key": "resolution",
     "why": "分辨率档位是**自动**的（settings.ts 按窗口算），源项目让玩家在 720/900/1080 里手选的三条（resolution_720 / _900 / _1080 / resolution_auto）因此都没有落点——让玩家手选一个按设备算出来的值，是给一个不存在的问题一个假开关"
   },
@@ -128,10 +120,6 @@
     "why": "结局页的小标题。结局屏目前直接用 ending_title，内容不缺，少的只是这一行小标题"
   },
   {
-    "key": "back_break",
-    "why": "★ 明信片背面**放手**那一支的结语。结局选「留门」时走 back_keep，选「放手」时这一支仍是兜底空文案（见 back_break_blank）。这是全作最该补的一句：它和 back_keep 是一对，而一对里只接了一半，玩家在另半边读到的是空行"
-  },
-  {
     "key": "home_name",
     "why": "「家」这个点标在源项目的小地图上。Web 版的小地图用驿站序号标，没有「家」这个单独图层"
   },
@@ -145,7 +133,7 @@
   },
   {
     "key": "chapter2_unlocked",
-    "why": "第二章在第一章结算时才解锁（chapter1_done_line 已经把这件事说破了），而 Web 版**没有第二章的内容**：第二章一开就是一个走不动的空章节。这一条是留给它的接线点"
+    "why": "第二章已经补上内容了（八件旧物里的三件 + 过去层 + 回响，见 verify_chapter2），但这一条仍然没有落点：结算屏那一行由 chapter1_done_line 占了，而这两句说的是同一件事。不重复摆一句，位置留给标题页「继续旅程」旁的章节标记"
   },
   {
     "key": "touch_home_button",
@@ -158,13 +146,5 @@
   {
     "key": "exported",
     "why": "改走 showSaveFilePicker 之后，保存位置由浏览器的文件选择器自己交代，界面不再需要报一次「已下载」"
-  },
-  {
-    "key": "key_camera",
-    "why": "引导页曾经把键帽当描述用，界面上渲染出「V → V」「E → E」。描述已改由 key_camera_desc / key_vehicle_desc 承担，这两条只剩标签用途。键帽本身由键位表的行首直接写"
-  },
-  {
-    "key": "key_vehicle",
-    "why": "同上（与 key_camera 同一族）"
   }
 ]

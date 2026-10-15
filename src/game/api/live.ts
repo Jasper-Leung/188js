@@ -25,7 +25,7 @@
 import { AiSession, type AiAdapter } from './session';
 import {
   AI_HELP,
-  AI_KEYS,
+  keysOf,
   summarize,
   type AiAction,
   type AiEvent,
@@ -99,7 +99,7 @@ export function createLiveApi(host: LiveApiHost): LiveApi {
 
   const adapter: AiAdapter = {
     send(action, down) {
-      for (const code of AI_KEYS[action]) host.dispatchKey(code, down);
+      for (const code of keysOf(action)) host.dispatchKey(code, down);
     },
     snapshot() {
       return { tick, t, ...host.observation() };

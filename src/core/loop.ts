@@ -174,7 +174,24 @@ export class GameLoop {
    * 配套：先 `cine.manual = true` 把 rAF 停掉，再一步步要。
    */
   setManual(v: boolean) {
+    const wasManual = this.manual;
     this.manual = v;
+    if (wasManual && !v && this.running) {
+      // **把帧链接回去。**`tick()` 在 `if (this.running || this.manual) return`
+      // 那一行就返回，**返回在 `requestAnimationFrame` 之前**——也就是说
+      // 一旦进入手动步进，rAF 链就此断掉，而 `running` 仍然是 true。
+      //
+      // 于是宿主那边一句 `setManual(false); start();` 里的 `start()` 是
+      // `if (this.running) return`，静默空操作。症状是：退出 XR 之后画面冻在
+      // 旧帧，切标签页来回才恢复（`visibilitychange` 会 `stop()` 再 `start()`）。
+      //
+      // 先 `cancelAnimationFrame`：手动模式刚进去又立刻退出来时，
+      // 上一条 rAF 可能还挂在队列里，不撤就是**两条帧链**——症状是游戏快进一倍。
+      cancelAnimationFrame(this.rafId);
+      this.lastTime = performance.now();
+      this.accumulator = 0;
+      this.rafId = requestAnimationFrame(this.tick);
+    }
   }
 
   stepOnce(): void {

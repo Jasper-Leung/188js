@@ -31,6 +31,7 @@
  */
 import { t } from '../i18n';
 import { audio } from '../core/audio';
+import { codeOf } from '../core/keymap';
 import { button, el, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import { STATION_REACH } from '../game/phase';
@@ -57,12 +58,17 @@ import { STICK_R, stickVector, keyToVec } from '../core/stick';
 export class TouchControls {
   readonly root: HTMLDivElement;
 
-  /**
-   * 写进 world 的输入意图。**对象本身**被 UI 直接透给宿主
-   * （`UI.touch` 就是它），所以宿主每帧读完把 `checkInPressed` 清成 false
-   * 时，清的就是这里那一个字段——不是副本。
-   */
-  readonly state = { moveX: 0, moveY: 0, checkInPressed: false };
+/**
+ * 写进 world 的输入意图。**对象本身**被 UI 直接透给宿主
+ * （`UI.touch` 就是它），所以宿主每帧读完把 `checkInPressed` 清成 false
+ * 时，清的就是这里那一个字段——不是副本。
+ *
+ * `holdPressed` 是给**按住**用的动词（钓鱼收线、云、茶）。
+ * 原来没有它，于是触屏上根本没有"按住"这个动作——
+ * 而"按住"恰好是这三个小游戏与整局钓鱼**唯一**的输入方式。
+ * 症状不是"按了没反应"，而是"这一屏在触屏上根本没法玩"。
+ */
+readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false };
 
   private hooks: UIHooks;
   private world: World;
@@ -71,7 +77,11 @@ export class TouchControls {
   private stick: HTMLDivElement;
   private knob: HTMLDivElement;
   private checkBtn: HTMLButtonElement;
+  /** 「摸一下」那颗。对应 `GameAction` 里的 `interact`（键盘默认 F）。 */
+  private actBtn!: HTMLButtonElement;
   private pointerId = -1;
+  /** 湖边那一屏：摇杆 = 走、大按钮 = 抛竿。默认 false。 */
+  private lakesideMode = false;
 
   constructor(o: TouchOpts) {
     this.hooks = o.hooks;
@@ -137,15 +147,37 @@ export class TouchControls {
       this.paintKnob();
     });
 
-    // ---- 右侧打卡 ----
+    // ---- 右侧打卡 / 抛竿 ----
     const right = el('div', 'g-touch-r');
+    // **指针路径与键盘路径分开。** `pointerdown` 发边沿（抛竿）并开始按住；
+    // `click` 只在没有指针参与时才发——否则一次点按会派发两次，
+    // 而钓鱼那 1.15 秒的咬钩窗里按两下和按一下不是一回事。
+    let pointerCast = false;
     this.checkBtn = button(t('touch_checkin_button'), {
       cls: 'g-touch-check',
       onClick: () => {
-        this.state.checkInPressed = true;
-        this.hooks.onCheckIn();
+        if (pointerCast) {
+          pointerCast = false;
+          return;
+        }
+        this.pressAction();
       },
     });
+    const press = (e: PointerEvent) => {
+      try { this.checkBtn.setPointerCapture(e.pointerId); } catch { /* 某些浏览器拒绝 */ }
+      pointerCast = true;
+      this.state.holdPressed = true;
+      this.pressAction();
+      e.preventDefault();
+    };
+    const releaseAction = (e: PointerEvent) => {
+      try { this.checkBtn.releasePointerCapture(e.pointerId); } catch { /* 同上 */ }
+      this.state.holdPressed = false;
+    };
+    this.checkBtn.addEventListener('pointerdown', press);
+    this.checkBtn.addEventListener('pointerup', releaseAction);
+    this.checkBtn.addEventListener('pointercancel', releaseAction);
+    this.checkBtn.addEventListener('lostpointercapture', releaseAction);
     right.appendChild(this.checkBtn);
     this.root.appendChild(right);
 
@@ -163,12 +195,84 @@ export class TouchControls {
     });
     top.appendChild(pauseBtn);
     top.appendChild(muteBtn);
+    // ---- 「摸一下」那颗（F）----
+    //
+    // **它原来根本不存在**，而这是触屏上最大的一个洞：F 挂着节拍窗口、
+    // 旧物、琴、木牌**和**湖边那一屏。没有它，触屏玩家摸不到任何一件旧物、
+    // 进不去湖边、也读不了路边的字——而这些是这个游戏的全部内容。
+    //
+    // 它放在摇杆与右屏之间，而不是挤进右上那一排：那一排是"高频小按钮"，
+    // 而「摸一下」是**这一屏最主要的动词**，值得一颗独立的、常亮的按钮。
+    this.actBtn = button(t('touch_act_button'), {
+      cls: 'g-touch-act',
+      aria: t('key_interact'),
+      onClick: () => this.sendInteract(),
+    });
+    this.actBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      this.sendInteract();
+    });
+    // 点击/点一下的边沿。**和湖边那颗按钮分开**，因为两个动作在相位上互斥
+    // （`touchRoadside()` 取最近的那一个），而它们各自有自己的键。
+    this.root.appendChild(this.actBtn);
     this.root.appendChild(top);
 
     for (const b of this.root.querySelectorAll<HTMLElement>('.g-btn')) {
       wireKeyActivate(b, () => b.click());
     }
     o.parent.appendChild(this.root);
+  }
+
+  /**
+   * 那颗大按钮的边沿。
+   *
+   * **湖边那一屏不走 `hooks.onCheckIn()`。** 那里站着没有驿站，
+   * 而那一侧要的是"抛竿"——两条完全不同的动词。
+   * 于是这里只把**意图**记进 `state`，由宿主按当前相位决定它是什么：
+   * 骑行相位是打卡，湖边相位是抛竿。
+   * （原来只有 `hooks.onCheckIn()` 一条路，于是湖边在触屏上没有任何动词。）
+   */
+  private pressAction(): void {
+    this.state.checkInPressed = true;
+    if (!this.lakesideMode) this.hooks.onCheckIn();
+  }
+
+  /**
+   * 「摸一下」：节拍窗口 / 旧物 / 琴 / 木牌 / 进湖边，共用那把 F。
+   *
+   * ## 为什么是**合成键码**而不是一个 hook
+   *
+   * F 的判定在宿主的 `keydown` 监听器里（`case 'interact'`），
+   * 而宿主那一侧还接着节拍窗口与短路。走 hook 的话就得把这一整套
+   * 复制到 UI 层——而症状会是"触屏能摸到旧物、摸不到节拍、也进不去湖边"。
+   *
+   * 所以和 `requestPause()` 同一个做法：**合成一次真的按键**，
+   * 让游戏自己的键盘监听器去消费。这一屏与 `main.ts` 里
+   * 「动作只往下塞键码」那条硬约束是同一条。
+   */
+  private sendInteract(): void {
+    const code = codeOf('interact');
+    window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
+  }
+
+  /**
+   * 湖边模式：摇杆 = 走，那颗大按钮 = 抛竿 / 收线。
+   *
+   * 进去时**必须清掉按住状态**：从骑行切进来时手指多半还按着摇杆，
+   * 而残留的 `holdPressed` 会让玩家一进湖边就"已经在收线"——
+   * 而那条鱼还没抛出去。
+   */
+  setLakesideMode(on: boolean): void {
+    if (this.lakesideMode === on) return;
+    this.lakesideMode = on;
+    this.state.holdPressed = false;
+    this.state.checkInPressed = false;
+    this.state.moveX = 0;
+    this.state.moveY = 0;
+    this.paintKnob();
+    if (on) setText(this.checkBtn, t('touch_cast_button'));
+    else setText(this.checkBtn, t('touch_checkin_button'));
   }
 
   private moveTo(e: PointerEvent): void {
@@ -194,6 +298,11 @@ export class TouchControls {
    * 「这里还欠一次到访吗」只有 `fragmentStationNeedsVisit()` 一个判据。
    */
   sync(): void {
+    // 湖边那一屏不跑这一段：那一侧没有驿站，也就没有"还欠一次到访吗"。
+    if (this.lakesideMode) {
+      setFlag(this.checkBtn, 'is-live', true);
+      return;
+    }
     const nb = this.world.nearby;
     const inRange =
       nb.index >= 0 &&
@@ -220,6 +329,8 @@ export class TouchControls {
     if (!on) {
       this.state.moveX = 0;
       this.state.moveY = 0;
+      this.state.holdPressed = false;
+      this.state.checkInPressed = false;
       this.pointerId = -1;
       this.paintKnob();
     }
@@ -233,11 +344,17 @@ export class TouchControls {
 /** 方向键 → [x, y]。注意 y 向上为负（见文件头的约定）。 */
 
 /**
- * 请求暂停。合成一次 Esc 键，交给 main 里那一个判据。
+ * 请求暂停。合成一次「暂停」键，交给 main 里那一个判据。
  * 理由见文件头——UIHooks 里没有 onPause。
+ *
+ * ⚠ **键码走 `codeOf('pause')`，不是写死的 `Escape`。**
+ * 玩家把暂停改到 `KeyP` 之后，这颗按钮还在派发 `Escape` 的话，
+ * 它会变成一颗按了没反应的按钮——而它在暂停面板上，
+ * 于是"键盘改键之后暂停面板自己坏了"。
  */
 function requestPause(): void {
+  const code = codeOf('pause');
   window.dispatchEvent(
-    new KeyboardEvent('keydown', { code: 'Escape', key: 'Escape', bubbles: true }),
+    new KeyboardEvent('keydown', { code, key: code, bubbles: true }),
   );
 }

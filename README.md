@@ -49,7 +49,7 @@ anyway". Building it yourself is covered in [Deployment](#deployment).
 npm install
 npm run data:extract     # mechanically extract data tables from the Godot source project (output is committed, so skippable)
 npm run assets:all       # font subsetting + GLB compression + Tripo building pipeline
-npm run dev              # http://127.0.0.1:5180
+npm run dev              # http://127.0.0.1:5200
 npm run verify           # headless regression suite
 npm run build            # output lands in dist/
 ```
@@ -116,6 +116,8 @@ No combat, no failure screen that ends your run. A full playthrough takes about
 | Economy | travel coins. Three shops, ten goods, and one budget that *requires* subtraction |
 | Spirits | 1–5. Falls but never locks; floor of 1. There is a way back up (the tea shop's clearing tea) |
 | Ending | four postcard ranks — first journey / explorer / pilgrim / master; a final two-way choice |
+| Relics | **eight**, in two layers — a present-day monologue on the first touch, the object's *own* past on the second |
+| Chapter two | opens after the synthesis screen: three new relics (the teapot at home, the station lamp, a carving knife) at non-fragment stations, plus a past layer for each of the first five |
 
 ---
 
@@ -137,7 +139,7 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 479-key string table match exactly.
+and both sides of the 520-key string table match exactly.
 
 ### Two: translate geometry point by point
 
@@ -156,7 +158,7 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        479 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        520 strings consistent across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise

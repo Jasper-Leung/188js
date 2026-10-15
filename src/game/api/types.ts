@@ -28,6 +28,7 @@
  */
 
 import { keyToVec } from '../../core/stick';
+import { codeOf, DEFAULT_KEYMAP, type GameAction } from '../../core/keymap';
 import type { Phase } from '../phase';
 
 /** 可以**按住**的动作。松开和按下同等重要：`keys` 是个集合，忘了松就永久加速。 */
@@ -103,6 +104,45 @@ export function actionOfCode(code: string): AiAction | null {
   }
   return null;
 }
+
+/**
+ * 动作 → 它**此刻**真正该派发的那些键码。
+ *
+ * ## 为什么 `AI_KEYS` 不能直接派发
+ *
+ * `AI_KEYS` 是**契约表**：写死物理键，是为了让 `verify_ai_actions`
+ * 能钉住"每个动作都有一个键位、方向和 `keyToVec()` 一致"——
+ * 那是判据要量的东西，不能因为玩家改了键就变成另一个形状。
+ *
+ * 但真正派发的那一侧必须**跟玩家的键位走**：改键之后 AI 还在派 `KeyW`，
+ * 症状是"手动玩正常，AI 玩车不动"，而没有任何地方提示为什么。
+ *
+ * 所以拆成两份：**表是契约，读法是运行时**。这一条是唯一的读法。
+ */
+export function keysOf(action: AiAction): string[] {
+  const g = AI_TO_GAME_ACTION[action];
+  if (!g) return [...AI_KEYS[action]];
+  const fallback = DEFAULT_KEYMAP[g];
+  const current = codeOf(g);
+  if (current === fallback) return [...AI_KEYS[action]];
+  // 只替换**默认那个键位**。动作表里那把备用键（`ArrowUp` 等）
+  // 不受重映射影响——它们是系统级的方向，玩家没要求改它们。
+  return AI_KEYS[action].map((c) => (c === fallback ? current : c));
+}
+
+/** 能被重映射的那部分 AI 动作 → 游戏动作。其余（`item1~4` / `advance`）不走键位表。 */
+const AI_TO_GAME_ACTION: Partial<Record<AiAction, GameAction>> = {
+  throttle: 'forward',
+  brake: 'back',
+  left: 'left',
+  right: 'right',
+  checkIn: 'confirm',
+  pause: 'pause',
+  camera: 'camera',
+  vehicle: 'vehicle',
+  relic: 'interact',
+  mute: 'mute',
+};
 
 /** `[moveX, moveY]`，和 `stickVector()` / `keyToVec()` 同一个约定。 */
 export function actionVector(action: AiHeldAction): [number, number] {

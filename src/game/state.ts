@@ -26,6 +26,20 @@ export interface SaveBlob {
   collected: Record<string, number>;
   progress_km: number;
   onboarding_shown: number;
+  /**
+   * 车停在哪：`x / z / heading`。
+   *
+   * ## 为什么以前不存这个
+   *
+   * 存了旅币、碎片、天数、章、结局，就是不存人站在哪儿。
+   * 于是「继续旅程」把玩家放回起点驿站——钱在、天数在、碎片在，
+   * **只有他在地图上的位置没了**。对一个"骑一条闭合环线"的游戏来说，
+   * 这是最容易被玩家注意到的那一条：第 4 圈骑到一半关掉，回来在出发点。
+   *
+   * 老存档没有这个字段，按"没存过"处理（继续用起点）——
+   * 那正是老存档该有的降级，不是缺陷。
+   */
+  pose?: { x: number; z: number; h: number };
   economy: {
     lvbi: number;
     inv: Record<string, number>;
@@ -41,6 +55,7 @@ export interface SaveBlob {
     /** 1-based 章节号。老存档没有这个字段，读回时按 1 处理 */
     chapter?: number;
     chapter1_done?: boolean;
+    chapter2_done?: boolean;
     /** 骑完的圈数。老存档没有，按 0 处理（那一趟还没开始耗日子） */
     laps?: number;
     /** 累计打卡。老存档没有，按已收碎片数推出来——那是下界，不会少算 */
@@ -74,11 +89,39 @@ export interface SaveStore {
   remove(key: string): void;
 }
 
-function memoryStore(): SaveStore {
+/**
+ * 「存不进去」的内存后端。**它的 `write` 必须抛。**
+ *
+ * ## 为什么一个"能用"的 store 在这里是有害的
+ *
+ * 无痕模式下 `localStorage.getItem()` 自己就抛，于是退到内存。
+ * 而一个普通的内存 store 写**永远不会失败**——于是：
+ *
+ *   `save()` 的 `catch` 不跑 → `writeFailedOnce` 永远是假
+ *   → `takeWriteFailed()` 永远是假 → 「进度不会被保存」那句提示永远不出现
+ *
+ * 玩家玩两小时、关掉标签页、回来发现第 1 天，而**一句解释都没有**。
+ * 这条提示本来就是为了这个场景写的（见 `save_write_failed`），
+ * 而它唯一能被触发的那条路被这个"好用"的兜底堵死了。
+ *
+ * `verify_save_notice` 测不到它：那条判据注入的是一个 `write` 直接抛的
+ * store，从没走过 `defaultStore()` 的兜底分支——**判据与实机的失败方式不同**。
+ *
+ * 所以这里的 `write` 照抛。`save()` 已经在 catch 里兜住了，
+ * 而游戏照跑、照提示，只是关掉标签页就没了。
+ *
+ * 顺带说明为什么**仍然保留**一层内存：`read()` 要能读回这一趟内的写入，
+ * 否则「回到标题页 → 继续旅程」这种**同一页内**的往返会直接空掉。
+ * 回访整趟不保留，正是"这一趟不会被保存"该有的样子。
+ */
+function volatileStore(): SaveStore {
   const m = new Map<string, string>();
   return {
     read: (k) => m.get(k) ?? null,
-    write: (k, v) => void m.set(k, v),
+    write: (k) => {
+      void m.get(k);
+      throw new Error(`storage unavailable (${k})`);
+    },
     remove: (k) => void m.delete(k),
   };
 }
@@ -88,6 +131,12 @@ function defaultStore(): SaveStore {
     // 真的浏览器里有 localStorage；碰不到就退到内存，游戏照跑。
     if (typeof localStorage !== 'undefined') {
       localStorage.getItem(SAVE_KEY);
+      // **写也要真的试一次。** 只探 `getItem` 是不够的：
+      // Safari 无痕下 `getItem` 正常而 `setItem` 抛 `QuotaExceededError`，
+      // 而那种情况下我们会拿着一个"看起来能用"的 store 一路写到底，
+      // 直到某一刻失败——那一句提示就晚到了玩家已经放弃的那一刻。
+      localStorage.setItem(SAVE_PROBE_KEY, '1');
+      localStorage.removeItem(SAVE_PROBE_KEY);
       return {
         read: (k) => localStorage.getItem(k),
         write: (k, v) => localStorage.setItem(k, v),
@@ -95,10 +144,13 @@ function defaultStore(): SaveStore {
       };
     }
   } catch {
-    /* 无痕模式：getItem 本身就抛 */
+    /* 无痕模式：getItem 本身就抛，或者 setItem 抛 */
   }
-  return memoryStore();
+  return volatileStore();
 }
+
+/** 只用来探「能不能写」，永远不存任何东西。 */
+const SAVE_PROBE_KEY = 'gift188.probe';
 
 const SAVE_KEY = 'gift188.save.v3';
 
@@ -228,6 +280,8 @@ export class GameStateManager {
   chapter = 1;
   /** 第一章是否已经完成 */
   chapter1Done = false;
+  /** 第二章是否已经完成（听完最后一件旧物的过去层） */
+  chapter2Done = false;
 
   // ================= 三十日 =================
   //
@@ -346,6 +400,39 @@ export class GameStateManager {
     return true;
   }
 
+  /**
+   * 第二章完成——**听完最后一件旧物的过去层**（爷爷的茶壶）时落闩。
+   *
+   * ## 为什么完成条件是"茶壶"而不是"全部八件"
+   *
+   * 八件全听完当然也行，但那样第二章就没有**终点**：玩家会一路听完，
+   * 然后发现还是那五个目的地。而茶壶在十八驿门口，
+   * 于是第二章的最后一件事**发生在出发的那个地方**——
+   * "回到你出发的地方，而那里有一样你没听过的东西"。
+   *
+   * 一次性闩锁，理由与 `claimChapter1Complete` 同一条：触发它的那一次调用
+   * 必须能安全重入（存读档会重跑触发侧）。
+   */
+  claimChapter2Complete(): boolean {
+    if (this.chapter2Done) return false;
+    if (!this.chapter1Done) return false;
+    this.chapter2Done = true;
+    this.save();
+    return true;
+  }
+
+  /** 第二章还欠几件没听完。由 `Relics.remainingCount` 喂进来。 */
+  private ch2Remaining = 0;
+
+  /** 第二章目标文案里的那个数：`0` 时说"都听完了"。 */
+  setChapter2Remaining(n: number): void {
+    this.ch2Remaining = Math.max(0, Math.floor(n));
+  }
+
+  get chapter2Remaining(): number {
+    return this.ch2Remaining;
+  }
+
   /** 十八驿到了没有（玩家在范围内且这一章正在等他回去） */
   atHome(stationIdx: number, dist: number, reach: number): boolean {
     return this.objective === 'return' && stationIdx === GameStateManager.HOME_STATION && dist <= reach;
@@ -377,8 +464,13 @@ export class GameStateManager {
     this.onboardingShown = false;
     this.chapter = 1;
     this.chapter1Done = false;
+    this.chapter2Done = false;
     this.laps = 0;
     this.checkIns = 0;
+    // 开新的一趟 = 上一次站在哪儿已经不算数了。
+    // 漏掉这一句的症状是"重开之后他还在上一趟停的那里"，
+    // 而重开本该把他放回出发点——和清掉的天数是同一件事。
+    this.pose = null;
   }
 
   reset() {
@@ -696,6 +788,24 @@ export class GameStateManager {
 
   // ================= 存档 =================
 
+  /**
+   * 车上一次停在哪。`null` = 这一趟还没存过位置（那就用起点）。
+   *
+   * 由宿主**定时**喂进来，不在这里存盘：位置每帧都在变，
+   * 而 `save()` 是整份 blob 的序列化 + `localStorage` 写入。
+   * 每帧存一次是荒谬的，而"退出时才存"会丢掉整台设备被直接关掉的那一趟。
+   * 折中放在宿主侧：骑行中每 4 秒一次 + 离开世界时一次。
+   */
+  pose: { x: number; z: number; h: number } | null = null;
+
+  setPose(x: number, z: number, h: number): void {
+    this.pose = { x, z, h };
+  }
+
+  clearPose(): void {
+    this.pose = null;
+  }
+
   save() {
     try {
       const blob: SaveBlob = {
@@ -703,6 +813,11 @@ export class GameStateManager {
         collected: Object.fromEntries(this.collected),
         progress_km: this.progressKm,
         onboarding_shown: this.onboardingShown ? 1 : 0,
+        // **只在真的存到过一个位置时才写这个字段。**
+        // 写 `null` 不行：老存档读回来会得到 `null` 而不是 `undefined`，
+        // 而 `load()` 判的是 `if (pose)`——`null` 正好也假，
+        // 可它会让存档文件里长期挂着一个恒为 null 的键。
+        ...(this.pose ? { pose: { ...this.pose } } : {}),
         economy: {
           lvbi: this.lvbi,
           inv: Object.fromEntries(this.inv),
@@ -716,6 +831,7 @@ export class GameStateManager {
           ending_id: this.endingId,
           chapter: this.chapter,
           chapter1_done: this.chapter1Done,
+          chapter2_done: this.chapter2Done,
           laps: this.laps,
           check_ins: this.checkIns,
         },
@@ -746,6 +862,20 @@ export class GameStateManager {
       }
       this.progressKm = Math.min(Math.max(Number(blob.progress_km) || 0, 0), ECON.TOTAL_ROUTE_KM);
       this.onboardingShown = blob.onboarding_shown === 1;
+      // 老存档没有 `pose`：三个数必须是**有限的真数**才采信。
+      //
+      // ⚠ **`Number.isFinite(Number(x))` 在这里是一个陷阱**：
+      // `Number(null)` 是 `0`、`Number('')` 是 `0`、`Number(false)` 是 `0`——
+      // 三个都是**有限数**，于是「坐标被写成 null 的坏档」会通过检查，
+      // 把车摆到 `(0, 0)`。而那恰好是 8 字中心附近的一条**合法路面**，
+      // 于是它看起来"能玩"，没有一条判据会红——直到玩家发现
+      // 自己莫名其妙出现在环线最中间。所以先判类型，再判有限。
+      const p = blob.pose;
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+      this.pose = p ? (num(p.x) === null || num(p.z) === null || num(p.h) === null
+        ? null
+        : { x: num(p.x) as number, z: num(p.z) as number, h: num(p.h) as number })
+        : null;
 
       const ec = blob.economy;
       if (ec) {
@@ -767,6 +897,9 @@ export class GameStateManager {
         // 那些存档本来就没走完新的章节流程，补一次比"直接当成已完成"诚实。
         this.chapter = Math.max(1, Number(ec.chapter) || 1);
         this.chapter1Done = ec.chapter1_done === true;
+        // 旧档没有这个字段，读作「没听完」——重听一遍过去层。
+        // 这不是缺陷，是代价（PLAN-chapter2.md §9 的最后一行）。
+        this.chapter2Done = ec.chapter2_done === true;
         this.laps = Math.max(0, Number(ec.laps) || 0);
         // 老存档没有 `check_ins`。按**已经收掉的碎片数**推出来——
         // 那是下界（只算了首访），不会把日子算少，

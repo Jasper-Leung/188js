@@ -41,7 +41,7 @@ import { ECON, ROAD } from '../data/raw';
 import { t, stationNameOf } from '../i18n';
 import { Minimap } from './minimap';
 import { button, el, setAttr, setFlag, setShown, setStyle, setText } from './dom';
-import { FRAGMENT_COLORS } from './theme';
+import { fragmentColors } from './theme';
 import type { World } from '../world/world';
 import { GameStateManager } from '../game/state';
 import { interactAt, STATION_REACH, type InteractKind } from '../game/phase';
@@ -152,6 +152,8 @@ interface FragCell {
   name: HTMLSpanElement;
   cnt: HTMLSpanElement;
   pips: HTMLSpanElement[];
+  /** 色块本体。色觉切换时要重写它的 `--sw`，所以得留着。 */
+  swatch: HTMLSpanElement;
 }
 
 export interface HudOpts {
@@ -219,6 +221,10 @@ export class Hud {
   // 碎片栏
   private fragCountEl: HTMLSpanElement;
   private cells: FragCell[] = [];
+  /** 色觉友好配色。写进行内 `--sw`，所以切换时要重画而不只是挂 class。 */
+  private colorblind = false;
+  /** 减弱动效。节拍圈在 canvas/CSS 之外，这一项由它自己读。 */
+  private reduceMotion = false;
 
   // 脚下提示圈
   private ringHold: HTMLDivElement;
@@ -390,10 +396,32 @@ export class Hud {
     this.root.appendChild(this.dodgeEl);
 
     // ---------------- 小地图 ----------------
-    this.minimap = new Minimap(this.root, this.world, this.game);
+this.minimap = new Minimap(this.root, this.world, this.game);
 
-    parent.appendChild(this.root);
+parent.appendChild(this.root);
     this.sync();
+  }
+
+  /**
+   * 换掉碎片栏那五个色块。
+   *
+   * **必须重画，不能只挂一个 class。** 颜色是写在行内 `--sw` 上的——
+   * 它来自 `theme.ts` 的两份常量，而 CSS 变量在这里是被**逐格**写死的。
+   * 挂 class 而不重写，症状是"设置里开了，格子没变"，
+   * 而玩家没有任何办法判断自己到底有没有开成功。
+   */
+  setColorblind(on: boolean): void {
+    this.colorblind = on;
+    const colors = fragmentColors(on);
+    for (let slot = 0; slot < this.cells.length; slot++) {
+      this.cells[slot]?.swatch.style.setProperty('--sw', colors[slot] ?? colors[0]);
+    }
+  }
+
+  /** 减弱动效：收缩的节拍圈是游戏内运动，CSS 媒体查询管不到它。 */
+  setReduceMotion(on: boolean): void {
+    this.reduceMotion = on;
+    this.root.dataset.reduceMotion = on ? 'on' : 'off';
   }
 
   private buildCell(slot: number): HTMLDivElement {
@@ -401,7 +429,7 @@ export class Hud {
     const swatch = el('span', 'g-frag-sw');
     // 颜色只做底，汉字单独用墨色画在上面（见 styles.css 的 .g-frag-sw）：
     // 竹那一格在小地图上是深色，压在纸色上会变成一个小黑洞。
-    swatch.style.setProperty('--sw', FRAGMENT_COLORS[slot]);
+    swatch.style.setProperty('--sw', fragmentColors(this.colorblind)[slot]);
     box.appendChild(swatch);
 
     const name = el('span', 'g-frag-n', t(`fragment_${slot}`));
@@ -419,7 +447,7 @@ export class Hud {
     box.appendChild(pipRow);
     box.title = t(`fragment_tip_${slot}`);
 
-    this.cells.push({ box, name, cnt, pips });
+    this.cells.push({ box, name, cnt, pips, swatch });
     return box;
   }
 
@@ -488,7 +516,14 @@ export class Hud {
     // `t()` **只调一次**、结果给两处用（写进 DOM、留给 AI 接口读）。
     // `verify_days` 数过「覆盖 objectiveKey 的地方有且只有一处」，
     // 所以这里不是"调两次也对"，而是**调两次就会红**。
-    const objectiveText = t(this.game.objectiveKey);
+    //
+    // 第二章那一支要带一个数：门后不再是"把五座各走满三次"（那还是第一章），
+    // 而是"路上还有几件没听完"。**目标必须报数**——不报的话玩家没有
+    // 下一次停车的理由，而停车是这个游戏里唯一为了一句话而做的事。
+    const objectiveKey = this.game.objectiveKey;
+    const objectiveText = objectiveKey === 'objective_chapter2'
+      ? t(objectiveKey, { 0: this.game.chapter2Remaining })
+      : t(objectiveKey);
     setText(this.objectiveEl, objectiveText);
     this.aiObjective = objectiveText;
 
@@ -656,7 +691,17 @@ export class Hud {
     setShown(this.beatEl, !s.done);
     if (s.done) return;
     setFlag(this.beatEl, 'is-open', s.open);
-    this.beatEl.style.setProperty('--beat', String(Math.max(0, Math.min(1, s.remain))));
+    // **减弱动效时 `--beat` 停在一个固定值**，圈不再每帧收缩。
+    //
+    // 那是这个 HUD 里**唯一**一处持续运动，而它是收缩动画——
+    // 前庭功能敏感者在 1.15 秒的窗口里盯着一个不断变小的环，
+    // 是这一屏最容易引发不适的地方。而它降级之后**信息量不减**：
+    // 圈亮着 = 窗口开着，那才是玩家要读的那一句；
+    // "还剩多久"本来就不该靠盯着环来数（`beats` 的注释里也是这么写的）。
+    this.beatEl.style.setProperty(
+      '--beat',
+      String(this.reduceMotion ? 0.5 : Math.max(0, Math.min(1, s.remain))),
+    );
     for (let i = 0; i < this.beatDots.length; i++) {
       setFlag(this.beatDots[i], 'is-on', i < s.hits);
     }

@@ -36,7 +36,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
 import { assertSubmission } from './submission';
-import { expect, type CheckFn } from './harness';
+import { expect, type CheckFn, stripComments } from './harness';
 
 /**
  * 湖边场景模型的量法 —— 只为 `verify_lakeside` 服务。
@@ -339,13 +339,233 @@ export function registerDeliveryChecks(check: CheckFn): void {
       probs.push(`${where} 竖直 ${sy.toFixed(0)}m，超出 650m —— 而本项目 TERRAIN.MAX_HEIGHT 只有 25m`);
     }
 
+    // ---- 10~14. 湖边那一屏的五条"接错了" --------------------------------
+    //
+    // 上面 1~9 量的是**模型**。这五条量的是**接线**，而它们有一个共同点：
+    // `new World()` / `new App()` 要 WebGL，判据里从没构造过。
+    // 换句话说它们和那个 `this.ride.pos` 崩溃（玩家看到一屏
+    // "World construction failed"）是**同一族**——无头回归结构上就够不着。
+    //
+    // 既然够不着，就只能把"这一行该长什么样"钉在源码上。
+    // 口径与 `verify_dodge_sign` 那两条同源：**先剥注释再找锚点**，
+    // 否则上面这些注释里写着同样的字，判据量到的是"有人提到过"。
+    const srcOf = (p: string) => stripComments(readFileSync(join(process.cwd(), p), 'utf8'));
+    const mainSrc = srcOf(join('src', 'main.ts'));
+    const worldSrc = srcOf(join('src', 'world', 'world.ts'));
+    const rideSrc = srcOf(join('src', 'world', 'ride.ts'));
+    const loopSrc = srcOf(join('src', 'core', 'loop.ts'));
+    const uiSrc = srcOf(join('src', 'ui', 'index.ts'));
+
+    /** 从锚点起切出一个方法体。找不到闭合就切到文件尾——宁可多量也不空转。 */
+    const bodyOf = (src: string, anchor: string): string => {
+      const at = src.indexOf(anchor);
+      if (at < 0) return '';
+      const end = src.indexOf('\n  }', at);
+      return src.slice(at, end < 0 ? src.length : end);
+    };
+    /** 锚点本身都找不到 = 判据空转，这一条要单独报，不能混进上面的正文。 */
+    const missing: string[] = [];
+
+    // 10. 湖边相机的归属权。
+    asserts++;
+    {
+      const body = bodyOf(mainSrc, 'private render(dt: number)');
+      if (!body) {
+        missing.push('main.ts: `private render(dt: number)`');
+      } else if (!/this\.world\.render\(\s*dt\s*,\s*this\.phase\s*!==\s*'lakeside'\s*\)/.test(body)) {
+        probs.push(
+          '`App.render()` 没有把相机归属权交给湖边：`Ride.render()` 会用跟随机位覆盖'
+          + '`Lakeside.applyCamera()` 摆好的机位（同一次推进里定步长先走、渲染后走，'
+          + '画的是最后一次写入）。症状：这一屏进得去、走得了，就是看不见自己动',
+        );
+      }
+    }
+
+    // 11. `Ride` 那一侧真的让得出来。
+    asserts++;
+    if (!/if \(this\.cameraLocked \|\| !driveCamera\) return;/.test(rideSrc)) {
+      probs.push('ride.ts 的 `render(dt, driveCamera)` 里没有 `!driveCamera` 守卫——上一条只是把参数传下去，没人用');
+    }
+
+    // 12. 退出 XR 之后帧链要接回去。
+    asserts++;
+    {
+      const body = bodyOf(loopSrc, 'setManual(v: boolean)');
+      if (!body) {
+        missing.push('loop.ts: `setManual(v: boolean)`');
+      } else if (!/wasManual && !v && this\.running/.test(body) || !body.includes('requestAnimationFrame(this.tick)')) {
+        probs.push(
+          '`Loop.setManual()` 在回到 rAF 驱动时没有把帧链接回去：`tick()` 的 `return` '
+          + '排在 `requestAnimationFrame` **之前**，所以手动模式一进 rAF 链就断，'
+          + '而 `running` 还是 true，于是宿主那句 `start()` 是静默空操作。'
+          + '症状：退出 XR 之后画面冻在旧帧，切标签页来回才恢复',
+        );
+      }
+    }
+
+    // 13. 湖岸那一组不是主世界的东西。
+    asserts++;
+    if (!/setWorldVisible\(v: boolean, foreign\?/.test(worldSrc)) {
+      probs.push(
+        '`World.setWorldVisible()` 没有 `foreign` 豁免：湖岸是 `scene.add()` 进去的直接子节点，'
+        + '回主世界那一次遍历会把它按 `true` 一起摆上——5.8 万面的湖岸与水面永久留在路边',
+      );
+    }
+
+    asserts++;
+    {
+      const body = bodyOf(mainSrc, 'private exitLakeside()');
+      if (!body) {
+        missing.push('main.ts: `private exitLakeside()`');
+      } else if (!body.includes('setWorldVisible(true, this.lakeside.group)')) {
+        probs.push('`exitLakeside()` 没有把 `this.lakeside.group` 作为 `foreign` 传进去——第 13 条的豁免没被用上');
+      }
+    }
+
+    // 14. 湖边那一屏不能浮着整套骑行 HUD。
+    asserts++;
+    if (!/setWorldChromeVisible\(v: boolean\)/.test(uiSrc)) {
+      probs.push(
+        'UI 没有对外的 `setWorldChromeVisible()`：湖边想收 HUD 时能调的只有 `syncFromState()`，'
+        + '而它从头到尾一行可见性都不碰。症状：顶栏、小地图（含一个停在上一次位置的）、'
+        + '道具栏整套浮在一片湖岸上',
+      );
+    }
+    asserts++;
+    {
+      const enter = bodyOf(mainSrc, 'private async enterLakeside()');
+      const exit = bodyOf(mainSrc, 'private exitLakeside()');
+      if (!enter || !exit) {
+        missing.push('main.ts: `enterLakeside()` / `exitLakeside()`');
+      } else if (!enter.includes('setWorldChromeVisible(false)')) {
+        probs.push('`enterLakeside()` 没有收 HUD 外壳（`setWorldChromeVisible(false)`）');
+      } else if (!exit.includes('setWorldChromeVisible(true)')) {
+        probs.push('`exitLakeside()` 没有把 HUD 外壳还回来（`setWorldChromeVisible(true)`）——回路上是空的');
+      }
+    }
+
+    // 15. 退出 XR 要真的结束会话（第 12 条的另一半）。
+    asserts++;
+    {
+      const xrSrc = srcOf(join('src', 'core', 'xr.ts'));
+      const body = bodyOf(xrSrc, 'disable(): void {');
+      if (!body) {
+        missing.push('xr.ts: `disable(): void {`');
+      } else if (!/\.end\(\)/.test(body)) {
+        probs.push(
+          '`XrSession.disable()` 没有去结束会话：它只做了自己的记账（`onSessionEnd()`），'
+          + '而浏览器那边的沉浸式会话仍然开着。症状有三个——头显里冻住（three 的帧回调已置 null'
+          + '而 `isPresenting` 还是 true）、`presenting()` 永远为真于是下一次进湖边相机让位不动、'
+          + '`enter()` 的 `if (isPresenting) return true` 短路再也触发不了 `onSessionChange(true)`',
+        );
+      }
+    }
+
+    // 16. F 键那一串必须短路（第 14 条的另一半）。
+    asserts++;
+    {
+      const body = bodyOf(mainSrc, 'private touchRoadside()');
+      if (!body) {
+        missing.push('main.ts: `private touchRoadside()`');
+      } else if (!/private touchRoadside\(\): boolean/.test(body)) {
+        probs.push('`touchRoadside()` 没有返回值——F 那一串没法知道路边是不是接住了');
+      } else if (!/if \(this\.touchRoadside\(\)\)\s*break;/.test(mainSrc)) {
+        probs.push(
+          'F 键处理器没有短路：路边接住之后仍然无条件问湖边。碎片驿站本来就临水，'
+          + '而湖边的门槛是「碗心 + 半径 + 60m」，于是按一次 F 会同时吃掉遗物故事卡'
+          + '并把玩家传送进湖边，而玩家只以为按了一下',
+        );
+      }
+    }
+
+    // 17. 加载之后要再问一次相位；加载失败不许顺着调用栈跑掉。
+    asserts++;
+    {
+      const enter = bodyOf(mainSrc, 'private async enterLakeside()');
+      const gate = bodyOf(mainSrc, 'private async tryEnterLakeside()');
+      if (!enter || !gate) {
+        missing.push('main.ts: `enterLakeside()` / `tryEnterLakeside()`');
+      } else {
+        const afterLoad = enter.slice(enter.indexOf('await this.lakeside.load();'));
+        if (!afterLoad.includes("this.phase !== 'roaming'")) {
+          probs.push(
+            '`enterLakeside()` 在 `await load()` 之后没有再问一次相位：模型到位的那几秒里'
+            + '玩家完全可以按 Esc 或在驿站门口按空格，于是 `goPhase(\'lakeside\')` 会从'
+            + '`paused` / `checkin` 发起——那两条边都不在 `PHASE_EDGES` 里，'
+            + '症状是暂停面板盖在湖面上，或者打卡过场冻在半截、Promise 永不 resolve',
+          );
+        }
+        if (!/catch\s*\(/.test(gate)) {
+          probs.push(
+            '`tryEnterLakeside()` 没有兜住 reject：调用点是 keydown 处理器，它不 await 也不 catch。'
+            + '而 `load()` 的 reject 会被 `Lakeside.loading` 与 `assets.ts` 的 cache 两边记住，'
+            + '于是 `failed` 永远是假、每一次按 F 都再抛一次，界面上是「在加载…」飘了一遍又一遍',
+          );
+        }
+      }
+    }
+
+    // 18. 这一屏的出口不能只是一行「按 Esc」（触屏上没有 Esc）。
+    asserts++;
+    {
+      const panelSrc = srcOf(join('src', 'ui', 'lakesidePanel.ts'));
+      if (!/exitLine\s*=\s*button\(/.test(panelSrc)) {
+        probs.push(
+          '湖边面板的出口不是按钮：它是一行说明「Esc 回路上」。而这一屏的输入只从 `this.keys` 读、'
+          + '触屏控件又随世界可见性一起被藏了——症状是那一台设备上**没有出口**',
+        );
+      }
+      if (!/new KeyboardEvent\('keydown', \{ code/.test(panelSrc)) {
+        probs.push('湖边出口没有合成一次按键——它新开了一条退出通道，而 `main.ts` 的暂停判定已经有一份相位表');
+      }
+      // **而且必须走键位表。** 写死 `Escape` 的话，玩家把暂停改到 `KeyP`
+      // 之后这颗按钮会变成按了没反应的那个——它在退出路上。
+      if (!/codeOf\('pause'\)/.test(panelSrc)) {
+        probs.push(
+          '湖边出口合成的是写死的物理键而不是 `codeOf(\'pause\')`：'
+          + '玩家改键之后它会变成一颗按了没反应的按钮，而在退出路上',
+        );
+      }
+      asserts++;
+      // 触屏那颗暂停按钮与头显菜单是同一个坑，同一个修法。
+      asserts++;
+      if (!/codeOf\('pause'\)/.test(srcOf(join('src', 'ui', 'touchControls.ts')))) {
+        probs.push(
+          'touchControls 合成的是写死的 `Escape` 而不是 `codeOf(\'pause\')`：'
+          + '改键之后触屏的暂停按钮会静默失效，而它在暂停面板上',
+        );
+      }
+      // xr 那边存的是**动作名**（`BUTTON_ACTIONS.menu = 'pause'`），
+      // 所以判据要的是「派发时经过 `codeOf(`」而不是「字面出现 `codeOf('pause')`」。
+      const xrSrc = srcOf(join('src', 'core', 'xr.ts'));
+      asserts++;
+      if (!/this\.(down|up)\(codeOf\(/.test(xrSrc)) {
+        probs.push(
+          'xr 派发键码时没有经过 `codeOf(...)`：手柄的扳机 / grip / 菜单 '
+          + '仍绑在写死的物理键上，玩家改键之后头显里三样全失效',
+        );
+      }
+      asserts++;
+      if (!/applyTouchVisibility[\s\S]*setTouchMode/.test(uiSrc)) {
+        probs.push(
+          '`applyTouchVisibility()` 没有同步湖边出口的文案：触屏模式底下那颗按钮还写着「Esc 回路上」，'
+          + '而控件藏起来的那一次恰恰是最需要一句「点这里」的一次',
+        );
+      }
+    }
+
+    if (missing.length) {
+      for (const m of missing) probs.push(`${m} 找不到——湖边接线这几条判据空转了`);
+    }
+
     return expect(
       probs.length === 0,
       probs.length
         ? probs.join('；')
         : `${s.tris.toLocaleString()} 面 · ${(s.bytes / 1048576).toFixed(2)}MB · `
           + `${sx.toFixed(0)}×${sy.toFixed(0)}×${sz.toFixed(0)}m · 零贴图 + 顶点色 + 法线 + meshopt`
-          + `${s.unlit ? ' + unlit' : ''}`,
+          + `${s.unlit ? ' + unlit' : ''}`
+          + ' · 相机归属 / 帧源 / 场景归属 / HUD 外壳 / 会话结束 / F 短路 / 相位复问 / 触屏出口 八条接线都在',
       asserts,
     );
   });

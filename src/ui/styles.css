@@ -1822,6 +1822,61 @@
   letter-spacing: 0.04em;
 }
 
+/* ---------------------------------------------------------------- 无障碍面板 */
+
+/* 音量推子。**原生 `range`**，不自己画——它自带键盘操作、
+   读屏角色（slider）与触摸拖动，而这三样每一个都要自己重写一遍才对。 */
+.g-root .g-vol {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.15em 0;
+}
+.g-root .g-vol-l { flex: 0 0 4.5em; }
+.g-root .g-vol-r { flex: 1; pointer-events: auto; }
+.g-root .g-vol-v { flex: 0 0 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* 小标题（三个开关、键位表各有一个）。比 `.g-group-h` 轻一档，
+   因为它们是**大分组下面的子项**，不是并列的大分组。 */
+.g-root .g-group-h-sm {
+  font-size: 0.92em;
+  margin-top: 0.5em;
+}
+
+/* 键位表：左是动作名，右是一颗可以点的键帽。 */
+.g-root .g-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1em;
+}
+.g-root .g-keyrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1em;
+  padding: 0.1em 0;
+}
+.g-root .g-keyrow-l { flex: 1; }
+/* 键帽比别的按钮窄——一列十行键位，宽度不给够就换行了。 */
+.g-root .g-keycap {
+  min-width: 6.5em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.04em;
+}
+/* 捕获态：**必须一眼看得出来**，否则玩家不知道自己在等什么。 */
+.g-root .g-keycap.is-capturing {
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+/* 选了终局之后的那一句结语。压到与正文之间、可读但不抢眼——
+   它是收尾，不是新的标题。 */
+.g-root .g-end-line {
+  margin-top: -0.2em;
+  font-style: italic;
+  white-space: pre-line;
+}
+
 .g-root .g-joys {
   display: flex;
   flex-direction: column;
@@ -2003,6 +2058,30 @@
   background: rgba(24, 20, 15, 0.45);
   border: 1px solid rgba(236, 227, 206, 0.5);
 }
+
+/* 「摸一下」那颗。**常亮、不跟着够不够得着变灰**——
+   够得着够不着是 3D 判定，而触屏这一侧没有那个提示圈；
+   一颗会灰的按钮在触屏上读作"这个动作暂时不能用"，
+   而实际情况是"你得再靠近一点"。它留在原地，玩家会自己走过去。 */
+.g-root .g-touch-act {
+  pointer-events: auto;
+  /* 容器是 `position:absolute; inset:0`，所以每一颗都要自己定位。
+     摆在下缘正中：左是摇杆、右是打卡，中间正好是拇指自然落点——
+     而「摸一下」是这一屏最高频的动词，它不该和打卡抢右下角。 */
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--g-safe-b) + 1rem);
+  min-width: 4.2rem;
+  min-height: 4.2rem;
+  padding: 0.7rem 1.1rem;
+  border-radius: 999px;
+  font-size: 0.88em;
+  color: var(--paper);
+  background: rgba(24, 20, 15, 0.5);
+  border: 1px solid rgba(236, 227, 206, 0.42);
+}
+.g-root .g-touch-act:active { background: rgba(157, 58, 47, 0.82); }
 
 /* 够得着了：实心 + 印泥红边。没到范围时它是半透明的一颗灰圆，
    玩家扫一眼就知道"现在按下去没反应"，而不必去按一次验证。 */
@@ -2266,6 +2345,37 @@
   }
 }
 
+/* ---------------------------------------------------------------- 无障碍
+ *
+ * ## 为什么媒体查询不够，要再给一个**设置项**
+ *
+ * `prefers-reduced-motion` 只覆盖**系统级**偏好，而：
+ *  · 有人是眼疲劳 / 眩晕而不是系统偏好，前庭功能敏感者未必去改系统设置；
+ *  · 有人反过来：系统开了减弱，而这一屏的游戏内运动（路口停一拍、
+ *    收缩的节拍圈）在 CSS 之外，媒体查询根本管不到。
+ *
+ * 所以 `data-reduce-motion="on"` 是**同一个总闸的第二条腿**，
+ * 由设置面板写入。它与媒体查询的规则**并集**，任一为真即生效。
+ */
+.g-root[data-reduce-motion='on'] .g-fade,
+.g-root[data-reduce-motion='on'] .g-ring,
+.g-root[data-reduce-motion='on'] .g-btn,
+.g-root[data-reduce-motion='on'] .g-seg-b,
+.g-root[data-reduce-motion='on'] .g-lakeside-bar-fill {
+  animation: none;
+  transition: none;
+}
+
+/* 色觉友好配色：把**写死在行内的 `--sw`** 全部换成一套可分的色。
+   而这五个 `--fr-*` 变量是给那些用 var() 取色的地方准备的。 */
+.g-root[data-cb='on'] {
+  --frag-0: #4d7fb0;
+  --frag-1: #d9b23f;
+  --frag-2: #8a5fb0;
+  --frag-3: #b8663f;
+  --frag-4: #6e6e6e;
+}
+
 /* ---------------------------------------------------------------- 湖边一屏 */
 /* 固定在屏幕下缘：这一屏没有小地图、没有道具栏，只有一条读数和一行退出口。 */
 .g-lakeside {
@@ -2318,10 +2428,23 @@
   color: rgba(242,237,226,.78);
 }
 /* 退出口常驻。它不是提示，是契约：不可见的退路等于没有。 */
+/* 出口。它从一行说明文字变成了一颗按钮（触屏上这一屏唯一的出口），
+   所以要有一块**真的能点到的面积**——手机上 12px 的字不是点击目标。
+   视觉上仍然读成一行淡字：它是方向提示，不是主操作。 */
 .g-lakeside-exit {
-  font-size: 12px;
-  color: rgba(242,237,226,.6);
+  align-self: center;
+  min-height: 44px;
+  padding: 10px 18px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(242,237,226,.72);
+  font-size: 13px;
+  cursor: pointer;
 }
+.g-lakeside-exit:hover { background: rgba(242,237,226,.08); color: rgba(242,237,226,.92); }
+.g-lakeside-exit:focus-visible { outline: 2px solid rgba(242,237,226,.7); outline-offset: 2px; }
 /* VR 入口。只有这台机器真的支持 immersive-vr 时才由 `setVrAvailable()` 放出来，
    所以这里不需要"不可用时灰掉"的那一态——不出现就是不支持。 */
 .g-lakeside-vr {

@@ -102,6 +102,8 @@ export class EndCard {
   private paperEl: HTMLSpanElement;
   private tierEl: HTMLSpanElement;
   private overdueEl: HTMLDivElement;
+  /** 选了终局之后的那一句结语（`back_break` / `ending_sub_keep`）。 */
+  private endingLine: HTMLDivElement;
 
   private editor: HTMLDivElement;
   private ta: HTMLTextAreaElement;
@@ -243,6 +245,17 @@ export class EndCard {
     right.appendChild(rule());
     right.appendChild(el('div', 'g-group-h', t('ending_title')));
     right.appendChild(note(t('ending_hint'), 'g-note-dim'));
+    // 选了之后的**结语**。两支各一句，写在抉择按钮正下方。
+    //
+    // `back_break` 此前是死字：源项目里它是「放手」那一支的收束，
+    // 而 Web 版一直没接——于是「留门 / 放手」这一对里只接了一半，
+    // 玩家在另一半读到的只有一句功能说明（"留白是故意的"）。
+    // 而 `ending_title` 只有四个字「终点 · 落笔」，说完了。
+    //
+    // 只在**已经选了**之后出现：没选的时候它是剧透。
+    this.endingLine = note('', 'g-note-dim g-end-line');
+    setShown(this.endingLine, false);
+    right.appendChild(this.endingLine);
     // 完满 + 过期同时成立时才出现的一句。`day = 1 + 3×圈数 + 打卡数`，
     // 按每圈三次的节奏刷满五座正好 31 天 > 30——「拿得越满，到期得越干净」
     // 是这条算术唯一一次被念出来。它不改变任何判定，只让玩家知道
@@ -535,6 +548,13 @@ export class EndCard {
     setText(this.expB, `${t('export')} · ${t('card_side_back')}`);
     setText(this.endKeep, t('ending_keep'));
     setText(this.endBreak, t('ending_break'));
+    // 结语只在**选了之后**出现。没选就写出来等于剧透。
+    const picked = endingOf(this.game.endingId);
+    const hasChosen = this.game.endingId === 'leave_door' || this.game.endingId === 'let_go';
+    setShown(this.endingLine, hasChosen);
+    if (hasChosen) {
+      setText(this.endingLine, t(picked === 'let_go' ? 'back_break' : 'ending_sub_keep'));
+    }
     setText(this.confirmBtn, t('back_confirm'));
     setText(this.skipBtn, t('back_skip'));
     setText(this.frontBtn, t('back_to_front'));

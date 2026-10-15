@@ -37,6 +37,7 @@ import './styles.css';
 
 import { onLangChange, t } from '../i18n';
 import { onTouchModeChange } from '../core/touch';
+import { audio } from '../core/audio';
 import type { Tier } from '../core/capability';
 import type { World, WorldEvent } from '../world/world';
 import type { GameStateManager } from '../game/state';
@@ -97,6 +98,24 @@ export interface UIHooks {
   onQualityChange(tier: Tier): void;
   onAdaptiveChange(enabled: boolean, targetFps: number): void;
   onMuteChange(bgm: boolean, sfx: boolean, all: boolean): void;
+  /**
+   * 无障碍那一组。**一个 hook 传全部，而不是四个**。
+   *
+   * 四个 hook 会让宿主那边出现四个各自落盘、各自 `syncFromState()` 的回调，
+   * 而这四项是**同一个 `SettingsData`**——分开传迟早出现"改了配色没落盘、
+   * 重开又变回去"。一个动作对象配一次 `saveSettings()`，是唯一的口径。
+   *
+   * `keymap` 只在**改键**时传；音量滑块每拖一下都调一次，
+   * 所以音量走 `onVolumeChange` 而不塞进这里（它不需要落盘那么频繁）。
+   */
+  onAccessibilityChange(patch: {
+    volBgm?: number;
+    volSfx?: number;
+    colorblind?: boolean;
+    reduceMotion?: boolean;
+    holdToToggle?: boolean;
+  }): void;
+  onKeymapChange(keymap: Record<string, string>): void;
   onLangToggle(): void;
   onCheckIn(): void;
   onShopBuy(goodId: string): void;
@@ -235,7 +254,19 @@ export class UI {
    * 不是副本——所以宿主把 `checkInPressed` 清成 false 时，
    * 清的是摇杆那一次按下留下的那一位。
    */
-  readonly touch: { moveX: number; moveY: number; checkInPressed: boolean };
+  /**
+ * 触屏输入意图。**不是副本**：`TouchControls.state` 本体，
+ * 所以宿主清掉 `checkInPressed` 清的就是控制器那一个字段。
+ *
+ * `holdPressed` 是给"按住"用的动词（钓鱼收线、云、茶）——
+ * 没有它，触屏上根本没有"按住"这个动作。
+ */
+readonly touch: {
+  moveX: number;
+  moveY: number;
+  checkInPressed: boolean;
+  holdPressed: boolean;
+};
 
   private opts: UIOptions;
   private hooks: UIHooks;
@@ -279,6 +310,10 @@ export class UI {
   private unbindLang: (() => void) | null = null;
   private unbindTouch: (() => void) | null = null;
   private disposed = false;
+  private colorblind = false;
+  private reduceMotion = false;
+  private holdToToggle = false;
+  private lakesideOn = false;
 
   constructor(opts: UIOptions) {
     this.opts = opts;
@@ -323,6 +358,16 @@ export class UI {
       adaptiveOn: this.adaptiveOn,
       adaptiveTarget: this.adaptiveTarget,
       onLookPostcard: () => this.lookPostcard(),
+    });
+    // 无障碍那一组灌一次初值。它读的是 `SettingsData` 的同一份数字，
+    // 而宿主在构造 `App` 时就把它们推进 `audio` 了——
+    // 于是面板上看到的滑块位置与真正发出来的音量**必然一致**。
+    this.pause.setAccessibilityState({
+      volBgm: audio.volume.bgm,
+      volSfx: audio.volume.sfx,
+      colorblind: this.colorblind,
+      reduceMotion: this.reduceMotion,
+      holdToToggle: this.holdToToggle,
     });
     // 必须在暂停面板之后构造：两者都是铺满全屏的 `.g-screen`，
     // 同层叠放的先后由 `.g-root` 里的 append 顺序决定，构造早了就被压在下面。
@@ -440,6 +485,64 @@ export class UI {
     // 而摇杆长得又很像"可以拖"，于是玩家会在标题页上推两下、发现没反应、
     // 得出"这游戏在手机上玩不了"的结论。**控件不出现，就不会被误试。**
     this.applyTouchVisibility();
+  }
+
+  /**
+   * 收放"在世界里才有意义"的界面外壳：顶栏、小地图、道具栏、触屏控件。
+   *
+   * 湖边那一屏进出时用。**对外暴露它的理由**：原来只有 `showTitle()` /
+   * `enterWorld()` / `closeEndCard()` 几个内部点会调那个私有的
+   * `setWorldVisible()`，于是湖边那条路想收 HUD 时只能去调 `syncFromState()`
+   * ——而那个函数从头到尾**没有一行碰可见性**，症状是整套骑行 HUD
+   * （含一个停在上一次位置的小地图）浮在一片湖岸上。
+   *
+   * `lakeside` 面板自己**不归它管**，走 `setLakeside()` / `hideLakeside()`。
+   */
+  setWorldChromeVisible(v: boolean): void {
+    this.setWorldVisible(v);
+  }
+
+  /**
+   * 色觉友好配色。
+   *
+   * ## 为什么落在 CSS 自定义属性 + HUD 重绘两处
+   *
+   * 碎片色**不只在 DOM 里**：格子、小地图上的点、HUD 那一排都在用同一份
+   * `FRAGMENT_COLORS`（`hud.ts`）。所以这一项不是一个 class 就完事的——
+   * DOM 侧靠 CSS 变量换掉所有 `var(--frag-n)`，而 **canvas 侧的那几个色块**
+   * 必须显式重绘，否则玩家会看到"格子里变了、图上没变"。
+   */
+  setHoldToToggle(on: boolean): void {
+    this.holdToToggle = on;
+  }
+
+  setColorblind(on: boolean): void {
+    this.colorblind = on;
+    this.root.dataset.cb = on ? 'on' : 'off';
+    this.hud.setColorblind(on);
+  }
+
+  /**
+   * 减弱动效。
+   *
+   * `data-reduce-motion` 是一道**总闸**，CSS 与 3D 两侧都读它：
+   * CSS 那一半关掉过渡与动画（见 `styles.css` 里同一名的选择器），
+   * 3D 那一半是路口那一下"停一拍"与 HUD 的收缩圈——
+   * 后两者是**游戏内的运动**，媒体查询管不到，而它们恰恰是
+   * 前庭功能敏感者最难承受的那两处。
+   */
+  setReduceMotion(on: boolean): void {
+    this.reduceMotion = on;
+    this.root.dataset.reduceMotion = on ? 'on' : 'off';
+    this.hud.setReduceMotion(on);
+  }
+
+  get isColorblind(): boolean {
+    return this.colorblind;
+  }
+
+  get isReduceMotion(): boolean {
+    return this.reduceMotion;
   }
 
   /** 数字键 1~4 选道具。返回 false 表示那一格还没买到。 */
@@ -767,6 +870,16 @@ export class UI {
     this.lakeside.setVrAvailable(available);
   }
 
+  /**
+   * 湖边出口那一行是不是「点这里」而不是「按 Esc」。
+   *
+   * **必须跟着 `applyTouchVisibility()` 的同一个判据走**——两条各判一次的话，
+   * 就会出现"控件藏了、按钮却还写着按 Esc"，那台设备上等于没有出口。
+   */
+  setLakesideTouchMode(on: boolean): void {
+    this.lakeside.setTouchMode(on);
+  }
+
   // ---------------------------------------------------------------- 同步
 
   /**
@@ -977,8 +1090,31 @@ export class UI {
   }
 
   /** 触屏控件 = 判定为触屏 **且** 已经进到世界里。两个条件都要。 */
-  private applyTouchVisibility(): void {
+private applyTouchVisibility(): void {
+    // **湖边那一屏是例外**：世界看不见了，可那一屏是**走路 + 抛竿**，
+    // 而摇杆与那颗大按钮是它仅有的两个动词。跟着世界一起藏起来的话，
+    // 触屏玩家进得来出不去、连站着都做不到——那一屏对他们等于不存在。
+    if (this.lakesideOn) {
+      this.touchCtl.setMode(this.touchMode);
+      return;
+    }
     this.touchCtl.setMode(this.touchMode && this.worldVisible);
+    // 湖边出口那一行跟着同一个值换文案。
+    // 控件藏起来的那一次，恰恰是**最需要那句「点这里」**的那一次。
+    this.lakeside.setTouchMode(this.touchMode);
+  }
+
+  /**
+   * 进入 / 退出湖边。
+   *
+   * 必须在 `setWorldVisible` **之前**调：`applyTouchVisibility()` 要读到它
+   * 才不会把控件藏掉，而它自己是在 `setWorldVisible()` 里被调用的。
+   */
+  setLakesideActive(on: boolean): void {
+    if (this.lakesideOn === on) return;
+    this.lakesideOn = on;
+    this.touchCtl.setLakesideMode(on);
+    this.applyTouchVisibility();
   }
   get isTouchMode(): boolean {
     return this.touchMode;

@@ -82,6 +82,15 @@ export class AudioSystem {
   bgmMuted = false;
   sfxMuted = false;
   fullyMuted = false;
+  /**
+   * 两条总线各自的音量（0~1）。
+   *
+   * **为什么它们在这里而不是只在设置里**：设置面板要能在 `AudioContext`
+   * 还没建起来的时候就把值摆对（首次点击之前一切都静音），
+   * 而 `unlock()` 里那一句 `applyBuses()` 就是干这个的。
+   */
+  volBgm = 1;
+  volSfx = 1;
   /** 环境层数上限（画质档给的） */
   ambientLayers = 3;
 
@@ -402,7 +411,11 @@ export class AudioSystem {
     g.linearRampToValueAtTime(on ? 0.12 : 0.6, now + 0.25);
   }
 
-  // ---------------------------------------------------------------- 静音
+  // ---------------------------------------------------------------- 音量
+  //
+  // 原来只有三个布尔开关，而 0.55 / 0.85 是**写死的总线增益**。
+  // 后果是外放声音太大、或者耳机太小声的玩家**没有任何旋钮**——
+  // 只有静音和取消静音，而那不是音量。这一条就够拒掉一整类差评。
   setBgmMuted(v: boolean) {
     this.bgmMuted = v;
     this.applyBuses();
@@ -418,11 +431,37 @@ export class AudioSystem {
     }
   }
 
+  /**
+   * 两条总线各自的音量（0~1）。
+   *
+   * ## 为什么不乘进 master
+   *
+   * master 上还有 `fullyMuted`。分开的好处是**静音是临时的、音量是持久的**：
+   * 玩家按一次静音之后取消，进度条还停在他自己调的位置上。
+   *
+   * 写入用 `setTargetAtTime` 而不是 `value =`：直接赋值会在滑块拖动的
+   * 每一帧上产生一次阶跃，而 `setTargetAtTime` 的时间常数 0.05s
+   * 让它听起来是一条平滑的推子而不是一串咔哒声。
+   */
+  setVolume(which: 'bgm' | 'sfx', v: number): void {
+    const clamped = Math.min(Math.max(v, 0), 1);
+    if (which === 'bgm') this.volBgm = clamped;
+    else this.volSfx = clamped;
+    this.applyBuses();
+  }
+
+  get volume(): { bgm: number; sfx: number } {
+    return { bgm: this.volBgm, sfx: this.volSfx };
+  }
+
   private applyBuses() {
     if (!this.ready || !this.buses) return;
     const now = this.ctx!.currentTime;
-    this.buses.bgm.gain.setTargetAtTime(this.bgmMuted ? 0 : 0.55, now, 0.05);
-    this.buses.sfx.gain.setTargetAtTime(this.sfxMuted ? 0 : 0.85, now, 0.05);
+    // 原来的两个常数（0.55 / 0.85）成了**满音量**。
+    // 这不是随手改的数值：它们本来就是这套混音的"100%"，
+    // 滑块从这里往上没有余量、往下正好到 0。
+    this.buses.bgm.gain.setTargetAtTime(this.bgmMuted ? 0 : 0.55 * this.volBgm, now, 0.05);
+    this.buses.sfx.gain.setTargetAtTime(this.sfxMuted ? 0 : 0.85 * this.volSfx, now, 0.05);
   }
 
   // ---------------------------------------------------------------- 工具
