@@ -469,6 +469,34 @@ export class Scenery {
   invalidate() {
     this.lastCellIndex = -1;
   }
+
+  /**
+   * 离 (x, z) 最近的**景物建筑**有多远。附近一个都没有时返回 `Infinity`。
+   *
+   * ## 为什么不算竹子
+   *
+   * 这个查询存在的唯一目的是回答「玩家是不是以为站在一栋能进的地方旁边」。
+   * 竹丛不是房子——站在竹子旁边按空格没有反应**完全合理**，
+   * 而把它算进去会让每一片路边竹林都触发一句解释，而那句话和眼前的竹子对不上号。
+   * 那正是当初把远处改成一概沉默时想避开的东西。
+   *
+   * ## 为什么在 `update()` 的缓存之外算
+   *
+   * `update()` 只在跨格时重算可见性，而这里的半径比剔除半径小得多，
+   * 两者对不上——所以宁可每次问的时候直接扫一遍落点：`cells` 只有几十个，
+   * 每帧一次平方根的开销可以忽略，而**复用错缓存的风险不能忽略**。
+   */
+  nearestBuilding(x: number, z: number): number {
+    let best = Infinity;
+    for (const c of this.cells) {
+      if (c.kind === 'bamboo') continue;
+      for (const p of c.items) {
+        const d = Math.hypot(p.x - x, p.z - z);
+        if (d < best) best = d;
+      }
+    }
+    return best;
+  }
 }
 
 /**

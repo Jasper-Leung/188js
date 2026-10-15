@@ -53,6 +53,8 @@ import { SynthesisPanel } from './synthesisPanel';
 import { EndCard } from './endCard';
 import { TouchControls } from './touchControls';
 import { Toast, type ToastKind } from './toast';
+import { LakesidePanel } from './lakesidePanel';
+import type { LakesideFrame } from '../world/lakeside';
 import { ItemBar } from './itemBar';
 import { StoryCards, ResultCard, setNarrativeQuiet, type SettleOutcome } from './storyCard';
 import { WorldVisibility } from '../game/phase';
@@ -116,6 +118,20 @@ export interface UIHooks {
    * 所以这一条不能靠复用它们实现。
    */
   onCloseEndCard(): void;
+  /**
+   * 玩家点了湖边那一屏的「戴上头显」。
+   *
+   * ## 为什么它必须是宿主来做
+   *
+   * `navigator.xr.requestSession()` 要**用户激活**，而用户激活只在点击回调
+   * 那一小段时间里有效——所以这一路是"点击 → 宿主 → `XrSession.enter()`"，
+   * 中间不能 `await` 任何别的东西。UI 自己开不了会话：它拿不到渲染器，
+   * 而 `gl.xr.setSession()` 是会话真正生效的那一步。
+   *
+   * 按钮**只在 `isSessionSupported('immersive-vr')` 为真时出现**
+   * （宿主调 `setLakesideVr()`），所以这个 hook 被调用时机器一定是支持的。
+   */
+  onVrRequest(): void;
 }
 
 export interface UIOptions {
@@ -244,6 +260,7 @@ export class UI {
   private endCard: EndCard;
   private touchCtl: TouchControls;
   private toast: Toast;
+  private lakeside!: LakesidePanel;
   private itemBar!: ItemBar;
   private storyCards!: StoryCards;
   private resultCard!: ResultCard;
@@ -282,6 +299,9 @@ export class UI {
     // 同一个 root 内部的绘制顺序靠这个 append 顺序决定，所以它是语义的一部分。
     this.mood = new MoodMask(this.root, this.game);
     this.toast = new Toast(this.root);
+    // 湖边读数。**它不属于 `isInWorld()`**，所以收放由宿主显式调
+    // `setLakeside()` / `hideLakeside()`，而不是跟着世界可见性走。
+    this.lakeside = new LakesidePanel(this.root, () => this.hooks.onVrRequest());
     this.itemBar = new ItemBar(this.root);
     this.storyCards = new StoryCards(this.root);
     this.resultCard = new ResultCard(this.root);
@@ -354,7 +374,12 @@ export class UI {
     // 挂上监听就够——判定本身在 core/touch.ts，这里只负责把它接到 DOM。
     this.unbindTouch = onTouchModeChange((on) => this.setTouchMode(on));
 
-    this.unbindLang = onLangChange(() => this.syncFromState());
+    this.unbindLang = onLangChange(() => {
+      // 湖边读数也要跟着换语言：它不在 `syncFromState()` 的管辖范围内
+      // （`lakeside` 不在 `isInWorld()` 里），所以这里单独点一次。
+      this.lakeside.setLang();
+      this.syncFromState();
+    });
     this.syncFromState();
     this.pushDusk(true);
     void ensureUiFont();
@@ -714,6 +739,32 @@ export class UI {
 
   showToast(text: string, ms?: number, kind?: ToastKind): void {
     this.toast.show(text, ms, kind);
+  }
+
+  /** 湖边这一屏的读数。宿主每帧调一次，面板自己决定要不要真的改 DOM。 */
+  setLakeside(f: LakesideFrame): void {
+    this.lakeside.sync(f);
+  }
+
+  /**
+   * 收起湖边读数。
+   *
+   * **退出这一屏时必须显式收。** 它不在 `setWorldVisible()` 的管辖范围内——
+   * 那一套管的是「骑行 HUD 有没有」，而这一屏和骑行 HUD 是互斥的两套东西。
+   * 漏掉的话，退出湖边之后张力条会浮在正常骑行画面上。
+   */
+  hideLakeside(): void {
+    this.lakeside.hide();
+  }
+
+  /**
+   * 湖边那一屏的 VR 入口出不出来。
+   *
+   * 宿主在启动时问一次 `isSessionSupported('immersive-vr')`，答案是异步的
+   * （而且可能比玩家进湖边晚），所以它是一条独立的 setter 而不是构造参数。
+   */
+  setLakesideVr(available: boolean): void {
+    this.lakeside.setVrAvailable(available);
   }
 
   // ---------------------------------------------------------------- 同步

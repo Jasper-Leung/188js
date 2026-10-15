@@ -7,7 +7,7 @@
  * （见 tools/verify-all.mjs）。任何"顺手简化一下采样"的改动都会让
  * 路面网格、迷你地图、驿站点位一起漂，而漂的量没有任何症状。
  */
-import { ROAD, type StationDef, type V2 } from './raw';
+import { ROAD, ROADMESH, type StationDef, type V2 } from './raw';
 
 export interface Vec3Flat {
   x: number;
@@ -310,6 +310,26 @@ export const STATIONS: StationPlacement[] = ROAD.STATIONS.map((def, i) => {
 });
 
 export const STATION_COUNT = STATIONS.length;
+
+/**
+ * 玩家站在**路面上**时，离最近那座驿站最多能有多远（米）。
+ *
+ * 互动半径的下限：比它小，玩家就会站在路面外侧按下键却什么都没发生，
+ * 而屏幕上没有任何东西解释为什么——症状是"有时候按不动"。
+ *
+ * ## 为什么必须算出来，而不是写「驿站半径 + 路半宽」
+ *
+ * 驿站不在路面边上，在环线外侧 **18m**（`stationOff()` 推出来的）。
+ * 所以「`STATION_PASS_RADIUS` + 路半宽」这个算式少算了那 18m：
+ * 路面半宽 4m 时它给 19，而路面上最远的那个点离驿站有 **22m**——
+ * 外侧 3m（路面宽的 37%）因此永远够不着。
+ * 写死的数还会在驿站挪位或路面加宽时**悄悄**失效，而症状只是"有时候按不动"。
+ */
+export const STATION_ROAD_MAX_DIST = (() => {
+  let worst = 0;
+  for (const s of STATIONS) worst = Math.max(worst, distToCenterline(s.x, s.z));
+  return worst + ROADMESH.TOTAL_HALF_WIDTH;
+})();
 
 /** 碎片站按槽位顺序（云/茶/琴/竹/禽）取，和 FRAGMENT_SLOT_STATION_IDX 对齐 */
 export const FRAGMENT_STATIONS: StationPlacement[] = ROAD.FRAGMENT_SLOT_STATION_IDX.map(

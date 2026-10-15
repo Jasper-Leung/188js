@@ -3,9 +3,10 @@
  *
  * ## 为什么它从 `entry.ts` 里搬出来
  *
- * 三条判据有一个共同点：**它们量的不是运行时，是交付出去的东西。**
+ * 四条判据有一个共同点：**它们量的不是运行时，是交付出去的东西。**
  * 提交页是评委唯一直接看到的页面，自行车源在不在版本库里，
- * 源码里有没有 U+FFFD——这三条坏了构建不报错、CI 不报错，
+ * 源码里有没有 U+FFFD，湖边场景那块地形有没有被换成没裁过的整条山谷——
+ * 这四条坏了构建不报错、CI 不报错，
  * 只有真正去 clone、去点开、去读注释的人才会撞上。
  * 把它们和 ride / 场景那几族混在一个 9,400 行的文件里，
  * 「改游戏」和「验收游戏」就再也分不开了。
@@ -22,7 +23,8 @@
  *
  * ## 依赖口径
  *
- * 这三条只用到 `node:fs` / `node:path`、`./submission` 的 `assertSubmission`，
+ * 这一族只用到 `node:fs` / `node:path`、`@gltf-transform`（只有湖边那条要，
+ * 用来解 meshopt 量真实包围盒）、`./submission` 的 `assertSubmission`，
  * 以及 `./harness` 的 `expect`。`entry.ts` 里其余的 `existsSync` /`statSync` /
  * `readdirSync` / `sep` 在别处仍被大量使用，**那些 import 一行都没动**——
  * 搬走的只有 `extname` 与 `assertSubmission` 这两个仅此一族在用的符号。
@@ -35,6 +37,97 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, sep } from 'node:path';
 import { assertSubmission } from './submission';
 import { expect, type CheckFn } from './harness';
+
+/**
+ * 湖边场景模型的量法 —— 只为 `verify_lakeside` 服务。
+ *
+ * ## 为什么这里自己读，而不是复用 `entry.ts` 的 `readGlbGeometry`
+ *
+ * 因为**把判据写进 `registerDeliveryChecks` 内部，`entry.ts` 一行都不用动**，
+ * 而 AGENTS.md §3 明确写着「等本批在途改动提交之前不要动 `entry.ts` 的结构」。
+ * `readGlbGeometry` 住在 `entry.ts` 里，而这一族只拿得到 `check`，
+ * 搬它就等于动 `entry.ts`。抄一份进来代价更小。
+ *
+ * ## 顶层 await 为什么在这儿
+ *
+ * `check()` 只收**同步**返回值，而 `NodeIO.read()` 是异步的。
+ * `entry.ts` 处理 meshopt 时用的就是同一个办法（顶层 `await MeshoptDecoder.ready`），
+ * 这里只是再往前一步：顶层把文件读完，`verify_lakeside` 里全是同步断言。
+ */
+const LAKESIDE_REL = join('public', 'models', 'lakeside.glb');
+
+type LakesideStats = {
+  tris: number;
+  verts: number;
+  images: number;
+  semantics: string[];
+  meshopt: boolean;
+  unlit: boolean;
+  bytes: number;
+  /** 逐分量统计；非有限值另计 */
+  finite: boolean;
+  size: [number, number, number];
+  min: [number, number, number];
+};
+
+let lakesideStats: LakesideStats | null = null;
+
+if (existsSync(join(process.cwd(), LAKESIDE_REL))) {
+  const { NodeIO } = await import('@gltf-transform/core');
+  const { EXTMeshoptCompression, KHRMaterialsUnlit } = await import('@gltf-transform/extensions');
+  const { MeshoptDecoder: GltfMeshopt } = await import('meshoptimizer');
+  await GltfMeshopt.ready;
+  const io = new NodeIO()
+    .registerExtensions([EXTMeshoptCompression, KHRMaterialsUnlit])
+    .registerDependencies({ 'meshopt.decoder': GltfMeshopt });
+  const doc = await io.read(join(process.cwd(), LAKESIDE_REL));
+  const prim = doc.getRoot().listMeshes()[0].listPrimitives()[0];
+  const posAcc = prim.getAttribute('POSITION');
+  // strict 模式下 `getAttribute` 返回 `Accessor | null`。这里是模块顶层的量测，
+  // 抛比吞掉好——它坏掉意味着文件根本不是一个可渲染的网格。
+  if (!posAcc) throw new Error('verify_lakeside: lakeside.glb 的 primitive 上没有 POSITION');
+  const raw = posAcc.getArray();
+
+  /**
+   * ⚠ **必须乘回节点缩放。**
+   *
+   * meshopt 把 16 位定点量化的 scale / translation 放在**节点**上，
+   * accessor 本身是 [-1, 1] 的归一化值。直接拿 accessor 当米读，
+   * 量出来会是一个对称的 ±128m 盒子——而文件其实完全正常。
+   * 这和 `verify_station_models` 注释里记的是同一个坑（那里是 meshopt 没解码，
+   * 这里是漏乘节点变换），两处都栽过一次，所以这一条在此钉死。
+   */
+  const node = doc.getRoot().listNodes().find((n) => n.getMesh() != null);
+  const ns = node ? node.getScale() : [1, 1, 1];
+  const nt = node ? node.getTranslation() : [0, 0, 0];
+  const den = posAcc.getComponentType() === 5122 ? 32767 : posAcc.getComponentType() === 5123 ? 65535 : 1;
+
+  const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+  const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  let finite = true;
+  for (let i = 0; i < posAcc.getCount(); i++) {
+    for (let k = 0; k < 3; k++) {
+      const v = raw[i * 3 + k] / den * ns[k] + nt[k];
+      if (!Number.isFinite(v)) { finite = false; continue; }
+      if (v < lo[k]) lo[k] = v;
+      if (v > hi[k]) hi[k] = v;
+    }
+  }
+
+  lakesideStats = {
+    tris: prim.getIndices()!.getCount() / 3,
+    verts: posAcc.getCount(),
+    images: doc.getRoot().listTextures().length,
+    semantics: [...prim.listSemantics()].sort(),
+    meshopt: (doc.getRoot().listExtensionsUsed() as { extensionName?: string }[])
+      .some((e) => e?.extensionName === 'EXT_meshopt_compression'),
+    unlit: prim.getMaterial()!.getExtension('KHR_materials_unlit') != null,
+    bytes: statSync(join(process.cwd(), LAKESIDE_REL)).size,
+    finite,
+    size: [0, 1, 2].map((k) => hi[k] - lo[k]) as [number, number, number],
+    min: lo,
+  };
+}
 
 /** 由 `entry.ts` 在原位调用一次，见文件头「为什么是导出函数」。 */
 export function registerDeliveryChecks(check: CheckFn): void {
@@ -142,6 +235,117 @@ export function registerDeliveryChecks(check: CheckFn): void {
       probs.length
         ? probs.join('；')
         : `自行车源在仓库内（${(srcBytes / 1048576).toFixed(2)}MB → ${(existsSync(outPath) ? (statSync(outPath).size / 1048576).toFixed(2) : '?')}MB），清单指向它`,
+      asserts,
+    );
+  });
+
+  // ---------------------------------------------------------- 湖边场景模型
+  /**
+   * `public/models/lakeside.glb` —— 由 Marble 的 HQ mesh 裁出来的一块湖岸。
+   *
+   * ## 它为什么值得单列一条
+   *
+   * 这个文件**不是从仓库里的源生成的**：源在仓库之外（Marble 的 HQ 导出，
+   * 100~200MB），`tools/lakeside-scene.mjs` 靠 `--src` / `GIFT188_SRC_LAKESIDE` 读。
+   * 于是 `verify_assets_src` 那条「源必须在仓库里」的口径套不到它身上——
+   * 不套是对的，143MB 不该进版本库。但代价是**这份资产从此没有上游**：
+   * 谁都可以把它换掉、换小、换成没裁过的整条山谷，而没有任何东西会响。
+   *
+   * ## 它守的六条全是「换掉才会红」
+   *
+   * · **零贴图** —— 图集 8192² 是 86MB。带上它，这一个文件比全站其余资产加起来还大。
+   * · **`COLOR_0` 在** —— 贴图删了而顶点色没烘进去，它会退成一块单色体积。
+   * · **`NORMAL` 在** —— `--lit` 时它接的是 `MeshStandardMaterial`，缺法线就没有平滑光照。
+   *   这条**曾经真的红过**：`prune()` + `dedup()` 会静默删掉它。
+   * · **meshopt 在** —— 和九座 Tripo 建筑同一条硬约束。
+   * · **面数 / 体积有上限** —— 裁剪框放大是最容易犯的"顺手改一下"。
+   * · **包围盒在预算内** —— 这条是专门防「把没裁过的整条山谷直接丢进来」的：
+   *   那份源是 1022 × 1493 m、峰顶 509 m，而本项目全世界只有 800 × 800 m、
+   *   `TERRAIN.MAX_HEIGHT = 25 m`。一个 1.5km 的湖岸摆在 800m 的世界里，
+   *   没有任何几何断言会响，只有玩家看得见。
+   *
+   * ## 会红的做法
+   *   · `--crop` 后面漏了边长、把整片场地切进来               → 红（包围盒）
+   *   · 在 bake 之后忘了 `setAttribute('TEXCOORD_0', null)`    → 红（零贴图）
+   *   · 把法线的重算挪回 `simplify()` 之前                     → 红（NORMAL）
+   *   · 直接把 Marble 的 HQ mesh 复制进 `public/models/`       → 红（面数 + 包围盒）
+   */
+  check('verify_lakeside', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    const where = LAKESIDE_REL.replace(/\\/g, '/');
+
+    // 1. 文件在
+    asserts++;
+    if (!lakesideStats) {
+      probs.push(`${where} 不在 —— 湖边场景没有地形可用`);
+      return expect(false, probs.join('；'), asserts);
+    }
+    const s = lakesideStats;
+
+    // 2. 零贴图
+    asserts++;
+    if (s.images > 0) {
+      probs.push(`${where} 带着 ${s.images} 张贴图，零贴图是一等约束（配色要烘进顶点色）`);
+    }
+
+    // 3. 顶点色在
+    asserts++;
+    if (!s.semantics.includes('COLOR_0')) {
+      probs.push(`${where} 没有 COLOR_0，丢掉贴图之后它会是一块单色体积`);
+    }
+
+    // 4. 法线在
+    asserts++;
+    if (!s.semantics.includes('NORMAL')) {
+      probs.push(`${where} 没有 NORMAL —— 平滑光照没了（unlit 时看不出来，--lit 会立刻穿帮）`);
+    }
+
+    // 5. meshopt 在
+    asserts++;
+    if (!s.meshopt) {
+      probs.push(`${where} 没有 EXT_meshopt_compression`);
+    }
+
+    // 6. 面数上限。当前 98,228；留一半余量给「换个裁剪框」。
+    asserts++;
+    const MAX_TRIS = 150_000;
+    if (s.tris > MAX_TRIS) {
+      probs.push(`${where} 有 ${s.tris.toLocaleString()} 面，超出 ${MAX_TRIS.toLocaleString()} 的预算`);
+    }
+
+    // 7. 体积上限。当前 1.12MB；`public/models` 其余全部加起来是 17.47MB。
+    asserts++;
+    const MAX_BYTES = 2 * 1024 * 1024;
+    if (s.bytes > MAX_BYTES) {
+      probs.push(`${where} 有 ${(s.bytes / 1048576).toFixed(2)}MB，超出 2MB 的预算`);
+    }
+
+    // 8. 位置全有限。
+    //    这一条是给一次真实事故留的：节点变换算了两遍之后，meshopt 量化时
+    //    Int16 打满 ±32767，读回来位置里全是 NaN——而工具一路打印成功。
+    asserts++;
+    if (!s.finite) {
+      probs.push(`${where} 的位置里有 NaN/Inf —— 多半是节点变换算了两遍，meshopt 量化时饱和了`);
+    }
+
+    // 9. 包围盒在预算内：水平 ≤400m、竖直 ≤650m。
+    asserts++;
+    const [sx, sy, sz] = s.size;
+    if (sx > 400 || sz > 400) {
+      probs.push(`${where} 水平 ${sx.toFixed(0)} × ${sz.toFixed(0)}m，超出 400m —— 裁剪框放太大了`);
+    }
+    if (sy > 650) {
+      probs.push(`${where} 竖直 ${sy.toFixed(0)}m，超出 650m —— 而本项目 TERRAIN.MAX_HEIGHT 只有 25m`);
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `${s.tris.toLocaleString()} 面 · ${(s.bytes / 1048576).toFixed(2)}MB · `
+          + `${sx.toFixed(0)}×${sy.toFixed(0)}×${sz.toFixed(0)}m · 零贴图 + 顶点色 + 法线 + meshopt`
+          + `${s.unlit ? ' + unlit' : ''}`,
       asserts,
     );
   });

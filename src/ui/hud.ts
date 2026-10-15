@@ -37,14 +37,14 @@
  */
 import { Vector3 } from 'three';
 import { STATIONS } from '../data/route';
-import { ECON, ROAD, ROADMESH, WORLD } from '../data/raw';
+import { ECON, ROAD } from '../data/raw';
 import { t, stationNameOf } from '../i18n';
 import { Minimap } from './minimap';
 import { button, el, setAttr, setFlag, setShown, setStyle, setText } from './dom';
 import { FRAGMENT_COLORS } from './theme';
 import type { World } from '../world/world';
 import { GameStateManager } from '../game/state';
-import { interactAt, type InteractKind } from '../game/phase';
+import { interactAt, STATION_REACH, type InteractKind } from '../game/phase';
 
 /** 碎片槽位 → 驿站下标。碎片栏按槽位排，而 `getStationCount()` 收驿站下标，
  *  这两个下标空间不是一回事（云影台是驿站 7、槽位 0）。 */
@@ -578,7 +578,7 @@ export class Hud {
       hasFragment: nb.hasFragment,
       needsVisit: nb.needsVisit,
       distance: nb.distance,
-      reach: WORLD.STATION_PASS_RADIUS + ROADMESH.TOTAL_HALF_WIDTH,
+      reach: STATION_REACH,
       busy: this.world.checkInStage !== 'none',
     });
     if (kind === 'none') {

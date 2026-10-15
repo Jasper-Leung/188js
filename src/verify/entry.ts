@@ -37,7 +37,7 @@ import { Terrain } from '../world/terrain';
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
 import { Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
-import { afterCheckInRoute, canGoPhase, canRide, isInWorld, WorldVisibility, phaseEdgeErrors, phaseReachErrors, settleTextKey, settleMs, unwrapArc, recheckGate } from '../game/phase';
+import { afterCheckInRoute, canGoPhase, canRide, isInWorld, WorldVisibility, phaseEdgeErrors, phaseReachErrors, settleTextKey, settleMs, unwrapArc, recheckGate, STATION_REACH } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
 import { Vehicle, MODE_TUNE, RIDE_MODES, autoScaleToHeight, collectClips, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
@@ -269,12 +269,22 @@ check('verify_stations', () => {
     }
   }
 
-  // 又必须够得着：打卡半径 15m + 路宽
+  // 又必须够得着：**从路面上最远的那条边**算，不是从中心线算。
+  //
+  // 这一条原来量错了对象。它比的是 `驿站到中心线的距离 > 15 + 路半宽`
+  // （18 > 19？否 → 绿），而玩家并不是站在中心线上——他站在 8m 宽路面
+  // 的任意一侧，最远那条边离驿站有 `18 + 4 = 22m`，比互动半径 19m 还远 3m。
+  // 于是**路面外侧 3m（路面宽的 37%）上按空格什么都不会发生**，
+  // 而这条判据一路绿着，因为它量的是"中心线够不够得着"。
+  // 症状就是玩家说的那句"有时候按不动"——取决于你压在路面的哪一侧。
   asserts++;
   for (const s of STATIONS) {
-    const d = minDistToCenterline(s.x, s.z);
-    if (d > 15 + ROADMESH.TOTAL_HALF_WIDTH) {
-      probs.push(`${s.def.name} 离路 ${d.toFixed(1)}m，玩家在路面上够不着`);
+    const far = minDistToCenterline(s.x, s.z) + ROADMESH.TOTAL_HALF_WIDTH;
+    if (far > STATION_REACH) {
+      probs.push(
+        `${s.def.name} 到路面最远那条边有 ${far.toFixed(1)}m > 互动半径 ${STATION_REACH.toFixed(1)}m` +
+          `——站在那一侧按空格没反应`,
+      );
       break;
     }
   }
@@ -1268,8 +1278,8 @@ check('verify_revisit_guidance', () => {
  * 脚下那一圈写着「再访 · 还差 2 次」。这时候按空格：
  *
  * ```
- * 第 1 下 → toast「先骑开一点再来」（1.4s）
- * 第 2 下 → 什么都没有（REPEAT_GAP_SEC = 3.0 > 1.4s，被去重吃掉）
+ * 第 1 下 → toast「先骑开一点再来」（2.6s）
+ * 第 2 下 → 什么都没有（REPEAT_GAP_SEC = 3.0 > 2.6s，被去重吃掉）
  * ```
  *
  * 屏幕上一个字都不出，唯一会动的还是那个写着「再访」的圈。
@@ -1366,11 +1376,20 @@ function runToastReplyAssertions(probs: string[]): number {
   if (onScreen() !== 3) probs.push(`一句「刚刚才结束」把环境提示的去重锚点顶掉了（屏上 ${onScreen()} 条）`);
 
   // ---- 4. 接线：被拒那一支必须传 `'reply'` ----
+  //
+  // 分支后来细化成了三种（反刷门 / 冷却 / 其余），所以这里两个短白名单
+  // 逐支点名，而不是原来那句 `t(key)` 的通配——通配只在单一汇点时成立。
   asserts++;
   {
     const src = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
-    if (!/showToast\(t\(key\),\s*1400,\s*'reply'\)/.test(src)) {
-      probs.push("`main.ts` 的打卡被拒那一支没有传 `'reply'`——分级做好了没接上");
+    const wired: [RegExp, string][] = [
+      [/showToast\(t\('blocked_recheck'\),\s*2600,\s*'reply'\)/, 'blocked_recheck'],
+      [/showToast\(t\('blocked_cooldown'\),\s*1400,\s*'reply'\)/, 'blocked_cooldown'],
+    ];
+    for (const [pat, key] of wired) {
+      if (!pat.test(src)) {
+        probs.push(`\`main.ts\` 的打卡被拒那一支没有传 \`'reply'\`——分级做好了没接上（${key}）`);
+      }
     }
   }
   return asserts;
@@ -5817,7 +5836,9 @@ check('verify_chapter', () => {
 
   // 3. 到了十八驿才算完成；没到不算
   asserts++;
-  const reach = WORLD.STATION_PASS_RADIUS + ROADMESH.TOTAL_HALF_WIDTH;
+  // **读产品那个常量**，不要在这里再写一份算式——抄的那份早晚和实现漂，
+  // 而这一次漂的代价就是"路面外侧按空格没反应"（见上面那条判据的注释）。
+  const reach = STATION_REACH;
   if (g.atHome(GameStateManager.HOME_STATION, reach - 1, reach) !== true) {
     probs.push('站在十八驿门口却没被认成到家了');
   }
@@ -6161,14 +6182,16 @@ check('verify_phase', () => {
     }
     // 迁移**只**能通过 goPhase 发生：调用点一个都不能少。
     // 14 → 15 是琴音林那张琴（`runGuqin()` 复用 `checkin` 相位）。
+    // 15 → 17 是湖边一屏的进与出（`enterLakeside()` / `exitLakeside()`）。
     // 这个数是**下界**，不是装饰：有人把一处 `goPhase()` 改成直接赋值时，
     // 上面那条 `writes !== 1` 会先红；而有人**删掉**一处调用点时，
     // 下一条迁移就没了入口——那两件事都只有计数能看见。
     asserts++;
     const calls = [...main.matchAll(/this\.goPhase\('/g)].length;
     asserts++;
-    if (calls !== 15) {
-      probs.push(`main.ts 里 this.goPhase() 的调用点有 ${calls} 处，应为 15 处（14 处原迁移 + 琴音林自由演奏）`);
+    if (calls !== 17) {
+      probs.push(`main.ts 里 this.goPhase() 的调用点有 ${calls} 处，应为 17 处`
+        + '（15 处原迁移 + 琴音林自由演奏 + 湖边一屏的进/出）');
     }
   }
 

@@ -19,8 +19,10 @@
  *   · 古琴：某一格小于手指 / 某一键映射不到 → 触屏玩家永远弹不出那一个音。
  * 这一族量的全是这三条。
  */
-import { expect, fakeCtx } from './harness';
+import { expect, fakeCtx, stripComments } from './harness';
 import type { CheckFn } from './harness';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   BIKE_HALF_WIDTH,
   DodgeRun,
@@ -30,11 +32,12 @@ import {
   signSide,
   signStandoff,
   signSite,
+  signYaw,
 } from '../game/challenge';
 import { ROAD } from '../world/road';
 import { Obstacles, buildSign } from '../world/obstacles';
 import type { Terrain } from '../world/terrain';
-import { TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import { CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 import {
   QIN_CELL_MIN,
   QIN_KEYS,
@@ -49,6 +52,24 @@ import {
   qinHintLayout,
 } from '../game/minigames/qin';
 import { MINI_GAME_IDS, createMiniGame } from '../game/minigames';
+import { SCENERY_SAY_M, silentSpaceReply, STATION_REACH } from '../game/phase';
+import {
+  BITE_WINDOW_SEC,
+  CAST_SEC,
+  RANGE_MAX,
+  RANGE_MIN,
+  REEL_LIMIT_SEC,
+  REEL_RATE,
+  RESULT_SEC,
+  TENSION_FALL,
+  TENSION_RISE,
+  castFish,
+  createFishState,
+  holdMeaning,
+  stepFish,
+  tensionBand,
+  type FishPhase,
+} from '../game/fishing';
 import { areaRectInto } from '../game/minigames/cloud';
 import { POUR_TILT, pourCupRect, pourSpoutTip, createTeaGame } from '../game/minigames/tea';
 import type { MiniGameContext, MiniGameResult } from '../game/minigames/types';
@@ -93,6 +114,8 @@ export function registerFeatureChecks(check: CheckFn): void {
   registerQinChecks(check);
   registerTeaPourChecks(check);
   registerBoardChecks(check);
+  registerFishingChecks(check);
+  registerSpaceReplyChecks(check);
 }
 
 // ---------------------------------------------------------------- 路边躲避挑战
@@ -362,8 +385,87 @@ function registerDodgeChecks(check: CheckFn): void {
       const p = signSite(arcT, side);
       asserts++;
       if (Math.abs(p.x) === 0 && Math.abs(p.z) === 0) probs.push(`arcT=${arcT}：木牌落位是原点`);
+
+      // 木牌的**正面**（局部 +Z，炭字那一侧）必须对着路面。
+      //
+      // 量法是独立的：不看 `signYaw()` 内部用的那个锚点，而是拿木牌站位
+      // 在全部中心线采样点里暴力找最近的一个，再看正面朝不朝它。
+      // 两侧都量——钉在哪一侧是 `signSide()` 算出来的，两边都得朝路。
+      //
+      // 这一条守的是一次真实的白屏：`World.buildSign()` 原来拿
+      // `this.ride.pos`（玩家出生点，隔了小半圈）当"路的方向"，而且
+      // `this.ride` 在构造里比 `buildSign()` **晚**才被赋值，
+      // 于是每一次建世界都抛 `reading 'pos'`。就算那个顺序对了，
+      // 拿出生点当朝向也有一半概率把木牌扭到背对路面。
+      asserts++;
+      for (const sd of [1, -1] as const) {
+        const yaw = signYaw(arcT, sd);
+        const site = signSite(arcT, sd);
+        let bx = site.x;
+        let bz = site.z;
+        let bd = Infinity;
+        for (const q of CENTERLINE) {
+          const d = (q.x - site.x) ** 2 + (q.z - site.z) ** 2;
+          if (d < bd) {
+            bd = d;
+            bx = q.x;
+            bz = q.z;
+          }
+        }
+        const l = Math.hypot(bx - site.x, bz - site.z) || 1;
+        // `rotation.y = yaw` 之后局部 +Z 指向世界坐标的 (sin yaw, cos yaw)
+        const dot = ((bx - site.x) / l) * Math.sin(yaw) + ((bz - site.z) / l) * Math.cos(yaw);
+        if (dot < 0.9) {
+          probs.push(
+            `arcT=${arcT} side=${sd}：木牌正面没对着路（吻合度 ${dot.toFixed(3)}）——玩家只会看到背面`,
+          );
+        }
+      }
     }
-    const summary = `木牌离最近驿站 ≥ ${SIGN_STANDOFF}m · 取更远的一侧 · 纯函数`;
+
+    // 纯函数：同一个弧长算两次要得到同一个朝向（刷新一次页面木牌不会扭过去）
+    asserts++;
+    if (signYaw(0.42, 1) !== signYaw(0.42, 1)) probs.push('signYaw 不是纯函数');
+
+    // ---- 接线：`buildSign()` 不许再碰 `this.ride` ----
+    //
+    // 这一条守的是一次真实的白屏：`World` 构造里 `buildSign()` 跑在
+    // `new Ride(...)` **之前**，而它原来要 `this.ride.pos` 来定朝向，
+    // 于是每一次建世界都抛 `Cannot read properties of undefined (reading 'pos')`，
+    // 玩家看到的是 "World construction failed" 那一屏。
+    //
+    // 无头回归抓不到它——`new World()` 需要 WebGL，判据里从来没有过一整个
+    // 世界实例。所以这里退一步问**源码的形状**：构造里在 `this.ride` 被赋值
+    // 之前不许出现它，`buildSign()` 的方法体里也不许出现它。
+    // 形状变了（找不到那两处锚点）同样要报——判据不许空转。
+    //
+    // **必须先剥注释**：上面那条注释里就写着 `this.ride` 这四个字，
+    // 不剥的话判据量到的是"有人提到过它"，而不是"代码里真的在读它"。
+    // 口径与 `harness.ts` 里那份共用（`entry.ts` / `ai.ts` 同源）。
+    const worldSrc = stripComments(
+      readFileSync(join(process.cwd(), 'src', 'world', 'world.ts'), 'utf8'),
+    );
+    const ctorAt = worldSrc.indexOf('constructor(canvas');
+    const rideAt = worldSrc.indexOf('this.ride = new Ride(');
+    asserts++;
+    if (ctorAt < 0 || rideAt < 0) {
+      probs.push('world.ts 里找不到 `constructor(canvas…` / `this.ride = new Ride(`——构造顺序这条判据空转了');
+    } else if (worldSrc.slice(ctorAt, rideAt).includes('this.ride')) {
+      probs.push('World 构造在 `this.ride` 赋值之前就引用了它——建世界会抛 reading \'pos\'（玩家看到白屏）');
+    }
+
+    const signFnAt = worldSrc.indexOf('private buildSign(');
+    asserts++;
+    if (signFnAt < 0) {
+      probs.push('world.ts 里找不到 `private buildSign(`——木牌朝向这条判据空转了');
+    } else {
+      const body = worldSrc.slice(signFnAt, worldSrc.indexOf('\n  }', signFnAt));
+      if (body.includes('this.ride')) {
+        probs.push('buildSign() 又在读 `this.ride` 了——它在 `new Ride(...)` 之前被调用，会抛 reading \'pos\'');
+      }
+    }
+
+    const summary = `木牌离最近驿站 ≥ ${SIGN_STANDOFF}m · 取更远的一侧 · 正面朝路 · 纯函数 · 构造顺序不读 this.ride`;
     return expect(probs.length === 0, probs.length ? probs.join('；') : summary, asserts);
   });
 }
@@ -811,4 +913,293 @@ function frameAt(arc: number): { x: number; z: number; rx: number; rz: number } 
   const dz = b.z - a.z;
   const l = Math.hypot(dx, dz) || 1;
   return { x: (a.x + b.x) * 0.5, z: (a.z + b.z) * 0.5, rx: dz / l, rz: -dx / l };
+}
+/**
+ * 钓鱼：判定必须在无头里问得到。
+ *
+ * 这一族量的是 `game/fishing.ts` 那台纯状态机。**它必须留在无头里可测**——
+ * 和 `tryCheckIn()` 少一个分支就让三间铺子、10 件商品、明信片四样材料
+ * 全部不可达、而 25 条回归全绿，是同一类事故的两种规模。
+ */
+
+/** 用固定步长跑一局，返回中途见到的相位序列与最终结果。 */
+function runFish(seed: number, hold: (tension: number, phase: FishPhase) => boolean, maxSec = 90) {
+  const s = createFishState(seed);
+  const dt = 1 / 60;
+  const seen = new Set<FishPhase>();
+  let casted = false;
+  let holdNow = false;
+  for (let i = 0; i * dt < maxSec; i++) {
+    if (s.phase === 'idle' && !casted) {
+      castFish(s);
+      casted = true;
+    }
+    holdNow = s.phase === 'idle' ? false : hold(s.tension, s.phase);
+    stepFish(s, dt, holdNow);
+    seen.add(s.phase);
+    if (s.phase === 'result' && s.outcome !== 'none') {
+      return { outcome: s.outcome, kind: s.catchKind, range: s.range, seen, state: s };
+    }
+  }
+  return { outcome: s.outcome, kind: s.catchKind, range: s.range, seen, state: s };
+}
+
+function registerFishingChecks(check: CheckFn): void {
+  /**
+   * 这台机器可不可玩：**能赢、能输、而且输法不止一种。**
+   *
+   * 只测"能不能赢"是不够的——一台恒胜的机器比一台坏掉的更糟，
+   * 因为它让整件事失去意义。所以下面三条各自钉住一件事：
+   * 有一种打法能赢、一种打法会断线、一种打法压根上不了钩。
+   */
+  check('verify_fishing', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 1. 两条设计前提，它们是"两条死路各自成立"的全部依据。
+    //    · `TENSION_RISE > 0`：按住时张力**也涨**。不成立的话"一直按住"就成了
+    //      最优解，而整台机器退化成一根按住不放的键——第一版就是这么错的。
+    //    · `REEL_RATE > 0`：按住是**唯一**推进进度的手段。不成立的话"一直松手"
+    //      也就通了，两条死路塌成一条。
+    asserts++;
+    if (TENSION_RISE <= 0) {
+      probs.push(`TENSION_RISE(${TENSION_RISE}) ≤ 0 —— 收线不激怒鱼，一直按住就能赢`);
+    }
+    if (REEL_RATE <= 0) {
+      probs.push(`REEL_RATE(${REEL_RATE}) ≤ 0 —— 没有推进手段，机器无解`);
+    }
+    if (TENSION_FALL <= 0) {
+      probs.push(`TENSION_FALL(${TENSION_FALL}) ≤ 0 —— 松手不能让鱼松劲，张力只涨不跌`);
+    }
+
+    // 2. 咬钩窗口不能窄到反人类。
+    asserts++;
+    if (BITE_WINDOW_SEC < 0.8) {
+      probs.push(`咬钩窗口只有 ${BITE_WINDOW_SEC}s —— 低于 0.8s 对手感是致命的`);
+    }
+
+    // 3. 会赢：一条"张力高就松"的参考策略必须能收满。
+    //    判据只证明**存在**一条可行打法，不规定它必须最优。
+    asserts++;
+    const win = runFish(188, (tension) => tension < 0.45);
+    if (win.outcome !== 'caught') {
+      probs.push(`"张力高就松"这条打法收不了线（结果 ${win.outcome}）—— 机器可能无解`);
+    }
+    if (win.kind === '') {
+      probs.push('赢下来了却没给出鱼种');
+    }
+
+    // 4. 一直按住会断线。
+    asserts++;
+    const hold = runFish(188, () => true);
+    if (hold.outcome !== 'snapped') {
+      probs.push(`一直按住的结果是 ${hold.outcome}，不是 snapped —— 按住不再是双刃剑`);
+    }
+
+    // 5. 一直松手压根上不了钩。
+    asserts++;
+    const loose = runFish(188, () => false);
+    if (loose.outcome !== 'missed') {
+      probs.push(`一直松手的结果是 ${loose.outcome}，不是 missed —— 咬钩窗口没有约束力`);
+    }
+
+    // 6. 六个相位一个都不许是死路。
+    asserts++;
+    const need: FishPhase[] = ['casting', 'waiting', 'bite', 'reeling', 'result'];
+    for (const p of need) {
+      if (!win.seen.has(p)) probs.push(`一条能赢的局里没经过 ${p} —— 这个相位是死的`);
+    }
+
+    // 7. 确定：同一个 seed 必须给出同一串结果。
+    asserts++;
+    const a = runFish(7, (t) => t < 0.45);
+    const b = runFish(7, (t) => t < 0.45);
+    if (a.outcome !== b.outcome || a.kind !== b.kind || a.range !== b.range) {
+      probs.push(`同一个 seed 跑出了两串结果：${a.outcome}/${a.kind} vs ${b.outcome}/${b.kind}`);
+    }
+
+    // 8. 但不能所有 seed 都一样——那就成了假随机。
+    asserts++;
+    const ranges = new Set<number>();
+    const kinds = new Set<string>();
+    for (let seed = 1; seed <= 24; seed++) {
+      const r = runFish(seed, (t) => t < 0.45);
+      ranges.add(Math.round(r.range * 100));
+      kinds.add(r.kind);
+    }
+    if (ranges.size < 8) probs.push(`24 个 seed 只落到 ${ranges.size} 个抛投距离 —— 随机性是假的`);
+    if (kinds.size < 2) probs.push(`24 局只钓到 ${kinds.size} 种鱼 —— 鱼种表没接上`);
+
+    // 9. 抛投距离在区间内，且动画/停留时长都是正的。
+    asserts++;
+    if (win.range < RANGE_MIN - 1e-6 || win.range > RANGE_MAX + 1e-6) {
+      probs.push(`抛投距离 ${win.range.toFixed(2)}m 跑出了 [${RANGE_MIN}, ${RANGE_MAX}]`);
+    }
+    if (CAST_SEC <= 0 || RESULT_SEC <= 0) {
+      probs.push(`CAST_SEC(${CAST_SEC}) 或 RESULT_SEC(${RESULT_SEC}) 不为正 —— 动画会瞬移`);
+    }
+
+    // 10. 收线阶段不能无限期挂着。
+    //     「上钩之后一直不按」是一个合法的按键序列：进度永远是 0、张力跌到 0，
+    //     而没有耐心上限的话 `reeling` 永远不会结束 —— 这一屏就出不出去了。
+    //     症状极其安静：相位不报错、张力合法、UI 不闪，只有一直盯着看才发现。
+    asserts++;
+    {
+      const s = createFishState(3);
+      castFish(s);
+      // 上界必须**按各段之和**算：抛投 + 最长等待 + 咬钩窗 + 收线耐心。
+      // 拍一个数会栽两次——第一版写 200 帧（3.3s，耐心却是 12s），
+      // 第二版写 `REEL_LIMIT_SEC + 4`（16s），而最坏路径是
+      // 0.75 + 6.8 + 1.5 + 12 ≈ 21s，两次都在**还在收线**时就退出，
+      // 读到 `outcome === 'none'` 这个中间态，报出来的是一条假红。
+      // 假红比假绿贵：它会让人去改一个没坏的东西。
+      const budget = CAST_SEC + 7 + BITE_WINDOW_SEC + 1 + REEL_LIMIT_SEC + 2;
+      for (let i = 0; i * (1 / 60) < budget && s.phase !== 'result'; i++) {
+        stepFish(s, 1 / 60, s.phase === 'bite' && s.biteLeft <= 0.3);
+      }
+      if (s.outcome !== 'escaped') {
+        probs.push(`上钩后一直不按的结果是 ${s.outcome}，不是 escaped`);
+      }
+      // 而脱钩之后必须能回到 idle，第二局才开得了。
+      for (let i = 0; i * (1 / 60) < 10 && s.phase !== 'idle'; i++) stepFish(s, 1 / 60, false);
+      if (s.phase !== 'idle') {
+        probs.push(`收场之后回不到 idle（停在 ${s.phase}），第二局开不了`);
+      }
+    }
+    if (REEL_LIMIT_SEC <= 0) {
+      probs.push(`REEL_LIMIT_SEC(${REEL_LIMIT_SEC}) 不为正 —— 收线阶段没有上限`);
+    }
+
+    // 11. `holdMeaning` 只在真窗口里说 strike。
+    //     咬钩那 0.35 秒是**前兆**，按了不算——提示语要是提前亮起来，
+    //     玩家会在浮漂点下去之前就按，然后怪游戏不认。
+    asserts++;
+    {
+      const s = createFishState(5);
+      castFish(s);
+      for (let i = 0; i < 200 && s.phase !== 'bite'; i++) stepFish(s, 1 / 60, false);
+      if (s.phase !== 'bite') {
+        probs.push('走不到 bite 相位');
+      } else {
+        let saidStrikeTooEarly = false;
+        for (let i = 0; i < 200 && s.phase === 'bite'; i++) {
+          const m = holdMeaning(s);
+          const inWindow = s.biteLeft <= 0.35;
+          if ((m === 'strike') !== inWindow) saidStrikeTooEarly = true;
+          stepFish(s, 1 / 60, false);
+        }
+        if (saidStrikeTooEarly) {
+          probs.push('holdMeaning 在咬钩窗口之外说了 strike（或在窗口内没说）');
+        }
+      }
+    }
+
+    // 12. 张力三档单调。
+    asserts++;
+    if (tensionBand(0.1) !== 'calm' || tensionBand(0.6) !== 'tight' || tensionBand(0.9) !== 'danger') {
+      probs.push('张力分档不对 —— HUD 那条读数会显示错的颜色');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `可赢(${win.outcome}) · 一直按住 ${hold.outcome} · 一直松手 ${loose.outcome}`
+          + ` · 咬钩窗 ${BITE_WINDOW_SEC}s · 24 个 seed 落出 ${ranges.size} 个距离 / ${kinds.size} 种鱼`,
+      asserts,
+    );
+  });
+}
+
+// ---------------------------------------------------------------- 「按了没反应」回什么
+
+/**
+ * 这一条量的**是「什么时候闭嘴」，不是「什么时候说话」。**
+ *
+ * 起因是一条玩家描述：*靠近建筑的时候有时候交互不了*。路边散布的
+ * `mod_house` / `mod_tower` 看得见摸得着，却不是 16 座驿站里的任何一座，
+ * 于是按空格什么都没有。
+ *
+ * 而"离得远就干脆不说话"是一个**故意的**决定——远处也弹的话，
+ * 玩家在路中间随手按空格会一遍遍飘同一句。所以修法不是把静默区扩回去，
+ * 而是**一次性的那句**，说一句、走开才复位。
+ *
+ * 于是最容易出的错是**反过来**：修完之后开始刷屏。
+ * 刷屏比沉默更糟，因为它让玩家按任何键都有一句不相干的字飘上来。
+ * 所以下面把沉默的那一半当成主判据来量：
+ *   · 已经说过之后必须闭嘴（这一条护着"每次靠近只说一句"）
+ *   · 附近没有景物时必须闭嘴（护着路中间随手按）
+ *   · 而"站在景物旁边、第一次按"必须说话（护着这次修复本身）
+ */
+function registerSpaceReplyChecks(check: CheckFn): void {
+  check('verify_space_reply', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    const EXTRA = 12;
+    const base = { reach: STATION_REACH, hintExtra: EXTRA };
+    const FAR = STATION_REACH + EXTRA + 10;
+    const NEAR_BUILDING = SCENERY_SAY_M - 5;
+
+    // 1. 圈外但还在外圈里 → 那条规则一直在说，别被新增的分支吞掉。
+    asserts++;
+    if (
+      silentSpaceReply({ ...base, stationDist: STATION_REACH + 3, buildingDist: NEAR_BUILDING, said: false })
+      !== 'ring'
+    ) {
+      probs.push('驿站外圈里没有回「圈 = 空格的生效区」——那条规则被吞了');
+    }
+
+    // 2. 修复本身：出了外圈、站在景物旁边、第一次按 → 必须说话。
+    asserts++;
+    if (
+      silentSpaceReply({ ...base, stationDist: FAR, buildingDist: NEAR_BUILDING, said: false })
+      !== 'nothing_here'
+    ) {
+      probs.push('站在景物旁边按空格仍然没有回音 —— 这就是这次要修的那条');
+    }
+
+    // 3. **只说一次。** 这一条是防刷屏的主判据。
+    asserts++;
+    if (
+      silentSpaceReply({ ...base, stationDist: FAR, buildingDist: NEAR_BUILDING, said: true })
+      !== 'none'
+    ) {
+      probs.push('说过一次之后又说了 —— 站着反复按会刷屏');
+    }
+
+    // 4. 附近没有景物时保持沉默。路边随手按空格不该有回音。
+    asserts++;
+    for (const dist of [Infinity, 999, 400, 60]) {
+      asserts++;
+      if (silentSpaceReply({ ...base, stationDist: FAR, buildingDist: dist, said: false }) !== 'none') {
+        probs.push(`附近 ${dist}m 没有景物却开口了 —— 路中间随手按会刷屏`);
+      }
+    }
+
+    // 5. 圈**内**时这一层不该插手：圈内的事由 canCheckIn() 答，
+    //    这里再说一遍就是两句对同一件事各说各话。
+    asserts++;
+    if (
+      silentSpaceReply({ ...base, stationDist: STATION_REACH - 1, buildingDist: NEAR_BUILDING, said: false })
+      !== 'none'
+    ) {
+      probs.push('驿站圈内的失败也由这里开口 —— 会和 canCheckIn() 的回答撞车');
+    }
+
+    // 6. 常量之间不许打架：景物那句的范围必须大于驿站生效圈，
+    //    否则「站在建筑物边上」和「站在驿站边上」在玩家感知里不是同一件事，
+    //    而同一句话要同时回答两处。
+    asserts++;
+    if (SCENERY_SAY_M <= STATION_REACH) {
+      probs.push(`SCENERY_SAY_M(${SCENERY_SAY_M}) ≤ STATION_REACH(${STATION_REACH.toFixed(1)}) —— 范围关系反了`);
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : `驿站圈 ${STATION_REACH.toFixed(1)}m · 外圈 +${EXTRA}m · 景物 ${SCENERY_SAY_M}m · 说过只说一次`,
+      asserts,
+    );
+  });
 }

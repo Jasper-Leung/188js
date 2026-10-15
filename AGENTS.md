@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：97 条 / 2373 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：100 条 / 2417 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 97 / FAIL 0 / 没跑成 0`，
-断言 2373 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 100 / FAIL 0 / 没跑成 0`，
+断言 2417 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -153,7 +153,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 | 族 | 文件 | 大约 |
 |---|---|---:|
 | 车辆 / 骨骼 / 骑姿 | `src/verify/vehicle.ts` | 1,506 行 |
-| 交付（提交页 / 资产源 / 编码） | `src/verify/delivery.ts` | 247 行 |
+| 交付（提交页 / 资产源 / 编码 / 湖边场景） | `src/verify/delivery.ts` | 449 行 |
 | 两条界面回归（第九轮新加） | `src/verify/ui_regressions.ts` | 344 行 |
 | 景物布置 | `src/verify/scenery.ts` | 566 行 |
 | AI 可玩接口契约 | `src/verify/ai.ts` | 647 行 |
@@ -181,7 +181,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 **别用 PowerShell 的 `Measure-Object -Line` 重新数**——它只数非空行，
 会把 `entry.ts` 报成 8,395，差 576 行，量出来是「表格过期」而其实没过期。
 
-`entry.ts` 仍有 **9,068 行**。**要再拆的话，照抄这个形状：**
+`entry.ts` 仍有 **9,091 行**。**要再拆的话，照抄这个形状：**
 
 - 拆出去的模块导出 **`registerXxxChecks(check)`**，由 `entry.ts`
   **在原来的位置调用一次**。
@@ -235,7 +235,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 97 条 / 2373 断言
+npm run verify      # 100 条 / 2417 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事

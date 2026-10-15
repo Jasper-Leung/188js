@@ -25,6 +25,7 @@
     "assets:geo": "node tools/optimize-assets.mjs",
     "assets:retax": "node tools/retax.mjs",
     "assets:tripo": "node tools/tripo-station.mjs",
+    "assets:lakeside": "node tools/lakeside-scene.mjs",
     "assets:title": "node tools/make-titleart.mjs --write",
     "assets:font": "node tools/subset-font.mjs",
     "assets:all": "npm run assets:font && npm run assets:tex && npm run assets:geo && npm run assets:tripo",

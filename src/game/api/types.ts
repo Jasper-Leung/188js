@@ -320,6 +320,28 @@ export function describeActions(o: {
     return out;
   }
 
+  /**
+   * 湖边一屏。
+   *
+   * **不新加动作。** 钓鱼用的确认键就是 Space，而 Space 已经是 `checkIn` /
+   * `advance` 的键位——适配器是**按相位**路由的（`live.ts`），不是按动作名，
+   * 所以 `act('advance', …)` 在这一屏派发出去的就是钓鱼要的那一下。
+   * 新加一个 `reel` 只会和 `verify_ai_actions` 的键位唯一性打架，
+   * 而拿不到任何新能力。
+   *
+   * `advance` 的两种用法——"抛投 / 咬钩时点下去"与"收线时按住"——
+   * 由 `act(action, down)` 的 `down` 区分，本来就是同一个键的两种用法。
+   *
+   * `pause` 必须排在前面：这一屏没有对白也没有 DOM 页，
+   * 但它**有**一个必须出去的出口。给 `advance` 的话，
+   * AI 在这一屏里没有任何合法的退出方式——
+   * 那正是 `verify_ai_available` 会报「该相位没有任何可用动作」的那一档。
+   */
+  if (o.phase === 'lakeside') {
+    out.push('pause', 'advance');
+    return out;
+  }
+
   // **DOM 流程页**。放在 `panelOpen` 之前，因为合成屏开着合成面板、
   // 结算屏还能被明信片面板盖住——它们都是"这一屏本身就是 DOM 页"，
   // 出路都是那个被 `focus()` 的按钮，不是 Esc。

@@ -2265,3 +2265,65 @@
     transition: none;
   }
 }
+
+/* ---------------------------------------------------------------- 湖边一屏 */
+/* 固定在屏幕下缘：这一屏没有小地图、没有道具栏，只有一条读数和一行退出口。 */
+.g-lakeside {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px 18px;
+  pointer-events: none;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+}
+.g-lakeside-hint {
+  font-size: 15px;
+  color: var(--paper, #f2ede2);
+  text-shadow: 0 1px 3px rgba(0,0,0,.55);
+}
+/* 咬钩那一瞬是这一屏唯一「必须马上反应」的一帧，所以它跳。 */
+.g-lakeside-hint[data-state="strike"] {
+  font-size: 19px;
+  font-weight: 700;
+  color: #ffd98a;
+  animation: g-lake-nudge .18s ease-in-out 3 alternate;
+}
+@keyframes g-lake-nudge {
+  from { transform: translateY(0); }
+  to   { transform: translateY(-3px); }
+}
+.g-lakeside-bar {
+  width: min(320px, 70vw);
+  height: 7px;
+  border-radius: 4px;
+  background: rgba(0,0,0,.45);
+  overflow: hidden;
+}
+.g-lakeside-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 4px;
+  background: #7fc7a8;
+  transition: width .08s linear;
+}
+.g-lakeside-bar-fill[data-band="tight"]   { background: #e8c46a; }
+.g-lakeside-bar-fill[data-band="danger"] { background: #e07a5f; }
+.g-lakeside-bar-text {
+  font-size: 12px;
+  color: rgba(242,237,226,.78);
+}
+/* 退出口常驻。它不是提示，是契约：不可见的退路等于没有。 */
+.g-lakeside-exit {
+  font-size: 12px;
+  color: rgba(242,237,226,.6);
+}
+/* VR 入口。只有这台机器真的支持 immersive-vr 时才由 `setVrAvailable()` 放出来，
+   所以这里不需要"不可用时灰掉"的那一态——不出现就是不支持。 */
+.g-lakeside-vr {
+  font-size: 13px;
+}

@@ -259,11 +259,56 @@ export const SIGN_REACH = 3.0;
  * 判据在 `nearestSignSide()` 里，与这个函数同源。
  */
 export function signSite(arcT: number, side = 1): { x: number; z: number } {
-  const s = ((arcT % 1) + 1) % 1 * TOTAL_ARCLENGTH;
+  const s = signArcMeters(arcT);
   const p = pointAtArcLength(s).pos;
   const r = rightAt(s);
   const d = SIGN_FROM_ROAD * side;
   return { x: p.x + r.x * d, z: p.z + r.z * d };
+}
+
+/**
+ * 弧长比例 → 米，并绕圈（`-0.1` 与 `0.9` 是同一个点）。
+ *
+ * 抽出来是因为 `signSite()` 与 `signYaw()` 必须落在**同一处弧长**上：
+ * 一个定木牌站在哪，一个定它朝哪。两份各写一遍 `((t % 1) + 1) % 1`
+ * 只要有一份少了个括号，症状是"木牌立在这儿、却扭过去看着别处"——
+ * 两个函数各自都是对的，只有摆在一起才错。
+ */
+function signArcMeters(arcT: number): number {
+  return (((arcT % 1) + 1) % 1) * TOTAL_ARCLENGTH;
+}
+
+/**
+ * 木牌朝向哪一边（绕 Y 的弧度）。
+ *
+ * ## 朝向**路面**
+ *
+ * 木牌钉在路肩外 2m，正面（局部 +Z，字痕那一侧）必须对着中心线——
+ * 玩家从路上骑过来要看到正面，而不是一块白板。
+ *
+ * ## 为什么它是一个独立的纯函数
+ *
+ * 原来这一行写在 `World.buildSign()` 里，算的是
+ * `atan2(this.ride.pos.x - signX, this.ride.pos.z - signZ)`——拿**玩家出生点**
+ * 当"路的方向"。两件事都不对：
+ *
+ *   · 出生点在 0 号驿站那一段，与木牌隔了小半圈。它碰巧落在木牌正面那一侧
+ *     还是背面那一侧，完全取决于环线形状；落在背面时玩家只看到一块白板。
+ *   · 更要命的是它把"木牌朝哪"绑到了 `this.ride` 的**赋值先后**上。
+ *     `World` 构造里 `buildSign()` 跑在 `new Ride(...)` **之前**，那一句读的是
+ *     `undefined.pos`，于是**每一次建世界**都抛
+ *     `Cannot read properties of undefined (reading 'pos')`，
+ *     玩家看到的是一屏 "World construction failed"。
+ *     而无头回归从来抓不到它：`new World()` 要 WebGL，判据里没有过。
+ *
+ * 换成"木牌自己那一处的中心线点"之后，这个函数只依赖弧长，
+ * 与谁先被构造无关。`verify_dodge_sign` 直接问它。
+ */
+export function signYaw(arcT: number, side: 1 | -1): number {
+  const s = signArcMeters(arcT);
+  const anchor = pointAtArcLength(s).pos;
+  const site = signSite(arcT, side);
+  return Math.atan2(anchor.x - site.x, anchor.z - site.z);
 }
 
 /**

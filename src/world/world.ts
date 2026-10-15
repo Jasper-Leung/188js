@@ -10,7 +10,7 @@ import { Renderer } from '../core/renderer';
 import { PRESETS, type QualityPreset } from '../core/settings';
 import type { Tier } from '../core/capability';
 import { Terrain } from './terrain';
-import { Road, ROAD, JUNCTION } from './road';
+import { Road, JUNCTION } from './road';
 import { Water } from './water';
 import { Vegetation } from './vegetation';
 import { Scenery, type SceneryKind } from './scenery';
@@ -22,6 +22,7 @@ import {
   SIGN_REACH,
   signSide,
   signStandoff,
+  signYaw,
 } from '../game/challenge';
 import { BambooBeats, type BeatEvent } from '../game/beat';
 import { Sky } from './sky';
@@ -31,7 +32,7 @@ import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
 import { WORLD, ECON, MINIGAMES, ROAD as ROAD_DATA } from '../data/raw';
 import { game, GameStateManager } from '../game/state';
-import { recheckGate } from '../game/phase';
+import { recheckGate, STATION_REACH } from '../game/phase';
 import { t, byLang, stationNameOf } from '../i18n';
 import { checkConsistency } from './basins';
 import { clamp } from '../core/math';
@@ -469,7 +470,7 @@ export class World {
     this.nearby.shopName = game.shopAtStation(best);
     // 十八驿判据。半径比碎片驿站**宽一档**：0 号驿站门口有台阶，
     // 用 `STATION_PASS_RADIUS` 的话玩家骑到路对面就触发，看不清自己到了哪儿。
-    this.nearby.isHome = game.atHome(best, bestD, WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH);
+    this.nearby.isHome = game.atHome(best, bestD, STATION_REACH);
 
     // 首次 +3 旅币，并把这座驿站自己的一句话念出来
     const inside = bestD < WORLD.STATION_PASS_RADIUS;
@@ -577,7 +578,7 @@ export class World {
     this.signInReach = this.signDistance <= SIGN_REACH;
     const qin = this.stations.list[this.QIN_STATION];
     this.qinDistance = qin ? Math.hypot(px - qin.worldPos.x, pz - qin.worldPos.z) : Infinity;
-    this.qinInReach = this.qinDistance <= WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH;
+    this.qinInReach = this.qinDistance <= STATION_REACH;
   }
 
   /**
@@ -701,11 +702,14 @@ export class World {
     const sign = buildSign();
     sign.position.set(this.signX, this.terrain.getHeightAt(this.signX, this.signZ), this.signZ);
     // 朝向路：玩家从路上走过来看到的是正面。
-    const toward = Math.atan2(
-      this.ride.pos.x - this.signX,
-      this.ride.pos.z - this.signZ,
-    );
-    sign.rotation.y = toward;
+    //
+    // **这一行不许读 `this.ride`。** 这个函数跑在 `new Ride(...)` 之前
+    // （见构造函数里 `step('路牌')` 的位置），`this.ride` 到那里还是
+    // `undefined`。原来写的正是 `this.ride.pos`，于是每一次建世界都在这里抛
+    // `Cannot read properties of undefined (reading 'pos')`，玩家看到的是
+    // "World construction failed" 那一屏。朝向由纯函数 `signYaw()` 给，
+    // 它只依赖弧长——与构造顺序无关。
+    sign.rotation.y = signYaw(this.SIGN_ARC_T, this.signSide);
     this.obstacles.group.add(sign);
     // 建世界时把"木牌离最近驿站多远"记一份，供探针读。
     // 判据不读它（`verify_dodge_sign` 直接问纯函数 `signStandoff()`）——
@@ -750,6 +754,39 @@ export class World {
     return true;
   }
 
+  /**
+   * 整个主世界的可见性。**湖边那一屏进出时切它。**
+   *
+   * ## 为什么是遍历 `scene.children` 而不是逐个子系统
+   *
+   * 逐个切（`this.terrain.group.visible = v; this.road.…`）有一个必然的后果：
+   * **以后新加的子系统会被漏掉**，而症状是"湖边那一屏能看见路面和一座驿站"。
+   * 遍历场景根只有一个口径，且天然覆盖新加的东西。
+   *
+   * ## 两条豁免
+   *
+   * · **相机**：`Renderer` 在构造时把它加进场景了（`renderer.ts`）。
+   *   把它藏掉的话，渲染仍然会发生（渲染器持有相机引用），
+   *   但 `camera.updateMatrixWorld` 不再被父节点驱动 —— 症状是镜头不跟手。
+   * · **天空**：藏掉它，这一屏的背景就只剩清屏色 `0x9ab6d8`，
+   *   一块死板的蓝。而湖岸最要紧的就是"上面有天"。
+   *
+   * 光源一起被藏掉是**有意的**：湖边那块地形是 `KHR_materials_unlit`
+   * （顶点色已经是烘好的最终色），走 `MeshBasicMaterial`，不吃光；
+   * 水面是自定义着色器，也不吃场景光。所以藏灯对这一屏没有任何影响。
+   */
+  setWorldVisible(v: boolean): void {
+    for (const child of this.scene.children) {
+      const o = child as Object3D;
+      if (o === this.camera) continue;
+      if (child === this.sky.mesh) {
+        o.visible = true;
+        continue;
+      }
+      o.visible = v;
+    }
+  }
+
   /** 撤走石头。无论成功、失败还是被别的东西打断。 */
   endDodge(): void {
     if (!this.dodgeRunning) return;
@@ -778,7 +815,7 @@ export class World {
     }
     if (!this.nearby.needsVisit) return { ok: false, reason: 'busy' };
     if (this.interactCooldown > 0) return { ok: false, reason: 'cooldown' };
-    if (this.nearby.distance > WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH) {
+    if (this.nearby.distance > STATION_REACH) {
       return { ok: false, reason: 'busy' };
     }
     return { ok: true, reason: '' };

@@ -33,7 +33,7 @@ import { t } from '../i18n';
 import { audio } from '../core/audio';
 import { button, el, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
-import { WORLD, ROADMESH } from '../data/raw';
+import { STATION_REACH } from '../game/phase';
 import type { UIHooks } from './index';
 import type { World } from '../world/world';
 import type { GameStateManager } from '../game/state';
@@ -199,7 +199,7 @@ export class TouchControls {
       nb.index >= 0 &&
       nb.hasFragment &&
       nb.needsVisit &&
-      nb.distance <= WORLD.STATION_PASS_RADIUS + ROADMESH.TOTAL_HALF_WIDTH;
+      nb.distance <= STATION_REACH;
     const revisited = inRange && this.game.getStationCount(nb.index) > 0;
     setText(this.checkBtn, revisited ? t('touch_revisit_button') : t('touch_checkin_button'));
     setFlag(this.checkBtn, 'is-live', inRange);

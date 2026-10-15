@@ -19,19 +19,20 @@ import { GameLoop } from './core/loop';
 import { audio } from './core/audio';
 import { initLang, setLang, getLang, t, onLangChange } from './i18n';
 import { World, type WorldEvent } from './world/world';
+import { Lakeside, type LakesideFrame } from './world/lakeside';
+import { XrSession } from './core/xr';
 import { Renderer } from './core/renderer';
 import { Terrain } from './world/terrain';
 import { Road } from './world/road';
 import { Water } from './world/water';
 import { Vegetation } from './world/vegetation';
 import { Stations } from './world/stations';
-import { ROAD } from './world/road';
 import { Sky } from './world/sky';
 import { Scene, PerspectiveCamera } from 'three';
 import { game, GameStateManager } from './game/state';
 import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
-import { ECON, SHOPS, WORLD, RIDE, ROAD as ROAD_RAW } from './data/raw';
+import { ECON, SHOPS, RIDE, ROAD as ROAD_RAW } from './data/raw';
 import { UI } from './ui';
 import { setSpaceKeyOwner, stationName } from './ui/hud';
 import { clamp } from './core/math';
@@ -43,7 +44,7 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportFileName, exportPostcardPng, seededBackText, type EndingId } from './game/postcard';
 
-import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, demoAim, demoInput, unwrapArc, type Phase, type SettleOutcome } from './game/phase';
+import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, demoAim, demoInput, unwrapArc, silentSpaceReply, SCENERY_SAY_M, STATION_REACH, type Phase, type SettleOutcome } from './game/phase';
 import { createLiveApi, type LiveApiHost } from './game/api';
 import type { AiObservation } from './game/api';
 import type { BeatEvent } from './game/beat';
@@ -544,6 +545,23 @@ class App {
 
   private keys = new Set<string>();
 
+  /**
+   * 湖边一屏。
+   *
+   * **它不是一颗"场景"，是一个挂在同一棵场景树上的 group**——
+   * 见 `world/lakeside.ts` 文件头：`Renderer` 只持有一个 Scene 和一台相机，
+   * 所以进出靠切可见性，而不是换场景。
+   */
+  private lakeside!: Lakeside;
+  /** 指针拖动的累计位移。**每帧读完就清零**，所以它是"这一帧转了多少"。 */
+  private lookDx = 0;
+  private lookDy = 0;
+  /** 湖边这一屏当前这一帧该怎么显示。宿主只把它交给 UI，不自己解释。 */
+  private lakeFrame: LakesideFrame | null = null;
+  /** XR。**浏览器不支持时它是 null**，而这一层在那种情况下不产生任何东西。 */
+  private xr: XrSession | null = null;
+  private xrEndHooks: Array<() => void> = [];
+
   /** 已经弹过"那边有东西"的旧物。**只活在本次会话**，不落盘。 */
   private relicHinted = new Set<number>();
   /** 已经报出过名字的旧物。和上面那个分开，理由见 `updateRelicHint`。 */
@@ -647,6 +665,7 @@ class App {
           this.ui.syncFromState();
         },
         onCloseEndCard: () => this.closeEndCard(),
+        onVrRequest: () => void this.onVrRequest(),
         onExportPostcard: (side) => void this.exportPostcard(side),
         onWriteBack: (text) => {
           this.backText = text;
@@ -755,6 +774,34 @@ class App {
         `${t(`fragment_${slot}`)}\n${t(`fragment_tip_${slot}`)}`,
         t('fragment_obtained'),
       );
+    });
+
+    // 湖边那一屏：先把实例建好，**但不加载模型**。
+    // 加载是玩家第一次想进去时才发生的（见 `enterLakeside`）——
+    // 0.73MB 不该在首屏关键路径上抢带宽。
+    this.lakeside = new Lakeside(this.world.camera);
+    this.world.scene.add(this.lakeside.group);
+    this.bindLakesideLook();
+    // WebXR **只在湖边这一屏开**。主骑行是低配优先的第三人称，
+    // 而 XR 的开销是双眼渲染 + 高刷新率，和项目的定位正好相反。
+    //
+    // **建不建这一层要问异步的 `isSessionSupported('immersive-vr')`，
+    // 不能只看 `navigator.xr` 在不在**：桌面版 Chrome / Edge 一律有
+    // `navigator.xr` 而一律不支持沉浸式 VR。原来那一版只看 API 在不在，
+    // 于是在任何一台桌面 Chrome 上都建了这一层，而湖边那一屏每帧都会问它
+    // `presenting()`——那一句当时是个无限递归（见 `core/xr.ts`），
+    // 于是那一屏的第一帧就是 `RangeError`。现在两头都堵上了：
+    // 探针问得准，`presenting()` 也只读渲染器。
+    void XrSession.vrAvailable().then((ok) => {
+      // 探针的答案直接交给 UI（按钮由它决定出不出现），宿主不另存一份——
+      this.ui.setLakesideVr(ok);
+      if (!ok) return;
+      this.xr = new XrSession({
+        gl: this.world.renderer.gl,
+        dispatchKey: (code, down) => this.dispatchKey(code, down),
+        onSessionChange: (started) => this.onXrSession(started),
+        onEnd: (fn) => this.xrEndHooks.push(fn),
+      });
     });
 
     mark('boot_step_run');
@@ -966,7 +1013,8 @@ class App {
           // 而不是顺手把整个游戏暂停掉、把铺子留在暂停面板底下。
           if (this.ui.shopOpen) {
             this.closeShop();
-          } else if (this.phase === 'paused') this.resume();
+          } else if (this.phase === 'lakeside') this.exitLakeside();
+          else if (this.phase === 'paused') this.resume();
           else if (this.phase === 'roaming') this.pause();
           break;
         case 'Space':
@@ -1038,6 +1086,11 @@ class App {
             break;
           }
           this.touchRoadside();
+          // 湖边一屏挂在这一串的**最后**：F 已经是"摸一下眼前这个"的唯一落点，
+          // 而它按节拍窗口 → 路边的顺序问下来，轮到湖边时前面都没有抢走。
+          // 刻意不占用确认键（空格）：那条链是打卡与小游戏共用的，
+          // 插进去等于让"在湖边站着"和"在驿站门口站着"抢同一个动词。
+          this.tryEnterLakeside();
           break;
         }
         case 'Digit1':
@@ -1180,6 +1233,245 @@ private onConfirm() {
       case 'checkIn':
         this.tryCheckIn();
         break;
+      case 'fish':
+        // 这一屏的确认键是钓鱼，而"点一下"与"按住"是同一个键的两种用法，
+        // 分派在 `readLakesideInput()` 里按当前相位决定给哪一种。
+        this.confirmPressed = true;
+        break;
+    }
+  }
+
+  /** 湖边这一屏的确认键，这一帧刚按下过。**每帧读完清零。** */
+  private confirmPressed = false;
+
+  // ---------------------------------------------------------------- 湖边一屏
+  /**
+   * 「这里没有可互动的东西」这一句，这次靠近已经说过没有。
+   *
+   * **它是"走近再说一次"，不是"每次按都说一次"。**
+   * 走开之后由 `updateSpaceReplyArm()` 复位——和 `relicHinted` 同一个套路：
+   * 说过的标志由"距离"维护，而不是由"按了多少下"维护。
+   * 后者会在玩家站着反复试的时候变成刷屏，而刷屏正是当初把远处改沉默的原因。
+   */
+  private spaceReplySaid = false;
+
+  /**
+   * 走开了就把那句话重新武装上。
+   *
+   * 用 `SCENERY_SAY_M × 2` 而不是同一个数：玩家要真的离开那栋房子，
+   * 而不是在它边上挪两步又回来又听一遍。
+   */
+  private updateSpaceReplyArm(): void {
+    if (!this.spaceReplySaid) return;
+    const p = this.world.ride.pos;
+    if (this.world.scenery.nearestBuilding(p.x, p.z) > SCENERY_SAY_M * 2) {
+      this.spaceReplySaid = false;
+    }
+  }
+
+  /**
+   *
+   * ## 门槛为什么是「离水面 60m 以内」而不是「离驿站多远」
+   *
+ * 这一屏不该在地图任何地方都能进——那它就不是「湖边」，是第二个世界。
+   * 而门槛一旦用「离驿站多远」，就和打卡那条链搅在一起（驿站本来就临水）；
+   * 用**离碗心多远**则完全独立：玩家看见水、走到底、按下 F。
+   *
+   * 60m 是为了让「站在路上往湖那边看」进得去——那多半已经在碗沿之外了；
+   * 门槛收到 40m 就得先把车骑进草地，而这一屏明明是给走路的人准备的。
+   */
+  private async tryEnterLakeside(): Promise<void> {
+    if (this.phase !== 'roaming') return;
+    const p = this.world.ride.pos;
+    const near = getBasins().some((b) => Math.hypot(p.x - b.cx, p.z - b.cz) < b.radius + 60);
+    if (!near) return;
+    await this.enterLakeside();
+  }
+
+  /**
+   * 「这里可以走进湖边」的一次性提示。
+   *
+   * **为什么必须有它**：入口挂在 F 键上，而 F 已经是"摸一下眼前这个"的落点。
+   * 玩家在湖边站着，看到的世界和站在路中间没有任何区别——
+   * 没有这句提示，这一屏等于不存在，而且没有任何东西提示它不存在。
+   *
+   * 只弹一次（本次会话）。每帧都问"够不够近"然后弹一遍的话，
+   * 玩家沿岸走一路会看到同一句话连续飘十几次。
+   */
+  private lakeHinted = false;
+  private updateLakesideHint(): void {
+    if (this.lakeHinted || this.phase !== 'roaming') return;
+    const p = this.world.ride.pos;
+    const near = getBasins().some((b) => Math.hypot(p.x - b.cx, p.z - b.cz) < b.radius + 60);
+    if (!near) return;
+    this.lakeHinted = true;
+    this.ui.showToast(t('lakeside_enter'), 3000);
+  }
+
+  /**
+   * 进湖边。
+   *
+   * 模型**按需加载**，不在启动时抢带宽——0.73MB 在 3G 上就是一次能看见的停顿，
+   * 而它在首屏关键路径上根本用不到。所以第一次按是「在加载」，第二次才进得去。
+   *
+   * 那个「在加载」的提示是必须的：没有它，玩家按了没反应，
+   * 而这一屏在他看来明明有一个入口。
+   */
+  private async enterLakeside(): Promise<void> {
+    if (!this.lakeside.ready) {
+      if (this.lakeside.failed) {
+        this.ui.showToast(t('lake_missing'), 2600);
+        return;
+      }
+      this.ui.showToast(t('lake_loading'), 1800);
+      await this.lakeside.load();
+      if (this.lakeside.failed) {
+        this.ui.showToast(t('lake_missing'), 2600);
+        return;
+      }
+    }
+    this.goPhase('lakeside');
+    // 主世界的 HUD、小地图、道具栏全收掉。走 `syncFromState()` 而不是
+    // 直接调 UI 那个私有的可见性开关：HUD 该不该显示由 `isInWorld(phase)`
+    // 说了算，而 `lakeside` 不在那个集合里——这正是我们要的效果。
+    // 绕过它的话，这一屏出来之后整套骑行 HUD 会浮在一片湖岸上。
+    this.ui.syncFromState();
+    this.world.setWorldVisible(false);
+    this.lakeside.enter();
+    this.lakeside.seedFor(this.world.ride.pos.x, this.world.ride.pos.z);
+    // 进这一屏才开 XR。理由见字段上那条注释。
+    this.xr?.enable();
+    this.lookDx = 0;
+    this.lookDy = 0;
+    this.ui.releaseFocus();
+  }
+
+  /**
+   * 退出湖边。
+   *
+   * 四件事一件都不能少——和 `closeEndCard()` 同一类问题：
+   * 只改相位的话，相机还留在湖边，玩家回到路上会觉得"世界怎么歪了"。
+   */
+  private exitLakeside(): void {
+    this.goPhase('roaming');
+    this.lakeside.exit();
+    this.ui.hideLakeside();
+    this.xr?.disable();
+    this.world.setWorldVisible(true);
+    this.ui.syncFromState();
+    this.lookDx = 0;
+    this.lookDy = 0;
+  }
+
+  /**
+   * 湖边这一屏的转向：在画布上拖动。
+   *
+   * ## 为什么用 pointer 而不是 mouse
+   *
+   * `pointerdown/move/up` 同时覆盖鼠标、触摸和笔，而触屏玩家恰恰是这一屏的
+   * 主要人群之一（骑行那边已经有完整的触屏控件）。用 `mouse*` 的话
+   * 触屏玩家只能看不能转——而"只能看"在这一屏几乎等于"这屏坏了"。
+   *
+   * `setPointerCapture` 是必须的：拖到画布外松手的话 `pointerup` 收不到，
+   * 视角会一直卡在转动的方向上，而界面上没有任何东西提示它卡住了。
+   */
+  private bindLakesideLook() {
+    const el = this.world.renderer.gl.domElement;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+    el.addEventListener('pointerdown', (e) => {
+      if (this.phase !== 'lakeside') return;
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      try { el.setPointerCapture(e.pointerId); } catch { /* 合成事件可能没有 pointerId */ }
+    });
+    el.addEventListener('pointermove', (e) => {
+      if (!dragging || this.phase !== 'lakeside') return;
+      this.lookDx += e.clientX - lastX;
+      this.lookDy += e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+    });
+    const stop = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      try { el.releasePointerCapture(e.pointerId); } catch { /* 同上 */ }
+    };
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+    // 窗口失焦时松开：否则切走标签页再回来，这一屏还在"按住转向"的状态里。
+    window.addEventListener('blur', () => { dragging = false; });
+  }
+
+  /**
+   * 湖边这一屏的输入。**只从 `this.keys` 读，不新开监听器。**
+   *
+   * 这一条是 §6 那条硬约束的落点：动作只往下塞键码，
+   * 浏览器侧合成真 `KeyboardEvent` 派发到 window。
+   * 所以将来 VR 手柄接进来时，扳机走的也是这条路，
+   * 而**不是**在这一屏另开一条手柄通道——两条通道早晚会漂。
+   */
+  private readLakesideInput(dt: number): void {
+    const f = this.confirmPressed;
+    this.confirmPressed = false;
+    this.lakeFrame = this.lakeside.update(dt, {
+      forward: this.keys.has('KeyW') || this.keys.has('ArrowUp'),
+      back: this.keys.has('KeyS') || this.keys.has('ArrowDown'),
+      left: this.keys.has('KeyA') || this.keys.has('ArrowLeft'),
+      right: this.keys.has('KeyD') || this.keys.has('ArrowRight'),
+      yawDelta: this.lookDx,
+      pitchDelta: this.lookDy,
+      hold: this.keys.has('Space') || this.keys.has('Enter'),
+      press: f,
+    }, this.xr?.presenting() ?? false);
+    this.lookDx = 0;
+    this.lookDy = 0;
+    if (this.lakeFrame) this.ui.setLakeside(this.lakeFrame);
+  }
+
+  /**
+   * 玩家点了「戴上头显」。
+   *
+   * `requestSession()` 要用户激活，所以这一路从点击直接走到 `enter()`，
+   * **中间不许 await 任何别的东西**（一次 `await` 就把激活用掉了，
+   * Chrome 会抛 `SecurityError`，而界面上只是"按了没反应"）。
+   */
+  private async onVrRequest(): Promise<void> {
+    if (!this.xr) return;
+    const ok = await this.xr.enter();
+    if (!ok) this.ui.showToast(t('lake_vr_failed'), 2600);
+  }
+
+  /**
+   * XR 会话进出时换帧源。
+   *
+   * ## 为什么非换不可
+   *
+   * three 的 `WebXRManager` 只在**它自己的帧回调**里绑定头显的 framebuffer
+   * 并刷新双眼位姿（`node_modules/three/src/renderers/webxr/WebXRManager.js`
+   * 的 `onAnimationFrame`），而那个回调是 `renderer.setAnimationLoop()` 装上去的
+   * ——`window.requestAnimationFrame` **不在它里面**。
+   *
+   * 所以进 VR 之后继续让主循环用 rAF 渲染，头显里是一帧冻住的画面
+   * （或者干脆全黑），而桌面上一切正常、控制台一个字都不报。
+   *
+   * ## 换法沿用录制那一路
+   *
+   * `setManual(true)` 让主循环的 rAF 停摆（`tick()` 开头就返回，不再排下一帧），
+   * 帧改由渲染器推——`stepOnce()` 一次跑完定步长与渲染，正是录制模式
+   * （`?cine=1`）用的那个组合。会话结束时原样换回来。
+   */
+  private onXrSession(started: boolean): void {
+    const gl = this.world.renderer.gl;
+    if (started) {
+      this.loop.setManual(true);
+      gl.setAnimationLoop(() => this.loop.stepOnce());
+    } else {
+      gl.setAnimationLoop(null);
+      this.loop.setManual(false);
+      this.loop.start();
     }
   }
 
@@ -1507,6 +1799,16 @@ private onConfirm() {
   }
 
   // ---------------------------------------------------------------- 打卡
+  /**
+   * 空格按了没反应、而玩家正挨着一座驿站时，最多离多远还值得搭一句话（米）。
+   *
+   * `STATION_REACH`（≈ 19.7m）圈的是"空格生效区"，而驿站站在路面外 18m，
+   * 玩家贴着路对面骑过去时离驿站 20~26m——正好落在圈外，而这正是
+   * "光圈差一点点"最容易发生的地带。所以搭话半径比生效圈再宽 12m：
+   * 宽到盖住路对面，窄到不等玩家骑出半条街还听得到。
+   */
+  private static readonly RING_HINT_EXTRA_M = 12;
+
   tryCheckIn() {
     if (this.phase !== 'roaming') return;
     // 序章那七张叙事段落还在屏上时，**打卡让路**。
@@ -1539,11 +1841,61 @@ private onConfirm() {
     }
     const can = this.world.canCheckIn();
     if (!can.ok) {
-      const key = can.reason === 'cooldown' ? 'blocked_cooldown' : can.reason === 'recheck' ? 'blocked_recheck' : 'blocked_busy';
-      // `'reply'`：这一条是**回答玩家刚才那一下**的，不是环境提示。
-      // 按成 `'ambient'` 的话 3 秒去重会把它吃掉——而站着不动连按，
+      // 'reply'：这一条是**回答玩家刚才那一下**的，不是环境提示。
+      // 按成 'ambient' 的话 3 秒去重会把它吃掉——而站着不动连按，
       // 说的都是同一句，于是第二下开始屏幕上什么都不出。
-      this.ui.showToast(t(key), 1400, 'reply');
+      //
+      // 'busy' 这一桶里混着三种完全不同的处境，原来一律回一句
+      // `blocked_busy`（"这里现在进不去"）——而它三种都答不上：
+      //   ① 站在驿站边上、但还没进圈（`distance > STATION_REACH`）。
+      //      玩家要听的是规则本身：「圈 = 空格的生效区」。这句是
+      //      `hint_ring_needed`，只在他确实挨着一座站时说——
+      //      离所有驿站都远的时候按的那一下不该有回音（见下）。
+      //   ② 够得着，但这座站现在无事可做（到访刷满 / 既无铺子也无碎片）。
+      //      `blocked_busy` 的原文对它就是有效的。
+      //   ③ 四下无驿站。**原来也弹**，于是骑在路中间随手按空格都会
+      //      一遍遍飘"这里现在进不去"——它和眼前任何东西都对不上号，
+      //      玩家只会以为游戏坏了。现在离得远就干脆不说话。
+      if (can.reason === 'recheck') {
+        // 反刷门（打卡后骑开 `RECHECK_IN_MIN_DIST` 米）。这句要说满 2.6s：
+        // 三种里唯一规则（那段距离）完全不可见、而玩家会反复撞上的一条。
+        this.ui.showToast(t('blocked_recheck'), 2600, 'reply');
+      } else if (can.reason === 'cooldown') {
+        this.ui.showToast(t('blocked_cooldown'), 1400, 'reply');
+      } else {
+        const nb = this.world.nearby;
+        if (nb.index >= 0 && nb.distance <= STATION_REACH + App.RING_HINT_EXTRA_M) {
+          this.ui.showToast(t(nb.distance > STATION_REACH ? 'hint_ring_needed' : 'blocked_busy'), 2200, 'reply');
+          this.spaceReplySaid = false;
+        } else {
+          /**
+           * 最后这一段：出了提示外圈，而玩家**很可能就站在一栋景物旁边**。
+           *
+           * 原来这里是直接往下走，也就是彻底沉默——而路边散布的
+           * `mod_house` / `mod_tower` 看得见、摸得着，却不是 16 座驿站里的任何一座，
+           * 于是玩家骑到它们旁边按空格，界面上一个字都不出。
+           * 玩家能给出的描述只有「靠近建筑的时候有时候交互不了」。
+           *
+           * 而"远处不吭声"是**故意的**（上面那段注释：否则在路中间随手按空格
+           * 会一遍遍飘同一句）。所以这里加的不是"把静默区扩回去"，
+           * 而是**一次性的那句**：说一句、走开才复位。判定在 `silentSpaceReply()`。
+           */
+          const p = this.world.ride.pos;
+          const buildingDist = this.world.scenery.nearestBuilding(p.x, p.z);
+          if (
+            silentSpaceReply({
+              stationDist: nb.distance,
+              reach: STATION_REACH,
+              hintExtra: App.RING_HINT_EXTRA_M,
+              buildingDist,
+              said: this.spaceReplySaid,
+            }) === 'nothing_here'
+          ) {
+            this.ui.showToast(t('nothing_here'), 2600, 'reply');
+            this.spaceReplySaid = true;
+          }
+        }
+      }
       return;
     }
     // 回家这一条走独立分支：0 号驿站没有碎片，
@@ -1578,7 +1930,7 @@ private onConfirm() {
       hasFragment: nb.hasFragment,
       needsVisit: nb.needsVisit,
       distance: nb.distance,
-      reach: WORLD.STATION_PASS_RADIUS + ROAD.TOTAL_HALF_WIDTH,
+      reach: STATION_REACH,
       busy: this.world.checkInStage !== 'none',
     });
   }
@@ -1933,31 +2285,45 @@ private onConfirm() {
       // **合成真的 KeyboardEvent**，而不是另开一条平行输入：
       // 七个监听键盘的地方（宿主 / 对白 / 结算 / 明信片 / 小游戏 / 触屏 / HUD）
       // 原封不动地收到，走和人手键盘完全同一条路。
-      dispatchKey: (code, down) => {
-        const ev = new KeyboardEvent(down ? 'keydown' : 'keyup', {
-          code,
-          key: code,
-          bubbles: true,
-          cancelable: true,
-          repeat: false,
-        });
-        // 派发给**焦点所在的那个元素**，没有焦点才发给 window。
-        //
-        // 真实按键的事件目标是当前焦点，而事件只会往上冒、不会往下走——
-        // 所以一发到 window，它就永远到不了按钮上。
-        // 而引导页、结算屏、合成面板的出路**全都**挂在按钮元素上
-        // （`wireKeyActivate`），于是 AI 按确认键时：
-        // `available` 里亮着 `advance`、`tap('advance')` 返回 accepted，
-        // 而游戏纹丝不动。实测引导页连按 150 次没动过。
-        //
-        // 派给焦点之后事件照样会冒到 window（`bubbles: true`），
-        // 所以骑行与面板那套 window 监听一个字都不用改——
-        // 这一句只是让"目标"和真人按键一致，不是另开一条平行输入。
-        const target = document.activeElement;
-        (target instanceof HTMLElement ? target : window).dispatchEvent(ev);
-      },
+      dispatchKey: (code, down) => this.dispatchKey(code, down),
     };
     (window as unknown as { __gift188?: unknown }).__gift188 = createLiveApi(host);
+  }
+
+  /**
+   * 合成一次按键，送给**焦点所在的那个元素**。
+   *
+   * ## 谁在用它
+   *
+   * 三个调用方，同一条路：AI 接口（`live.ts`）、VR 手柄（`core/xr.ts`）、
+   * 以及宿主自己。它们**共用这一个实现**是有意的——
+   * §6 那条「动作只往下塞键码、不许另开平行输入」在它们身上是同一句话：
+   * 七个监听键盘的地方原封不动地收到，走的和人手键盘完全一样的路。
+   * 抄一份给手柄，就等于给这一屏造出第二条输入，而两条早晚会漂。
+   *
+   * ## 为什么派给焦点而不是一律派给 window
+   *
+   * 真实按键的事件目标是当前焦点，而事件只会往上冒、不会往下走——
+   * 所以一发到 window，它就永远到不了按钮上。
+   * 而引导页、结算屏、合成面板的出路**全都**挂在按钮元素上
+   * （`wireKeyActivate`），于是 AI 按确认键时：
+   * `available` 里亮着 `advance`、`tap('advance')` 返回 accepted，
+   * 而游戏纹丝不动。实测引导页连按 150 次没动过。
+   *
+   * 派给焦点之后事件照样会冒到 window（`bubbles: true`），
+   * 所以骑行与面板那套 window 监听一个字都不用改——
+   * 这一句只是让"目标"和真人按键一致，不是另开一条平行输入。
+   */
+  private dispatchKey(code: string, down: boolean): void {
+    const ev = new KeyboardEvent(down ? 'keydown' : 'keyup', {
+      code,
+      key: code,
+      bubbles: true,
+      cancelable: true,
+      repeat: false,
+    });
+    const target = document.activeElement;
+    (target instanceof HTMLElement ? target : window).dispatchEvent(ev);
   }
 
   /**
@@ -2111,6 +2477,15 @@ private onConfirm() {
    * 好让世界的时间继续走（对白、暂停面板背后的黄昏都要动）。
    */
   private fixed(dt: number) {
+    // 湖边这一屏**自己接管这一帧**：主世界不更新，相机不由 `Ride` 驱动。
+    //
+    // 放在最前面是有意的——`world.fixedUpdate` 会把相机拉回跟车位，
+    // 而这一屏的相机归 `Lakeside` 管。两者同时跑的话，每帧都会被抢一次，
+    // 症状是"视角往回弹"，而且只在移动时出现，很难归因。
+    if (this.phase === 'lakeside') {
+      this.readLakesideInput(dt);
+      return;
+    }
     const canRide = canRideNow({
       phase: this.phase,
       checkInPressed: this.ui.touch.checkInPressed,
@@ -2127,6 +2502,9 @@ private onConfirm() {
     this.world.postFixedUpdate();
     this.updateRelicHint();
     this.updateRoadsideHint();
+    // 走开了就把「这里没有可互动的东西」重新武装上。
+    this.updateSpaceReplyArm();
+    this.updateLakesideHint();
     // 挑战进度条。**只在进行中才读世界**：没在挑战的时候那一行是
     // "active: false"，而 `dodgeProgress` 每帧算一次弧长累加并不便宜。
     const dodge = this.world.dodgeRunning;

@@ -25,11 +25,9 @@ import { expect, type CheckFn } from './harness';
 import { STATIONS } from '../data/route';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROAD, ECON, SHOPS, I18N, WORLD } from '../data/raw';
+import { ROAD, ECON, SHOPS, I18N } from '../data/raw';
 import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, MeshStandardMaterial, Object3D, Color, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
-import { ROAD as ROAD_GEOM } from '../world/road';
-import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';
-import { interactAt } from '../game/phase';
+import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';import { interactAt, STATION_REACH } from '../game/phase';
 import { camParams } from '../world/ride';
 import { Vehicle, FOOT_LATERAL_OFFSET, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, SUBJECT_LIFT, liftSubjectMaterials, type RideMode } from '../world/vehicle';
 import { assertRide, assertDemoDrive, assertSpawnHeading, assertJunctionMoment } from './ride';
@@ -1312,7 +1310,9 @@ export function registerVehicleChecks(check: CheckFn): void {
     let asserts = 0;
     const probs: string[] = [];
     const g = new GameStateManager();
-    const reach = WORLD.STATION_PASS_RADIUS + ROAD_GEOM.TOTAL_HALF_WIDTH;
+    // 读产品那个常量。自己再写一份算式的话，判据会跟着那份抄件走，
+    // 而玩家撞上的是实现那一份。
+    const reach = STATION_REACH;
 
     /** 站在 idx 号驿站门口按确认。`ret` = 当前目标是不是「回十八驿」。 */
     const at = (idx: number, ret: boolean, dist = 0, busy = false) =>

@@ -18,9 +18,16 @@
  * 但那两个模块都是纯计算，不碰 DOM、不碰 three，这个前提没变。
  */
 import { clamp, TAU } from '../core/math';
-import { TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
+import { STATION_ROAD_MAX_DIST, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 
-export type Phase = 'boot' | 'title' | 'onboarding' | 'roaming' | 'paused' | 'checkin' | 'minigame' | 'synthesis' | 'endcard';
+export type Phase =
+  | 'boot' | 'title' | 'onboarding' | 'roaming' | 'paused'
+  | 'checkin' | 'minigame' | 'synthesis' | 'endcard'
+  /**
+   * 湖边一屏。**它不在 `isInWorld()` 里** —— 主世界的 HUD 在这一屏不显示，
+   * 而那一屏有自己的读数。放进去的话，骑行 HUD 会浮在一片湖岸上。
+   */
+  | 'lakeside';
 
 /**
  * 允许的相位迁移。**这张表是"声明"，不是"闸门"。**
@@ -67,6 +74,10 @@ export const PHASE_EDGES: ReadonlySet<string> = new Set([
   // `finishRun()` 有三个调用点，演示那一路是从 `roaming` 直接跳结算页。
   'roaming>endcard',
   'endcard>roaming',
+  // 湖边一屏。进出都是**玩家主动**的，没有超时兜底——
+  // 而这一条恰恰是最容易变成"按了没反应"的地方，所以它必须有边。
+  'roaming>lakeside',
+  'lakeside>roaming',
 ]);
 
 /** 这一条迁移在表里吗。 */
@@ -78,7 +89,7 @@ export function canGoPhase(from: Phase, to: Phase): boolean {
 export function phaseEdgeErrors(): string[] {
   const all = new Set<Phase>([
     'boot', 'title', 'onboarding', 'roaming', 'paused',
-    'checkin', 'minigame', 'synthesis', 'endcard',
+    'checkin', 'minigame', 'synthesis', 'endcard', 'lakeside',
   ]);
   const bad: string[] = [];
   for (const e of PHASE_EDGES) {
@@ -175,12 +186,20 @@ export function isInWorld(phase: Phase): boolean {
  *
  * 返回 `null` = 这一屏没有确认键的出路（该相位归 `Escape` 或别的键管）。
  */
-export type ConfirmAction = 'startRide' | 'enterWorld' | 'checkIn';
+export type ConfirmAction = 'startRide' | 'enterWorld' | 'checkIn' | 'fish';
 
 export function confirmAction(phase: Phase): ConfirmAction | null {
   if (phase === 'title') return 'startRide';
   if (phase === 'onboarding') return 'enterWorld';
   if (phase === 'roaming') return 'checkIn';
+  /**
+   * 湖边这一屏的确认键是**钓鱼**，不是"进入"。
+   *
+   * 而它的两种用法——"咬钩瞬间点一下"和"收线时按住"——用的是同一个键。
+   * `holdMeaning()` 负责把当前这一刻该当哪一种，宿主只管把键按下去。
+   * 之所以不拆成两个动作：拆了就必须在 UI 上放两个提示，而两个提示会打架。
+   */
+  if (phase === 'lakeside') return 'fish';
   return null;
 }
 
@@ -388,10 +407,100 @@ export interface InteractInput {
   needsVisit: boolean;
   /** 到驿站中心的距离（米） */
   distance: number;
-  /** 够得着的距离阈值：驿站半径 + 路半宽 */
+  /** 够得着的距离阈值。**传 `STATION_REACH`**，不要自己再写一份算式。 */
   reach: number;
   /** 打卡过场是否进行中（镜头接管中不抢） */
   busy: boolean;
+}
+
+/**
+ * 站在路面最远的那条边上，还要留多长一段纵向窗口（米）。
+ *
+ * 半径恰好等于"驿站到路面最远那条边"时，站在那条边上只有**一个点**
+ * 够得着——等于要玩家停在精确的一米上。`STATION_REACH` 取
+ * `√(横向² + 纵向²)`，于是那条边上仍有 ±8m 可以按。
+ */
+export const STATION_REACH_WINDOW = 8;
+
+/**
+ * 在路面上够得着驿站的距离（米）。**全项目只有这一个出处。**
+ *
+ * ## 为什么不再是 `STATION_PASS_RADIUS + TOTAL_HALF_WIDTH`
+ *
+ * 那个算式（15 + 4 = 19）假设驿站站在路面**边上**，于是"再加一个路半宽"
+ * 就盖住了整条路——`hud.ts` 的注释当年就是这么写的（"少一寸玩家会站在圈外
+ * 按空格"）。但驿站其实在路面外 20m 量级，所以 19 只盖住了靠驿站那一半，
+ * **路面外侧那一截上按空格什么都不会发生**。
+ *
+ * ⚠ **这里不要写死 `18`。** `18` 是 `ROAD.STATION_OFFSET`（站点基准偏移），
+ * 而 `STATION_ROAD_MAX_DIST` 是**算出来的最大值**——广场盘上那座为了不压在
+ * 另一条路的沥青上被额外推出去了，于是它比基准偏移远得多（实测 ≈ 22m）。
+ * 两者不是同一个数，`verify_space_reply` 量到的生效圈也因此是 **23.4m**
+ * 而不是按 18 估的 19.7m。真值只有一个出处：下面那个常量本身。
+ *
+ * 玩家对这件事的描述只会是"有时候按不动"——因为它取决于你压在这条 8m 宽
+ * 路面的哪一侧，而路面上没有任何标记告诉你这条线在哪。
+ *
+ * 更糟的是它有**六份副本**（`main.ts` / `hud.ts` / `touchControls.ts` /
+ * `world.ts` 两处 / 回归两处），所以改一处不会让另外五处跟着对。
+ * 现在它们全部读这一个常量，而 `verify_reach` 守它够得着整条路。
+ */
+export const STATION_REACH = Math.hypot(STATION_ROAD_MAX_DIST, STATION_REACH_WINDOW);
+
+/**
+ * 离这么近就当「玩家以为这里站着一栋能进的地方」（米）。
+ *
+ * 取 25m 是照着 `STATION_REACH ≈ 19.7m` 与那条 12m 外圈定的：
+ * 比驿站生效圈大一点、小于外圈，于是「站在建筑物边上」和
+ * 「站在驿站边上」在玩家感知里是同一件事——同一句话能回答两处。
+ */
+export const SCENERY_SAY_M = 25;
+
+/** 按下确认键、什么也没发生时**要不要回一句**，以及回哪一句。 */
+export type SilentSpaceReply = 'none' | 'ring' | 'busy' | 'nothing_here';
+
+/**
+ * 「按了空格没有任何反应」这一刻该说什么。
+ *
+ * ## 它治的是哪一个病
+ *
+ * 玩家骑到路边一栋景物房子旁边（`mod_house` / `mod_tower`——它们**不是**
+ * 16 座驿站里的任何一座），按下空格，什么都不发生，界面上一个字也没有。
+ * 于是玩家的描述只能是「靠近建筑的时候有时候交互不了」。
+ *
+ * 而「离得远就干脆不说话」是一个**故意的**决定（见 `main.ts` 那段注释）：
+ * 远处也弹的话，玩家在路中间随手按空格会一遍遍飘「这里现在进不去」。
+ * 所以修法不能是「把静默区扩回去」，而必须是**边沿触发 + 每次靠近只说一句**
+ * ——和 `relicHinted` 是同一个套路：说过的标志在走开之后才复位。
+ *
+ * ## 为什么判定要在这里
+ *
+ * 因为这是**一条会被反复撞上的规则**，而规则写在宿主里就没人能问它。
+ * 四种结果各自对应一句文案，而「该说哪一句」必须在无头里能验：
+ * `verify_space_reply` 量的是「什么时候闭嘴」，那比量「什么时候说话」难得多，
+ * 也是防住刷屏的那一半。
+ */
+export function silentSpaceReply(o: {
+  /** 离最近驿站多远（米） */
+  stationDist: number;
+  /** 驿站生效半径 */
+  reach: number;
+  /** 有反馈的外圈（米） */
+  hintExtra: number;
+  /** 离最近的景物建筑多远（米）。**无穷大表示附近没有。** */
+  buildingDist: number;
+  /** 本次靠近已经说过没有 */
+  said: boolean;
+}): SilentSpaceReply {
+  if (o.stationDist > o.reach) {
+    // 圈外但还在外圈里：这是「圈 = 空格的生效区」那条规则，
+    // 它一直在说，别因为新增的分支把它吞了。
+    if (o.stationDist <= o.reach + o.hintExtra) return 'ring';
+    // 出了外圈，又确实站在一栋景物旁边，而这一轮还没说过。
+    if (o.buildingDist <= SCENERY_SAY_M && !o.said) return 'nothing_here';
+  }
+  // 说过了，或者压根没有景物在近旁：**继续闭嘴**。
+  return 'none';
 }
 
 export function interactAt(i: InteractInput): InteractKind {
