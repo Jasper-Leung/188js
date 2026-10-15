@@ -589,6 +589,10 @@ class App {
   private relicNamed = new Set<string>();
   private touchMode = false;
   private demoActive = false;
+  /** 演示模式不碰玩家的存档位置（演示只是放一段给人看）。 */
+  private demoSuppressPose = false;
+  /** `?arc=` / `?yaw=` 传送优先于存档位置。 */
+  private arcOverride = false;
   private demoT = 0;
   /**
    * 序章那七张叙事段落正在排队或正在演。
@@ -653,6 +657,10 @@ class App {
     if (!this.ui) return;
     this.ui.setColorblind(this.settings.colorblind);
     this.ui.setReduceMotion(this.settings.reduceMotion);
+    // **第三颗不能漏。** 上面两颗有人修过（dff7a27），
+    // 而它就是同类被漏掉的那颗——开关显示与运行时状态不一致，
+    // 玩家开了「按住改切换」、重开之后开关写「关」。
+    this.ui.setHoldToToggle(this.settings.holdToToggle);
   }
 
   /**
@@ -718,9 +726,9 @@ class App {
           saveSettings(this.settings);
         },
         onAccessibilityChange: (patch) => {
-          // 音量滑块**每拖一下都调一次**，所以只有非音量的三项才落盘；
-          // 音量由 `onVolumeCommit` 在松手时落一次——写 localStorage
-          // 一次 60Hz 的拖拽会在弱机上造成可测量的卡顿。
+          // 音量：这里**只推给 audio，不落盘**——滑块的 `input` 每帧都发，
+          // 在那上面写 `localStorage` 会在弱机上造成可测量的卡顿。
+          // 落盘走下面的 `onVolumeCommit`（滑块的 `change`，松手时一次）。
           if (patch.volBgm !== undefined) audio.setVolume('bgm', patch.volBgm);
           if (patch.volSfx !== undefined) audio.setVolume('sfx', patch.volSfx);
           if (patch.colorblind !== undefined) {
@@ -733,7 +741,18 @@ class App {
           }
           if (patch.holdToToggle !== undefined) {
             this.settings.holdToToggle = patch.holdToToggle;
+            // 开关必须立刻推给 UI，否则面板上写着「开」而运行时读的是「关」。
+            this.ui.setHoldToToggle(patch.holdToToggle);
           }
+          saveSettings(this.settings);
+        },
+        onVolumeCommit: (volBgm, volSfx) => {
+          // **这一次才落盘。** 少了它，音量每次重开都回到 100%——
+          // 而界面上看不出任何异常，因为拖动当场是生效的。
+          this.settings.volBgm = volBgm;
+          this.settings.volSfx = volSfx;
+          audio.setVolume('bgm', volBgm);
+          audio.setVolume('sfx', volSfx);
           saveSettings(this.settings);
         },
         onKeymapChange: (keymap) => {
@@ -940,6 +959,7 @@ class App {
     // 错过一次就得再绕一整圈。
     const arc = q.get('arc');
     if (arc !== null) {
+      this.arcOverride = true;
       const yaw = q.get('yaw');
       this.world.teleportToArc(Number(arc), yaw === null ? undefined : Number(yaw));
       this.enterWorld();
@@ -1722,6 +1742,7 @@ private onConfirm() {
     this.backText = '';
     writeBackText('');
     this.demoActive = false;
+    this.demoSuppressPose = false;
     this.demoArc = -1;
     this.world.teleportToStation(0);
     this.ui.setShopOpen(false);
@@ -1767,6 +1788,10 @@ private onConfirm() {
    * 等于「他停在了这儿，他面朝路」。
    */
   private restorePose(): void {
+    // **`?arc=` / `?yaw=` 优先。** 那一路是排障用的："把玩家放到弧长 0.42 那儿"。
+    // 有存档时 `restorePose()` 会把它盖掉，于是那行命令完全失灵——
+    // 而那个工具存在的意义恰恰是"一眼看出这地方长什么样"。
+    if (this.arcOverride) return;
     const p = game.pose;
     if (!p) return;
     const here = roadSpawnPose(p.x, p.z);
@@ -1913,6 +1938,10 @@ private onConfirm() {
     this.demoActive = true;
     this.demoT = 0;
     this.demoArc = -1;
+    // **演示不碰玩家的存档位置。** 它只是"放一段给评委看"——
+    // 而 `tickPoseSave` 会照常把坐标写进存档。放完演示之后「继续旅程」
+    // 会把玩家放在演示结束的地方，而不是他上次停的地方。
+    this.demoSuppressPose = true;
     // 演示里没有人按键，对白必须自己往前走
     this.ui.setDialogueAutoAdvance(2.4);
     this.enterWorld();
@@ -2813,6 +2842,9 @@ private onConfirm() {
    */
   private tickPoseSave(dt: number): void {
     if (this.phase !== 'roaming') return;
+    // 演示不碰玩家的存档位置——它只是放一段给人看，
+    // 放完之后「继续旅程」不该把玩家放在演示结束的地方。
+    if (this.demoSuppressPose) return;
     this.poseSaveClock += dt;
     if (this.poseSaveClock < App.POSE_SAVE_S) return;
     this.poseSaveClock = 0;

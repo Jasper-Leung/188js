@@ -13,6 +13,9 @@
 # 依赖与构建产物：都能用 package-lock.json / vite build 重来
 node_modules/
 dist/
+# PV 剪辑专用的那一份构建（23MB / 71 项，与 dist 同源）。
+# 它是产物，而且体积是整个仓库里最大的一项——进版本库只会让 clone 变慢。
+dist-pv/
 
 # `npm run package:web` 打出来的可分发 zip（release/gift-no188-web-*.zip）。
 # 它是 dist 的再包装，属于产物；发布走 GitHub Release，地址填进

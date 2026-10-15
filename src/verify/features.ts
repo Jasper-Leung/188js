@@ -48,6 +48,15 @@ import {
 } from '../world/relics';
 import { Terrain } from '../world/terrain';
 import { ROAD as ROAD_DEF, ROADMESH, I18N, ECON } from '../data/raw';
+import {
+  tryBind,
+  codeOf,
+  codeLabel,
+  getKeymap,
+  setKeymap,
+  actionOf,
+  type GameAction,
+} from '../core/keymap';
 import { GameStateManager } from '../game/state';
 import {
   QIN_CELL_MIN,
@@ -1486,6 +1495,103 @@ function registerAccessibilityChecks(check: CheckFn): void {
   const liveSrc = srcOf(join('src', 'game', 'api', 'live.ts'));
   const hudSrc = srcOf(join('src', 'ui', 'hud.ts'));
 
+  /**
+   * 键位表本身。**纯函数，所以真的跑它**——这一族里只有它能被行为判据覆盖，
+   * 其余全是 DOM 接线（`verify_panel_behavior` 那一族管）与源码形状。
+   *
+   * 而它偏偏是最该跑行为判据的那一块：`settings.keymap` 来自
+   * `localStorage`——**玩家可以手改的文件**。
+   */
+  check('verify_keymap', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+    const before = { ...getKeymap() };
+
+    // 1. 保留键不许成为绑定目标。
+    asserts++;
+    for (const code of ['F8', 'F9', 'F10', 'Digit1', 'Digit4', 'KeyP', 'KeyB', 'Enter']) {
+      const r = tryBind('pause', code);
+      if (r === null) {
+        probs.push(`「暂停」被绑到了保留键 ${code} 上——而主机的 switch 是动作表优先，那个键从此按不动`);
+      }
+      if (codeOf('pause') === code) {
+        probs.push(`绑完保留键 ${code} 之后它真的生效了——tryBind 既没拒绝也没拦住写入`);
+      }
+    }
+    if (codeOf('pause') !== before.pause) {
+      probs.push(`前面那一轮循环把「暂停」的键位改成了 ${codeOf('pause')}，应为 ${before.pause}`);
+      setKeymap(before);
+    }
+
+    // 2. 正常绑定 + 冲突拒绝。
+    asserts++;
+    {
+      setKeymap(before);
+      if (tryBind('forward', 'KeyI') !== null) {
+        probs.push('「前进」绑到 I 失败了——那把键本来空着');
+      }
+      asserts++;
+      if (codeOf('forward') !== 'KeyI' || actionOf('KeyI') !== 'forward') {
+        probs.push(`绑定没有生效：codeOf=${codeOf('forward')} actionOf=${actionOf('KeyI')}`);
+      }
+      asserts++;
+      if (tryBind('back', 'KeyI') !== 'forward') {
+        probs.push('把「后退」绑到已经属于「前进」的键上没有被拒绝');
+      }
+      asserts++;
+      if (codeOf('back') !== before.back) {
+        probs.push(`一次被拒绝的绑定仍然改了键位：「后退」=${codeOf('back')}`);
+      }
+    }
+
+    // 3. **手改过的存档不许造成撞键。** 这是 `setKeymap` 存在的全部理由。
+    asserts++;
+    {
+      setKeymap({ ...before, pause: 'KeyW' } as Partial<Record<GameAction, string>>);
+      if (actionOf('KeyW') !== 'forward') {
+        probs.push(`一份写着 pause=KeyW 的存档把「前进」挤掉了：actionOf('KeyW')=${actionOf('KeyW')}`);
+      }
+      if (codeOf('pause') === 'KeyW') {
+        probs.push('撞键的存档把「暂停」直接按 KeyW 收了——那会让 W 变成暂停而不是前进');
+      }
+    }
+
+    // 4. **非字符串不许进表。** `codeLabel()` 在 `new UI()` 里跑，
+    //    一处 TypeError 就让整个游戏起不来。
+    asserts++;
+    {
+      setKeymap({ ...before, forward: 5 as unknown as string });
+      asserts++;
+      if (typeof codeOf('forward') !== 'string') {
+        probs.push(`一份写着 forward=5 的存档把非字符串灌了进来：codeOf=${String(codeOf('forward'))}`);
+      }
+      asserts++;
+      // `codeLabel` 必须在任何输入下都不抛。
+      let threw = '';
+      try {
+        codeLabel(codeOf('forward'));
+      } catch (e) {
+        threw = String(e);
+      }
+      if (threw) probs.push(`codeLabel() 抛了：${threw}——它在 \`new UI()\` 里跑，一抛就是黑屏`);
+    }
+
+    // 5. 恢复现场，别把后续判据的键位弄脏。
+    asserts++;
+    setKeymap(before);
+    if (getKeymap().forward !== before.forward || getKeymap().back !== before.back) {
+      probs.push('恢复默认键位之后对不上——`setKeymap` 不是幂等的');
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : '保留键拒绑 · 正常绑定生效 · 冲突不改表 · 手改存档不撞键 · 非字符串不崩 · 幂等',
+      asserts,
+    );
+  });
+
   check('verify_accessibility', () => {
     let asserts = 0;
     const probs: string[] = [];
@@ -1556,6 +1662,33 @@ function registerAccessibilityChecks(check: CheckFn): void {
     asserts++;
     if (!/this\.reduceMotion \? 0\.5/.test(hudSrc)) {
       probs.push('节拍圈没有读减弱动效 —— 那是这个 HUD 里唯一持续运动的地方');
+    }
+
+// 7. **三颗开关都得在启动时被推进。** 漏一颗的症状是
+    //    「画面已经切了、开关写着关」——而上面两颗被修过一次，
+    //    第三颗是同类里漏掉的那一颗。
+    //
+    // ⚠ **只看 `applyAccessibilitySettings` 那个方法体**：
+    // 同一串 `ui.setHoldToToggle(` 在 `onAccessibilityChange` 里也出现，
+    // 而后者是「玩家刚点了开关」那条路。切出去一大段去找它，
+    // 少的那一颗照样能靠另一处蒙混过关——这条判据就是这么空转的。
+    asserts++;
+    {
+      const def = mainSrc.indexOf('private applyAccessibilitySettings');
+      const body = def < 0 ? '' : mainSrc.slice(def, mainSrc.indexOf('\n  }', def));
+      if (!body) {
+        probs.push('main.ts 里找不到 `private applyAccessibilitySettings` —— 这条判据空转了');
+      } else {
+        for (const [fn, name] of [
+          ['setColorblind', '色觉友好配色'],
+          ['setReduceMotion', '减弱动效'],
+          ['setHoldToToggle', '按住改切换'],
+        ] as const) {
+          if (!body.includes(`ui.${fn}(`)) {
+            probs.push(`\`applyAccessibilitySettings()\` 没有调 \`ui.${fn}()\` —— ${name} 的开关与运行时状态会不一致`);
+          }
+        }
+      }
     }
 
     return expect(
@@ -1650,6 +1783,24 @@ function registerAccessibilityChecks(check: CheckFn): void {
     asserts++;
     if (!/respawn\(x: number, z: number, heading: number\)/.test(srcOf(join('src', 'world', 'world.ts')))) {
       probs.push('`World` 没有 `respawn()` —— 挪车时 `lastPos` / `lastArc` 不会被一起挪，里程会跳一整圈');
+    }
+
+    // `?arc=` 传送必须优先于存档位置：那一路是排障用的。
+    asserts++;
+    if (!/if \(this\.arcOverride\) return;/.test(mainSrc)) {
+      probs.push(
+        '`restorePose()` 没有让 `?arc=` 优先 —— 有存档时它会把排障用的传送盖掉，'
+        + '而那个工具存在的意义恰恰是"一眼看出这地方长什么样"',
+      );
+    }
+
+    // 演示不许把玩家的存档位置写成演示结束的地方。
+    asserts++;
+    if (!/if \(this\.demoSuppressPose\) return;/.test(mainSrc)) {
+      probs.push(
+        '`tickPoseSave()` 没有挡演示模式 —— 放完演示之后「继续旅程」'
+        + '会把玩家放在演示结束的地方，而不是他上次停的地方',
+      );
     }
 
     return expect(

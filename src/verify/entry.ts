@@ -55,11 +55,12 @@ import { exportFileName } from '../game/postcard/export';
 import { buildInputFromState, fragmentMapDot, layoutMap, type PostcardInput } from '../game/postcard';
 import { MAP_BAND_FRAC } from '../game/postcard/layout';
 import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
+import { PausePanel } from '../ui/pausePanel';
 import { isShown } from '../ui/dom';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS, clampTier } from '../core/settings';
-import { DEFAULT_LANG, getLang, setLang, t, stationNameOf } from '../i18n';
+import { DEFAULT_LANG, getLang, isEnglish, setLang, t, stationNameOf } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
 import type { UIHooks } from '../ui';
@@ -1541,6 +1542,231 @@ check('verify_panel_layering', () => {
     probs.length
       ? probs.join('；')
       : '闸门随叙事起落 · 面板推上来时底下收干净 · 对白收场会 settle Promise · 两处接线在',
+    asserts,
+  );
+});
+
+/**
+ * 真正把面板**驱动起来**的那一族。
+ *
+ * ## 为什么它存在：上一版的盲区
+ *
+ * 本轮加的 `verify_accessibility`（10 条）量的是**源码形状**——
+ * 「宿主有没有调 `setColorblind`」「switch 是不是按动作判」。
+ * 而这一族量的是**行为**。
+ *
+ * 区别不是学术性的。同一个提交里就翻车过两次，两次都是源码形状绿的：
+ *
+ *   · 开关的点击回调读 `b.dataset.isOn`，而状态只由 `setFlag()` 写成
+ *     CSS 类 —— 于是**开关开了关不掉**，而判据量的是「宿主有没有调」，
+ *     全绿。
+ *   · 面板只在构造时取一次初值，而存档里的值是 `App.ready()` 建好 UI
+ *     之后才推进来的 —— 于是**画面已经切成色觉配色、开关写着「关」**。
+ *
+ * 两条的共同形状是「状态写在一处、从另一处读」。
+ * **而 `rg` 判据看不见形状，只看得见字符串。**
+ *
+ * ## 为什么这一族放在 `entry.ts` 而不是 `features.ts`
+ *
+ * 因为它要 `ensureStubDom()`——那个桩住在 `entry.ts` 里（它要被好几族共用），
+ * 而 `AGENTS.md` §3 明确要求搬出去的那几族**一行都不用改 `entry.ts`**。
+ * 这里是**新增**一条判据、注册在原位，不涉及拆分。
+ */
+check('verify_panel_behavior', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const dom = ensureStubDom();
+
+  // 面板要的那些 hook，只关心「它有没有被调到、参数是什么」。
+  const seen: { hook: string; arg: unknown }[] = [];
+  const rec = (hook: string) => (...a: unknown[]) => {
+    seen.push({ hook, arg: a[0] });
+  };
+  const hooks = new Proxy({} as Record<string, unknown>, {
+    get: (_t, k: string) => (typeof k === 'string' ? rec(k) : undefined),
+  });
+
+  /** 某个 hook 有没有被真正调过。 */
+  const called = (name: string) => seen.some((s) => s.hook === name);
+
+  const build = () =>
+  new PausePanel({
+    parent: dom.parent(),
+    hooks: hooks as unknown as UIHooks,
+    tier: 1,
+    adaptiveOn: false,
+    adaptiveTarget: 30,
+  });
+
+  // ---- 1. 开关要**关得掉**。----
+  //
+  // 回归过的那个 bug：`dataset.isOn` 从来没人写过，于是每次点击都算成「打开」，
+  // 而面板上那一行的 class 是 `is-on`。
+  asserts++;
+  {
+    const p = build();
+    const btn = (p as unknown as { cbBtn: HTMLElement }).cbBtn;
+    if (btn.textContent !== t('off')) {
+      probs.push(`色觉开关初始应显示「${t('off')}」，实际「${btn.textContent}」——判据空转`);
+    }
+    btn.click();
+    const after1 = btn.textContent;
+    btn.click();
+    const after2 = btn.textContent;
+    if (after1 !== t('on')) {
+      probs.push(`点一次色觉开关，它没有变成「${t('on')}」（还是「${after1}」）`);
+    } else if (after2 !== t('off')) {
+      probs.push(
+        `点两次色觉开关它应该回到「${t('off')}」，实际「${after2}」——`
+        + '**开关开了关不掉**，而这是回归套件量源码形状时看不见的那一类',
+      );
+    }
+  }
+
+  // ---- 2. 外部推进来的值要真的落到开关上。----
+  //
+  // 第二个回归过的 bug：面板只在**构造**时取初值，而存档里的值是之后
+  // 由 `ui.setColorblind()` 推进来的。症状是画面变了、开关说没变。
+  asserts++;
+  {
+    const p = build();
+    p.setSwitches({ colorblind: true, reduceMotion: true, holdToToggle: true });
+    const s = p as unknown as {
+      cbBtn: HTMLElement;
+      motionBtn: HTMLElement;
+      holdBtn: HTMLElement;
+    };
+    for (const [name, btn] of [['色觉', s.cbBtn], ['减弱动效', s.motionBtn], ['按住改切换', s.holdBtn]] as const) {
+      if (btn.textContent !== t('on')) {
+        probs.push(
+          `${name}：外部把它打开了，按钮仍写着「${btn.textContent}」——`
+          + '面板只在构造时取过一次初值',
+        );
+      }
+      if (!btn.classList.contains('is-on')) {
+        probs.push(`${name}：按钮上没有 is-on，而它的点击回调读的就是这个类`);
+      }
+    }
+  }
+
+  // ---- 3. `hide()` 必须卸掉改键捕获。----
+  //
+  // 第三个：捕获监听器在 `window` 上、`capture` 阶段并 `stopPropagation()`。
+  // 而 `hide()` 原来不清 `capturing` —— 于是面板关掉之后玩家按的**下一颗键**
+  // 会被吞掉并直接写进键位表。症状是「点了继续之后按 W 车不动，
+  // 而静音那一栏的字变成了 W」。
+  asserts++;
+  {
+    const p = build();
+    p.show();
+    const caps = (p as unknown as { keyRowBtns: Map<string, HTMLElement> }).keyRowBtns;
+    const first = caps.get('forward');
+    if (!first) {
+      probs.push('键位表里没有 forward 那一行——这条判据空转');
+    } else {
+      first.click();
+      if (!(p as unknown as { capturing: string | null }).capturing) {
+        probs.push('点了键帽之后没有进入捕获态——这条判据空转');
+      }
+      p.hide();
+      if ((p as unknown as { capturing: string | null }).capturing !== null) {
+        probs.push(
+          '`hide()` 没有清掉捕获态：面板关掉之后仍挂着，而它的监听器在 `window` 的'
+          + '捕获阶段并 `stopPropagation()`——玩家此后按的每一颗键都会被吞掉并改绑',
+        );
+      }
+      // 再开一次面板，捕获态也不该是上一次留下的。
+      p.show();
+      if ((p as unknown as { capturing: string | null }).capturing !== null) {
+        probs.push('重新 `show()` 之后捕获态还是上一次留下的——面板带着武装状态回来');
+      }
+    }
+  }
+
+  // ---- 4. 音量滑块的两条事件分工不许反。----
+  //
+  // 第四个：滑块挂 `input`（每帧，推 audio）与 `change`（松手，落盘）。
+  // 而**落盘那一条当时根本不存在**，于是玩家调完音量关掉标签页就丢——
+  // 拖动当场是生效的，所以界面上看不出任何异常。
+  asserts++;
+  {
+    const p = build();
+    const s = p as unknown as {
+      volBgm: HTMLInputElement;
+      volSfx: HTMLInputElement;
+      hooks: { onVolumeCommit(a: number, b: number): void };
+      setAccessibilityState(v: {
+        volBgm: number;
+        volSfx: number;
+        colorblind: boolean;
+        reduceMotion: boolean;
+        holdToToggle: boolean;
+      }): void;
+    };
+    if (typeof s.hooks.onVolumeCommit !== 'function') {
+      probs.push('`onVolumeCommit` 不存在 —— 音量没有任何一条落盘路径');
+    } else {
+      s.setAccessibilityState({
+        volBgm: 0.2,
+        volSfx: 0.6,
+        colorblind: false,
+        reduceMotion: false,
+        holdToToggle: false,
+      });
+      if (s.volBgm.value !== '20' || s.volSfx.value !== '60') {
+        probs.push(`滑块位置没跟上：bgm=${s.volBgm.value} sfx=${s.volSfx.value}，应为 20 / 60`);
+      }
+      // 落盘那条挂在滑块的 `change` 上。桩的 `addEventListener` 不派发事件，
+      // 所以**直接读那条监听器有没有被挂上去**——桩把回调收在闭包里，
+      // 这里够不着。退一步：断言源码里确实挂了 `change` → `onVolumeCommit`。
+      const src = readFileSync(join(process.cwd(), 'src', 'ui', 'pausePanel.ts'), 'utf8');
+      if (!/addEventListener\('change',[\s\S]{0,120}onVolumeCommit/.test(src)) {
+        probs.push(
+          '滑块没有把 `change` 接到 `onVolumeCommit` —— 松手时那一次落盘不存在，'
+          + '于是音量每次重开都回到 100%（拖动当场是生效的，界面上看不出异常）',
+        );
+      }
+      if (called('onVolumeCommit')) {
+        probs.push('`onVolumeCommit` 在只读了一次音量之后就被调到了——它应该只在 `change`（松手）时调');
+      }
+    }
+  }
+
+  // ---- 5. 切语言必须把**整块**重贴，而不只是上半部分。----
+  //
+  // 第五个：无障碍块整个是构造时写一次 `t()`，而 `sync()` 只重贴上半部分。
+  // 症状是在**这个面板内部**按「语言」——那颗按钮就在面板里——
+  // 于是同一个面板变成一半新语言一半旧语言。
+  asserts++;
+  {
+    const before = t('accessibility');
+    const p = build();
+    const title = (p as unknown as { a11yTitle: HTMLElement }).a11yTitle;
+    const why = (p as unknown as { a11yWhy: HTMLElement }).a11yWhy;
+    if (title.textContent !== before) {
+      probs.push(`无障碍标题初始应是「${before}」，实际「${title.textContent}」`);
+    }
+    // `sync()` 必须经过 `retranslateAccessibility()`。用一次真实切语言验：
+    setLang(isEnglish() ? 'zh' : 'en');
+    p.sync();
+    const nowEn = t('accessibility');
+    if (title.textContent !== nowEn) {
+      probs.push(
+        `切语言之后无障碍标题仍是「${title.textContent}」，应为「${nowEn}」——`
+        + '这一块只在构造时贴过一次',
+      );
+    }
+    if (why.textContent !== t('accessibility_why')) {
+      probs.push('切语言之后无障碍说明句没跟着换');
+    }
+    setLang(isEnglish() ? 'en' : 'zh');
+  }
+
+  return expect(
+    probs.length === 0,
+    probs.length
+      ? probs.join('；')
+      : '开关关得掉 · 三颗外部值都落到面板 · hide 卸捕获 · 滑块落盘那条存在 · 切语言整块重贴',
     asserts,
   );
 });

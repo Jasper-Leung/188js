@@ -41,7 +41,7 @@ Windows 点「更多信息 → 仍要运行」。自己打包见[部署](#部署
 npm install
 npm run data:extract     # 从 Godot 源项目机械提取数据表（已提交产物，可跳过）
 npm run assets:all       # 字体子集化 + GLB 压缩 + Tripo 建筑管线
-npm run dev              # http://127.0.0.1:5200
+npm run dev              # http://127.0.0.1:5210
 npm run verify           # 无头回归
 npm run build            # 产物在 dist/
 ```
@@ -117,7 +117,7 @@ npm run package:web        # 打一个可离线分发的网页包（release/）
 遇到函数调用或表达式就报错退出——宁可失败也不能猜。
 
 搬完之后中文模型文件名（`station_亭灯.glb`）也完整保留，
-文案表 520 条 key 中英两侧集合严格一致。
+文案表 521 条 key 中英两侧集合严格一致。
 
 ### 二、几何逐点对译
 
@@ -134,7 +134,7 @@ verify_mini_game   15 局每件 3 次 / 首次到访 = 自己那件 / 相邻两�
 verify_quality     三档单调 / 雾远 ≥ 植被半径 / 低档关阴影关草皮
 verify_mood        遮罩 0→0.34 永不满屏 / 有上行口 / 视野有下限
 verify_checkin     "已收过"与"不用再去"是两件事
-verify_i18n        520 条中英一致 / 文案里不许出现里程 / 驿数不带分母
+verify_i18n        521 条中英一致 / 文案里不许出现里程 / 驿数不带分母
 verify_terrain     800m / 128 格 / 6.25m 一格
 ```
 

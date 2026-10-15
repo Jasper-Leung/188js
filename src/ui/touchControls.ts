@@ -203,17 +203,30 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     //
     // 它放在摇杆与右屏之间，而不是挤进右上那一排：那一排是"高频小按钮"，
     // 而「摸一下」是**这一屏最主要的动词**，值得一颗独立的、常亮的按钮。
+    // 点击/点一下的边沿。**和湖边那颗按钮分开**，因为两个动作在相位上互斥
+    // （`touchRoadside()` 取最近的那一个），而它们各自有自己的键。
+    //
+    // ⚠ **要带上 `checkBtn` 同款的双发守卫**：`preventDefault()` 抑制的是
+    // 兼容鼠标事件，不抑制 `click`——一次点按会同时触发 `pointerdown` 和
+    // `click` 两条路，而那一个键会派发两次。在木牌旁，一次点按会
+    // 既读出木牌文字又直接起跑躲避挑战。
+    let actPointer = false;
     this.actBtn = button(t('touch_act_button'), {
       cls: 'g-touch-act',
       aria: t('key_interact'),
-      onClick: () => this.sendInteract(),
+      onClick: () => {
+        if (actPointer) {
+          actPointer = false;
+          return;
+        }
+        this.sendInteract();
+      },
     });
     this.actBtn.addEventListener('pointerdown', (e) => {
+      actPointer = true;
       e.preventDefault();
       this.sendInteract();
     });
-    // 点击/点一下的边沿。**和湖边那颗按钮分开**，因为两个动作在相位上互斥
-    // （`touchRoadside()` 取最近的那一个），而它们各自有自己的键。
     this.root.appendChild(this.actBtn);
     this.root.appendChild(top);
 
@@ -221,6 +234,31 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       wireKeyActivate(b, () => b.click());
     }
     o.parent.appendChild(this.root);
+
+    /**
+     * **窗口失焦时必须松手。**
+     *
+     * 键盘那条路有 `main.ts` 的 `window.addEventListener('blur', () => this.keys.clear())`
+     * 兜着；而这一侧原来**没有**，于是：按住抛竿键切出去再切回来，
+     * 那条鱼就在没人按着的时候自己收线；按着摇杆切出去再切回来，
+     * 车就在没人推的时候自己开。
+     *
+     * `pointerdown` 里 `setPointerCapture` 会让 `pointerup` 跨过窗口边界送达，
+     * 而**取消**（`pointercancel`）在切走的那一帧不一定到——
+     * 所以只靠那四个监听器不够，这里再兜一层。
+     */
+    const dropAll = () => {
+      this.state.moveX = 0;
+      this.state.moveY = 0;
+      this.state.checkInPressed = false;
+      this.state.holdPressed = false;
+      this.pointerId = -1;
+      this.paintKnob();
+    };
+    window.addEventListener('blur', dropAll);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) dropAll();
+    });
   }
 
   /**

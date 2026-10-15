@@ -278,7 +278,8 @@
     "key_mute": "静音",
     "key_pause": "暂停 / 返回",
     "touch_cast_button": "抛竿 / 收线",
-    "touch_act_button": "摸一下"
+    "touch_act_button": "摸一下",
+    "key_reserved": "「%s」不能绑到这个键上——那个键有别的固定用途（道具栏 / 性能面板 / 确认）。"
   },
   "en": {
     "quality_hint_low": "The lowest tier: shadows and ground detail both off, trees pulled in to 95m and shrubs to 40m, and the fog pulled closer — vegetation range applies on your next ride",
@@ -581,6 +582,7 @@
     "key_mute": "Mute",
     "key_pause": "Pause / back",
     "touch_cast_button": "Cast / reel",
-    "touch_act_button": "Reach out"
+    "touch_act_button": "Reach out",
+    "key_reserved": "“%s” cannot be bound here — that key has a fixed use (item bar, perf panel, confirm)."
   }
 }

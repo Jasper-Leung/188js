@@ -63,8 +63,42 @@ export const DEFAULT_KEYMAP: Record<GameAction, string> = {
  */
 let current: Record<GameAction, string> = { ...DEFAULT_KEYMAP };
 
+/**
+ * 把设置里的键位灌进来。
+ *
+ * ## 为什么不能直接 `{...DEFAULT_KEYMAP, ...raw}`
+ *
+ * `settings.keymap` 来自 `localStorage`，那是个**玩家可以手改的文件**。
+ * 一份手改过的设置可以写出 `{"pause": "KeyW"}`，而那样「前进」和「暂停」
+ * 就共用了同一把键——`actionOf()` 返回**第一个**匹配的，于是「前进」
+ * 从此按不动，而界面上没有任何一句话说为什么。
+ *
+ * 所以这里**逐项校验**，而不只是浅合并：
+ * · 不是字符串的丢掉；
+ * · 是保留码（`F8` / `Digit1` / …）的丢掉；
+ * · 和前面某个动作撞了的丢掉（保留默认，不报——
+ *   反正玩家下一步会去设置里看到它）。
+ *
+ * 每次碰撞都**记进 `console.warn`**：不拦玩家自己玩的自由，
+ * 但要让排障的人一眼能看出是哪一份设置出了问题。
+ */
 export function setKeymap(next: Partial<Record<GameAction, string>>): void {
-  current = { ...DEFAULT_KEYMAP, ...next };
+  const out: Record<GameAction, string> = { ...DEFAULT_KEYMAP };
+  for (const a of ACTIONS) {
+    const v = next[a];
+    if (typeof v !== 'string' || v.length === 0) continue;
+    if (RESERVED_CODES.has(v)) {
+      console.warn(`[gift188] 键位「${a}」不能绑到保留键 ${v}，已跳过`);
+      continue;
+    }
+    const clash = ACTIONS.find((other) => other !== a && out[other] === v);
+    if (clash) {
+      console.warn(`[gift188] 键位「${a}」与「${clash}」撞在同一把键 ${v} 上，已退回默认 ${DEFAULT_KEYMAP[a]}`);
+      continue;
+    }
+    out[a] = v;
+  }
+  current = out;
 }
 
 export function getKeymap(): Record<GameAction, string> {
@@ -73,7 +107,8 @@ export function getKeymap(): Record<GameAction, string> {
 
 /** 动作 → 物理键。**合成按键的那几方一律走这里。** */
 export function codeOf(action: GameAction): string {
-  return current[action] ?? DEFAULT_KEYMAP[action];
+  const v = current[action];
+  return typeof v === 'string' && v.length > 0 ? v : DEFAULT_KEYMAP[action];
 }
 
 /**
@@ -91,12 +126,33 @@ export function actionOf(code: string): GameAction | null {
 }
 
 /**
+ * **不给重映射的固定功能键。**
+ *
+ * 它们原来靠「不在表里」来躲过重映射，可那条路挡不住**反向**的坑：
+ * 玩家把「暂停」绑到 `F8`，而 `main.ts` 的 switch 是先问动作表再问物理码
+ * （`this.actionOf(e.code) ?? e.code`），于是 `F8` 被认成「暂停」，
+ * 而性能面板那颗键**从此按不动**——没有任何提示，按键那一栏写的是「成功」。
+ *
+ * 所以这些码不能作为**目标**出现。它们在主机的 switch 里按物理码直接匹配，
+ * 而那里的顺序是「动作表优先」——一个动作占了它，物理码那一支就永远够不着了。
+ */
+const RESERVED_CODES: ReadonlySet<string> = new Set([
+  // 道具栏 1~4
+  'Digit1', 'Digit2', 'Digit3', 'Digit4',
+  // 调试面板
+  'F8', 'F9', 'F10', 'KeyP', 'KeyB',
+  // 硬编码的「确认」并联键
+  'Enter', 'NumpadEnter',
+]);
+
+/**
  * 写入一个新键位。返回 `null` 表示成功，否则返回**冲突说明**。
  *
  * 调用方（设置面板）负责把那句话摆到界面上——它要说得比这里详细，
  * 因为它知道玩家刚按了哪一颗键。
  */
 export function tryBind(action: GameAction, code: string): string | null {
+  if (RESERVED_CODES.has(code)) return 'reserved';
   const clash = ACTIONS.find((a) => a !== action && current[a] === code);
   if (clash) return clash;
   current = { ...current, [action]: code };
@@ -128,6 +184,9 @@ const CODE_LABEL: Record<string, string> = {
 
 /** `KeyW` → `W`，`Digit1` → `1`，`Space` → `Space`。 */
 export function codeLabel(code: string): string {
+  // 手改过的 `settings.keymap` 可以把非字符串灌进来，
+  // 而这里在 `new UI()` 里跑——一处 `TypeError` 就让整个游戏起不来。
+  if (typeof code !== 'string') return '?';
   const mapped = CODE_LABEL[code];
   if (mapped) return mapped;
   if (code.startsWith('Key')) return code.slice(3);

@@ -115,6 +115,21 @@ export interface UIHooks {
     reduceMotion?: boolean;
     holdToToggle?: boolean;
   }): void;
+  /**
+   * 音量**提交**。与上面那个的区别只有一条：**要不要落盘**。
+   *
+   * 滑块的 `input` 事件在拖动过程中每帧都发（实测 60Hz），
+   * 在那上面写 `localStorage` 会在弱机上造成可测量的卡顿——
+   * 而一次 `saveSettings()` 是整份 `SettingsData` 的序列化。
+   * `change` 事件在松手时发一次，所以音量走它。
+   *
+   * ⚠ **这条钩子曾经只存在于一条注释里**：注释写着"音量由 `onVolumeCommit`
+   * 在松手时落一次"，而 `onVolumeCommit` 全仓库没有实现，于是
+   * `settings.volBgm` 从不被赋值，`saveSettings()` 每次写回旧值——
+   * **玩家调完音量，关掉标签页就丢**。
+   * 注释比代码完整比没有注释更糟：它让读代码的人以为这一段已经做完了。
+   */
+  onVolumeCommit(volBgm: number, volSfx: number): void;
   onKeymapChange(keymap: Record<string, string>): void;
   onLangToggle(): void;
   onCheckIn(): void;
@@ -873,16 +888,6 @@ readonly touch: {
     this.lakeside.setVrAvailable(available);
   }
 
-  /**
-   * 湖边出口那一行是不是「点这里」而不是「按 Esc」。
-   *
-   * **必须跟着 `applyTouchVisibility()` 的同一个判据走**——两条各判一次的话，
-   * 就会出现"控件藏了、按钮却还写着按 Esc"，那台设备上等于没有出口。
-   */
-  setLakesideTouchMode(on: boolean): void {
-    this.lakeside.setTouchMode(on);
-  }
-
   // ---------------------------------------------------------------- 同步
 
   /**
@@ -1099,6 +1104,9 @@ private applyTouchVisibility(): void {
     // 触屏玩家进得来出不去、连站着都做不到——那一屏对他们等于不存在。
     if (this.lakesideOn) {
       this.touchCtl.setMode(this.touchMode);
+      // 出口那一行的文案也要跟着触屏态走：那一刻它写的是
+      // 「按 Esc 回路上」，而这台设备上**没有 Esc 可按**。
+      this.lakeside.setTouchMode(this.touchMode);
       return;
     }
     this.touchCtl.setMode(this.touchMode && this.worldVisible);

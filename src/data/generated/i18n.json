@@ -519,7 +519,8 @@
     "key_confirm": "确认 / 打卡",
     "key_interact": "摸一下（F 那件事）",
     "touch_cast_button": "抛竿 / 收线",
-    "touch_act_button": "摸一下"
+    "touch_act_button": "摸一下",
+    "key_reserved": "「%s」不能绑到这个键上——那个键有别的固定用途（道具栏 / 性能面板 / 确认）。"
   },
   "en": {
     "game_title": "Gift No.188",
@@ -1041,6 +1042,7 @@
     "key_confirm": "Confirm / check in",
     "key_interact": "Reach out (the F thing)",
     "touch_cast_button": "Cast / reel",
-    "touch_act_button": "Reach out"
+    "touch_act_button": "Reach out",
+    "key_reserved": "“%s” cannot be bound here — that key has a fixed use (item bar, perf panel, confirm)."
   }
 }

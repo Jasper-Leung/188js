@@ -246,6 +246,25 @@ card.appendChild(rule());
   private motionBtn!: HTMLButtonElement;
   private holdBtn!: HTMLButtonElement;
   private keyRowBtns = new Map<GameAction, HTMLButtonElement>();
+  /**
+   * 无障碍块里**每一行要贴的字**，留住元素好让切语言时重贴。
+   *
+   * ## 为什么必须留
+   *
+   * 这一整块原来全部是 `el(..., t('...'))` 写一次就不管了，而 `sync()`
+   * 只重贴上半部分。症状是**在暂停面板内部按「语言」**——
+   * 那颗按钮就在这个面板里，而面板变成了一半新一半旧：
+   * 顶栏那半已经切了、无障碍这整块还是旧语言。
+   *
+   * 之所以能发生：这一块是在本轮新加的，而**上一轮加过的东西没人顺手
+   * 接进 `sync()`**。新增一个要贴字的控件，就必须同时登记到这里。
+   */
+private a11yTitle!: HTMLElement;
+  private a11yWhy!: HTMLElement;
+  private keymapTitle!: HTMLElement;
+  private volLabels: { el: HTMLElement; key: string }[] = [];
+  private swLabels: { el: HTMLElement; key: string }[] = [];
+  private keyRowLabels = new Map<GameAction, HTMLElement>();
   private capturing: GameAction | null = null;
   /** 改键冲突那句话。**留在原地**而不是飘走。 */
   private keyConflictEl!: HTMLElement;
@@ -271,7 +290,8 @@ card.appendChild(rule());
    */
   private buildAccessibility(): HTMLDivElement {
     const box = el('div', 'g-group g-a11y');
-    box.appendChild(el('div', 'g-group-h', t('accessibility')));
+    this.a11yTitle = el('div', 'g-group-h', t('accessibility'));
+    box.appendChild(this.a11yTitle);
 
     // ---- 音量 ----
     const volRow = (labelKey: string, which: 'bgm' | 'sfx') => {
@@ -286,14 +306,24 @@ card.appendChild(rule());
       // 滑块必须有关联标签，否则读屏只会念出「滑块」。
       input.setAttribute('aria-label', t(labelKey));
       const out = el('span', 'g-vol-v', '100%');
+      // `input` = 拖动过程中（每帧）。只推 audio，不落盘。
       input.addEventListener('input', () => {
         const v = Number(input.value) / 100;
         setText(out, `${Math.round(v * 100)}%`);
         this.hooks.onAccessibilityChange({ [which === 'bgm' ? 'volBgm' : 'volSfx']: v });
       });
+      // `change` = 松手时一次。**落盘只走这一条**——
+      // 而它原来根本不存在，于是音量每次重开都回到 100%。
+      input.addEventListener('change', () => {
+        this.hooks.onVolumeCommit(
+          Number(this.volBgm.value) / 100,
+          Number(this.volSfx.value) / 100,
+        );
+      });
       wrap.appendChild(lab);
       wrap.appendChild(input);
       wrap.appendChild(out);
+      this.volLabels.push({ el: lab, key: labelKey });
       return { wrap, input, out };
     };
     const bgm = volRow('vol_bgm', 'bgm');
@@ -334,19 +364,28 @@ card.appendChild(rule());
     this.motionBtn = mo.b;
     this.holdBtn = ho.b;
 
-    for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motionBtn], ['hold_to_toggle', this.holdBtn]] as const) {
+for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motionBtn], ['hold_to_toggle', this.holdBtn]] as const) {
       const head = el('div', 'g-group-h g-group-h-sm');
-      head.appendChild(el('span', null, t(key)));
+      // **留住这个 span。** 切语言要重贴它，而重贴需要元素引用——
+      // 原来写成 `head.firstChild` 去捞，而 `firstChild` 在无头桩里是
+      // undefined，于是构造期就往 WeakMap 里塞了一个 undefined 当键。
+      const lab = el('span', null, t(key));
+      head.appendChild(lab);
+      // 切语言时整块重贴——见 `retranslateAccessibility()`。
+      this.swLabels.push({ el: lab, key });
       head.appendChild(b);
       box.appendChild(head);
     }
-    box.appendChild(note(t('accessibility_why'), 'g-note-dim'));
+    this.a11yWhy = note(t('accessibility_why'), 'g-note-dim');
+    box.appendChild(this.a11yWhy);
 
     // ---- 改键 ----
     const kr = el('div', 'g-keys');
     for (const a of ACTIONS) {
       const r = el('div', 'g-keyrow');
-      r.appendChild(el('span', 'g-keyrow-l', t(`key_${a}`)));
+      const lab = el('span', 'g-keyrow-l', t(`key_${a}`));
+      this.keyRowLabels.set(a, lab);
+      r.appendChild(lab);
       const b = button(codeLabel(codeOf(a)), {
         cls: 'g-btn-toggle g-keycap',
         onClick: () => this.beginCapture(a),
@@ -355,7 +394,8 @@ card.appendChild(rule());
       r.appendChild(b);
       kr.appendChild(r);
     }
-    box.appendChild(el('div', 'g-group-h g-group-h-sm', t('keymap_title')));
+    this.keymapTitle = el('div', 'g-group-h g-group-h-sm', t('keymap_title'));
+    box.appendChild(this.keymapTitle);
     box.appendChild(kr);
     // 冲突那句话留在原地而不是飘走——见 `captureKeys` 里那一句。
     this.keyConflictEl = note('', 'g-note-why');
@@ -378,7 +418,13 @@ card.appendChild(rule());
         return;
       }
       const clash = tryBind(act, e.code);
-      if (clash) {
+      if (clash === 'reserved') {
+        // 数字键 / F8~F10 / Enter 这些不做重映射——它们是固定功能键。
+        // 而玩家此刻盯着那颗键帽，所以这句话必须**留在原地**说清楚，
+        // 而不是弹一个会飘走的 toast。
+        setText(this.keyConflictEl, t('key_reserved', { action: t(`key_${act}`) }));
+        setShown(this.keyConflictEl, true);
+      } else if (clash) {
         // 冲突要说出来。这里**不用 toast**：toast 会飘走，而这一刻玩家
         // 的注意力全在那颗键帽上——那句话得**留在原地**，
         // 旁边就是刚按下的那一颗。
@@ -567,6 +613,12 @@ card.appendChild(rule());
   hide(): void {
     setShown(this.root, false);
     setShown(this.helpBox, false);
+    // **关掉面板必须卸掉捕获态。** 捕获监听器在 `window` 上、`capture` 阶段
+    // 并且 `stopPropagation()`——不清的话，面板关掉之后玩家按的**下一颗键**
+    // 会被吞掉并直接写进键位表。症状是"点了继续之后按 W 车不动，
+    // 而静音那一栏的字变成了 W"。
+    this.capturing = null;
+    this.syncKeyRow();
   }
 
   /** 宿主改了画质 / 自适应之后回写。 */
@@ -585,8 +637,7 @@ card.appendChild(rule());
   sync(): void {
     for (let i = 0; i < this.tierBtns.length; i++) {
       setText(this.tierBtns[i], t(TIER_KEYS[i]));
-      setFlag(this.tierBtns[i], 'is-on', (i as Tier) === this.tier);
-    }
+      setFlag(this.tierBtns[i], 'is-on', (i as Tier) === this.tier);    }
     this.paintSummary();
     this.paintTouch();
 
@@ -611,9 +662,51 @@ card.appendChild(rule());
     setText(this.finishBtn, t('finish_run'));
     setText(this.finishHint, t('finish_run_hint'));
     setText(this.helpBody, t('help_overlay'));
+    this.retranslateAccessibility();
+  }
+
+  /**
+   * 切语言时把无障碍这一整块重新贴一遍。
+   *
+   * **原来只翻上面那一半**：这块是新加的，而每个新控件都"写了一次 `t()`
+   * 就不管"——于是同一个面板在切语言之后变成一半新一半旧，
+   * 而「语言」那颗按钮就在这个面板里。
+   *
+   * 只有两处需要登记：要贴字的元素（`volLabels` / `swLabels` / `keyRowLabels` /
+   * 标题与说明），以及**捕获态的那颗键帽**（它此刻写着"按下新键…"，
+   * 而那句话也要跟着切）。
+   */
+  private retranslateAccessibility(): void {
+    // `setText` 内部用 `WeakMap<Node, string>` 做「没变就不写」的缓存，
+    // 而 WeakMap 的键**不能是 undefined**。所以这里统一走一个守卫：
+    // 万一某个字段还没建好（构造顺序被改过），跳过它而不是把整块炸掉。
+    const put = (node: HTMLElement | undefined, key: string) => {
+      if (node) setText(node, t(key));
+    };
+    put(this.a11yTitle, 'accessibility');
+    put(this.a11yWhy, 'accessibility_why');
+    put(this.keymapTitle, 'keymap_title');
+    for (const { el: e, key } of this.volLabels) {
+      setText(e, t(key));
+      // 滑块的 aria-label 也要跟着切——读屏只念它。
+      // 不用 `instanceof HTMLInputElement`：在无头桩里那个类不存在，
+      // 用 `tagName` 判稳一些（`el()` 创出来的是 `<label>`，而下一格是 `<input>`）。
+      const input = e.nextElementSibling as HTMLElement | null;
+      if (input && input.tagName === 'INPUT') input.setAttribute('aria-label', t(key));
+    }
+    for (const { el: e, key } of this.swLabels) setText(e, t(key));
+    for (const [a, lab] of this.keyRowLabels) setText(lab, t(`key_${a}`));
+    // 开关上的「开 / 关」是状态而不是语言——由 `syncAccessibility()` 负责。
+    this.syncAccessibility();
+    this.syncKeyRow();
   }
 
   dispose(): void {
+    // 捕获监听器挂在 `window` 上而不是这个 root，所以 `root.remove()` 不会带走它。
+    // 留着的后果是：下一次再有按键时它会读 `this.capturing`——面板已经没了，
+    // 但那个引用还在，而它被 `stopPropagation()` 吞掉的那颗键会被白白吞掉。
+    window.removeEventListener('keydown', this.captureKeys, true);
+    this.capturing = null;
     this.root.remove();
   }
 }
