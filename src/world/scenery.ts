@@ -75,6 +75,9 @@ import type { Terrain } from './terrain';
 
 export type SceneryKind = 'bamboo' | 'mod_tower' | 'mod_house';
 
+/** 东南住区的规划网格（米），见 `Scenery.planSettlement()` */
+export const PLAN = { HOUSE_GAP: 27, ROW_GAP: 40, TOWER_GAP: 40, HOUSE_SCALE: 12 } as const;
+
 /** 一个格子多少米。64m 是折中：小了 draw call 变多，大了剔除不干脆。 */
 const CELL = 64;
 /** 水位之上至少多高。 */
@@ -186,7 +189,7 @@ const SPEC: Record<SceneryKind, {
   // 离路上限从 200 收到 110 与塔楼同一条线，是同一个理由（低档雾 175m）。
   // `clusterR` 同为 55：整片聚落 107m 见方，站在路边一眼能看全，
   // 不用骑过半圈才发现"哦，这儿是一堆房子"。
-  mod_house: { quad: [1, 1], max: 4, step: 10, scale: [11, 16], road: [40, 110], pick: 'cluster', spacing: 22, gap: 40, clusterR: 55, radius: 240 },
+  mod_house: { quad: [1, 1], max: 4, step: 10, scale: [11, 16], road: [34, 110], pick: 'cluster', spacing: 22, gap: 40, clusterR: 55, radius: 240 },
 };
 
 /** 埋进地里的深度（米）。竹子尤其需要——裁完的底面是一个平面，不埋会露出来。 */
@@ -258,9 +261,18 @@ export class Scenery {
      * `gap: 0` 的（竹）不进这份名单，见 `SPEC.gap` 的注释。
      */
     const placed: { kind: SceneryKind; x: number; z: number }[] = [];
+    const plan = this.planSettlement();
 
     for (const kind of Object.keys(SPEC) as SceneryKind[]) {
       const sp = SPEC[kind];
+      if (plan && kind !== 'bamboo') {
+        for (const c of plan[kind]) {
+          this.stats[kind]++;
+          placed.push({ kind, x: c.x, z: c.z });
+          this.cellAt(kind, c.x, c.z).items.push(c);
+        }
+        continue;
+      }
       const [sx, sz] = sp.quad;
 
       // 世界包围盒（中心线扫一遍就够，植被全在这条线附近）
@@ -377,6 +389,99 @@ export class Scenery {
         });
       }
     }
+  }
+
+  /**
+   * 东南住区的**规划**布局：沿一段路排两列，前低后高，全部朝向同一个方向。
+   *
+   * 之前的 `cluster` 解决了「散」，没解决「乱」：每栋各自朝向最近的路点、
+   * 各自叠一份随机偏转，三座塔楼转了 44° / −41° / 67°，四座圆屋挤成一团、
+   * 彼此几乎相切——从路上看是「一堆楼」，不是「一个住区」。
+   *
+   * 现在在东南象限里按 5m × 15° 搜一个固定网格（`PLAN`）的落位与朝向：
+   *   · 前排 4 座圆屋，间距 `HOUSE_GAP`，离路大致相等（与路平行）；
+   *   · 后排 3 座塔楼，比前排远 `ROW_GAP`，间距 `TOWER_GAP`，中间那座最高。
+   * 每个落点照样过离路区间 / 水位 / 坡度 / 驿站 / 象限这几道闸；
+   * 合格的里取「地形高差最小 + 前排最平行 + 离路最近」的那一个。
+   * 东南角是夹在两条支路之间的一条窄楔，圆屋的离路下限因此放到 34m
+   * （圆屋直径约 17m，34m 外仍在行道树树冠之外）。
+   * 找不到就返回 null，退回原来的 `cluster` 摆法——那仍然是合格的布局。
+   */
+  private planSettlement(): Record<'mod_tower' | 'mod_house', Placement[]> | null {
+    const t = this.terrain;
+    let maxX = -Infinity, maxZ = -Infinity;
+    for (const p of CENTERLINE) { maxX = Math.max(maxX, p.x); maxZ = Math.max(maxZ, p.z); }
+    // 离路距离先烘成 5m 一格的表：逐帧去问 `distToRoad` 要几亿次运算，开局等不起。
+    // 表是近似值，所以搜索只用来排序，选中之后按顺序用精确值复核，第一个过的才算。
+    const G = 5;
+    const x0 = 8, z0 = 8;
+    const nx = Math.ceil((maxX + 60 - x0) / G) + 1;
+    const nz = Math.ceil((maxZ + 60 - z0) / G) + 1;
+    const rdGrid = new Float32Array(nx * nz);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) rdGrid[j * nx + i] = distToRoad(x0 + i * G, z0 + j * G);
+    const rdAt = (x: number, z: number) => {
+      const gx = (x - x0) / G, gz = (z - z0) / G;
+      const i = Math.floor(gx), j = Math.floor(gz);
+      if (i < 0 || j < 0 || i >= nx - 1 || j >= nz - 1) return Infinity;
+      const fx = gx - i, fz = gz - j;
+      const r0 = rdGrid[j * nx + i] * (1 - fx) + rdGrid[j * nx + i + 1] * fx;
+      const r1 = rdGrid[(j + 1) * nx + i] * (1 - fx) + rdGrid[(j + 1) * nx + i + 1] * fx;
+      return r0 * (1 - fz) + r1 * fz;
+    };
+    type Slot = { kind: 'mod_tower' | 'mod_house'; x: number; z: number; y: number; u: number };
+    const layout = (ax: number, az: number, th: number, margin: number, rd: (x: number, z: number) => number) => {
+      const tx = Math.cos(th), tz = Math.sin(th);
+      const ox = -tz, oz = tx;
+      const slots: Slot[] = [];
+      const rows: ['mod_tower' | 'mod_house', number, number, number, number][] = [
+        ['mod_house', 0, PLAN.HOUSE_GAP, SPEC.mod_house.max, SPEC.mod_house.road[0]],
+        ['mod_tower', PLAN.ROW_GAP, PLAN.TOWER_GAP, SPEC.mod_tower.max, SPEC.mod_tower.road[0]],
+      ];
+      let houseRd = 0, towerRd = 0, hLo = Infinity, hHi = -Infinity, fLo = Infinity, fHi = -Infinity;
+      for (const [kind, v, gap, count, lo] of rows) {
+        for (let k = 0; k < count; k++) {
+          const u = (k - (count - 1) / 2) * gap;
+          const x = ax + tx * u + ox * v;
+          const z = az + tz * u + oz * v;
+          const d = rd(x, z);
+          if (x < 8 || z < 8 || d < lo + margin || d > SPEC[kind].road[1] - margin) return null;
+          const y = t.getHeightAt(x, z);
+          if (y < WATER_LEVEL + MIN_DRY || slopeAt(t, x, z, 6) > MAX_SLOPE || nearStation(x, z, 12)) return null;
+          if (kind === 'mod_house') { houseRd += d / count; fLo = Math.min(fLo, d); fHi = Math.max(fHi, d); }
+          else towerRd += d / count;
+          hLo = Math.min(hLo, y);
+          hHi = Math.max(hHi, y);
+          slots.push({ kind, x, z, y, u });
+        }
+      }
+      // 塔楼必须真的在后排；前排要与路大致平行（离路距离差小）
+      if (towerRd < houseRd + 15) return null;
+      return { slots, rot: Math.atan2(oz, -ox), score: hHi - hLo + (fHi - fLo) * 0.1 + (houseRd - 30) * 0.02 };
+    };
+    const found: { ax: number; az: number; th: number; score: number }[] = [];
+    for (let az = 10; az <= maxZ + 40; az += 5) {
+      for (let ax = 10; ax <= maxX + 40; ax += 5) {
+        for (let k = 0; k < 24; k++) {
+          const th = (k / 24) * Math.PI * 2;
+          const l = layout(ax, az, th, 0, rdAt);
+          if (l) found.push({ ax, az, th, score: l.score });
+        }
+      }
+    }
+    found.sort((p, q) => p.score - q.score || p.ax - q.ax || p.az - q.az || p.th - q.th);
+    for (const f of found) {
+      const l = layout(f.ax, f.az, f.th, 0, distToRoad);
+      if (!l) continue;
+      const out: Record<'mod_tower' | 'mod_house', Placement[]> = { mod_tower: [], mod_house: [] };
+      for (const sl of l.slots) {
+        const [s0, s1] = SPEC[sl.kind].scale;
+        // 塔楼中间最高、两侧次之；圆屋统一取中值——一排同样大的房子才读得出「规划过」
+        const scale = sl.kind === 'mod_house' ? PLAN.HOUSE_SCALE : Math.abs(sl.u) < 1e-6 ? s1 : (s0 + s1) / 2;
+        out[sl.kind].push({ x: sl.x, y: sl.y, z: sl.z, rotY: l.rot, scale });
+      }
+      return out;
+    }
+    return null;
   }
 
   /** 让建筑的正面大致朝着路。`jitter` 是随机偏转，免得几栋排成一条直线。 */
@@ -505,15 +610,15 @@ export class Scenery {
  * 返回**原始落点**而不是网格，因为回归要验的是"位置对不对"，
  * 网格只是绘制实现——`attachMeshes` 没调（无头环境里没有 GLB）时它照样成立。
  */
-export function sceneryPlacements(sc: Scenery): Record<SceneryKind, { x: number; y: number; z: number; scale: number }[]> {
+export function sceneryPlacements(sc: Scenery): Record<SceneryKind, { x: number; y: number; z: number; scale: number; rotY: number }[]> {
   const out = { bamboo: [], mod_tower: [], mod_house: [] } as Record<
     SceneryKind,
-    { x: number; y: number; z: number; scale: number }[]
+    { x: number; y: number; z: number; scale: number; rotY: number }[]
   >;
   const cells = (sc as unknown as { cells: Cell[] }).cells;
   for (const c of cells) {
     for (const it of c.items) {
-      out[c.kind].push({ x: it.x, y: it.y, z: it.z, scale: it.scale });
+      out[c.kind].push({ x: it.x, y: it.y, z: it.z, scale: it.scale, rotY: it.rotY });
     }
   }
   return out;

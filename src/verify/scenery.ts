@@ -557,7 +557,35 @@ export function registerSceneryChecks(check: CheckFn): void {
     asserts++;
     if (bamInSE > 0) probs.push(`${bamInSE} 丛竹落到了东南`);
 
-    const sum = kinds.map((k) => `${k}×${all[k].length}`).join(' ');
+    // 8~11. 东南住区是**规划**过的（`Scenery.planSettlement()`），不是一堆楼：
+    //     同一个朝向、每一排在一条直线上、塔楼在圆屋后排、彼此不挤。
+    const blds = [...all.mod_tower, ...all.mod_house];
+    asserts++;
+    const rot0 = blds[0]?.rotY ?? 0;
+    const turned = blds.filter((p) => Math.abs(Math.atan2(Math.sin(p.rotY - rot0), Math.cos(p.rotY - rot0))) > 1e-6);
+    if (turned.length) probs.push(`东南住区有 ${turned.length} 栋朝向与其余不一致`);
+    asserts++;
+    for (const row of [all.mod_tower, all.mod_house]) {
+      if (row.length < 3) continue;
+      const a = row[0];
+      const b = row[row.length - 1];
+      const L = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      const off = Math.max(...row.map((p) => Math.abs((p.x - a.x) * (b.z - a.z) - (p.z - a.z) * (b.x - a.x)) / L));
+      if (off > 0.5) probs.push(`东南住区有一排没排成直线（偏出 ${off.toFixed(2)}m）`);
+    }
+    asserts++;
+    const mean = (ps: { x: number; z: number }[]) => ps.reduce((m, p) => m + distToRoad(p.x, p.z), 0) / Math.max(ps.length, 1);
+    if (!(mean(all.mod_tower) > mean(all.mod_house) + 15)) {
+      probs.push(`塔楼平均离路 ${mean(all.mod_tower).toFixed(0)}m，圆屋 ${mean(all.mod_house).toFixed(0)}m——塔楼不在后排`);
+    }
+    asserts++;
+    let tight = Infinity;
+    for (let i = 0; i < blds.length; i++) {
+      for (let j = i + 1; j < blds.length; j++) tight = Math.min(tight, Math.hypot(blds[i].x - blds[j].x, blds[i].z - blds[j].z));
+    }
+    if (tight < scenerySpec('mod_house').spacing) probs.push(`东南住区最近两栋只隔 ${tight.toFixed(1)}m`);
+
+    const sum = kinds.map((k) => `${k}×${all[k].length}`).join(' ') + ` · 住区最小间距 ${tight.toFixed(0)}m`;
     return expect(probs.length === 0, probs.length ? probs.join('；') : sum, asserts);
   });
 

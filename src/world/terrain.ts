@@ -27,6 +27,7 @@ import { TERRAIN_PATCH, patchStandard } from '../shaders/world';
 import { noise2d } from '../core/noise';
 import type { QualityPreset } from '../core/settings';
 import { clamp } from '../core/math';
+import { CENTERLINE } from '../data/route';
 
 const SIZE = TERRAIN.SIZE;
 const RES = TERRAIN.RES;
@@ -114,6 +115,7 @@ export class Terrain {
     const normals = new Float32Array(vertCount * 3);
     const uvs = new Float32Array(vertCount * 2);
     const colors = new Float32Array(vertCount * 3);
+    const verge = vergeWeights();
 
     for (let z = 0; z < ROW; z++) {
       for (let x = 0; x < ROW; x++) {
@@ -135,10 +137,7 @@ export class Terrain {
         // 而且是逐顶点白噪声，在 6.25m 一格的地形上读起来是雪花而不是斑驳。
         // noise2d 是连续场且确定，同一个世界坐标永远给同一个值。
         // 它输出 [-1,1]，要先搬到 [0,1] 再映射到 0.82~1.0。
-        const v = 0.82 + (noise2d(wx * 0.09, wz * 0.09) * 0.5 + 0.5) * 0.18;
-        colors[i * 3] = v * 1.02;
-        colors[i * 3 + 1] = v;
-        colors[i * 3 + 2] = v * 0.94;
+        groundTint(wx, wz, verge[i], colors, i);
       }
     }
 
@@ -313,4 +312,60 @@ export function terrainNormalAt(wx: number, wz: number, out: Vector3, e = 1.2): 
   const hD = heightAt(wx, wz - e);
   const hU = heightAt(wx, wz + e);
   return out.set(hL - hR, 2 * e, hD - hU).normalize();
+}
+
+/**
+ * 路边那一圈更绿的草：完全生效到离中心线 `VERGE_FULL` 米，`VERGE_FADE` 米处淡完。
+ *
+ * 全图的草被 shader 去饱和成「水墨」的灰青（见 TERRAIN_PATCH），
+ * 于是路两侧和远山是同一种灰——骑在路上读不出「两边是草」。
+ * 只在路边把顶点色往饱满的绿推：远景的水墨不变，近处的路才像被草夹着。
+ * 顶点色是乘在去饱和之后的，所以这一层的色相不会被那 62% 吃掉。
+ */
+export const VERGE = { FULL: 10, FADE: 30 } as const;
+
+/** 顶点色：明暗扰动（0.82~1.0）× 路边的绿。护坡网格也用它，与地形无缝 */
+export function groundTint(wx: number, wz: number, verge: number, out: Float32Array, i: number): void {
+  // 用 noise2d 而不是 randf()：连续、确定，同一个世界坐标永远给同一个值
+  const v = 0.82 + (noise2d(wx * 0.09, wz * 0.09) * 0.5 + 0.5) * 0.18;
+  out[i * 3] = v * 1.02 * (1 - 0.2 * verge);
+  out[i * 3 + 1] = v * (1 + 0.1 * verge);
+  out[i * 3 + 2] = v * 0.94 * (1 - 0.3 * verge);
+}
+
+/**
+ * 每个地形顶点的「路边权重」（1 = 紧贴路，0 = 远离）。
+ * 按线段盖章而不是逐顶点扫全线：960 段 × 每段十几个格点，而不是 1.6 万 × 960。
+ */
+function vergeWeights(): Float32Array {
+  const dist = new Float32Array(ROW * ROW).fill(Infinity);
+  const reach = VERGE.FADE;
+  const toGrid = (w: number) => (w + SIZE * 0.5) / CELL;
+  for (let k = 0; k < CENTERLINE.length - 1; k++) {
+    const a = CENTERLINE[k];
+    const b = CENTERLINE[k + 1];
+    const x0 = clamp(Math.floor(toGrid(Math.min(a.x, b.x) - reach)), 0, RES);
+    const x1 = clamp(Math.ceil(toGrid(Math.max(a.x, b.x) + reach)), 0, RES);
+    const z0 = clamp(Math.floor(toGrid(Math.min(a.z, b.z) - reach)), 0, RES);
+    const z1 = clamp(Math.ceil(toGrid(Math.max(a.z, b.z) + reach)), 0, RES);
+    const abx = b.x - a.x;
+    const abz = b.z - a.z;
+    const l2 = Math.max(abx * abx + abz * abz, 1e-9);
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const wx = (x / RES) * SIZE - SIZE * 0.5;
+        const wz = (z / RES) * SIZE - SIZE * 0.5;
+        const t = clamp(((wx - a.x) * abx + (wz - a.z) * abz) / l2, 0, 1);
+        const d = Math.hypot(wx - a.x - abx * t, wz - a.z - abz * t);
+        const i = z * ROW + x;
+        if (d < dist[i]) dist[i] = d;
+      }
+    }
+  }
+  const w = new Float32Array(ROW * ROW);
+  for (let i = 0; i < w.length; i++) {
+    const t = clamp((dist[i] - VERGE.FULL) / (VERGE.FADE - VERGE.FULL), 0, 1);
+    w[i] = 1 - t * t * (3 - 2 * t);
+  }
+  return w;
 }

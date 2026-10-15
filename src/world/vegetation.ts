@@ -181,6 +181,10 @@ function insideStationClear(x: number, z: number): boolean {
  */
 const BUSH_BURY = 0.25;
 const BUSH_SPACING = 11;
+/** 路边灌丛（见 `buildPlacements` 里那一层）：株距、离中心线的区间、硬下限 */
+const VERGE_SPACING = 4.5;
+const VERGE_OFFSET = [7.5, 13] as const;
+const VERGE_ROAD_CLEAR = 7;
 
 /**
  * 把模型抬到地面上所需的垂直偏移。
@@ -353,8 +357,12 @@ export class Vegetation {
   /** 统计，给 FPS/调试面板 */
   stats = { chunksVisible: 0, trees: 0, bushes: 0, drawCalls: 0 };
 
-  constructor(preset: QualityPreset, terrain: Terrain) {
+  /** 落地高度。默认是地形；世界里传 `road.surfaceHeightAt`，路边灌丛才站在护坡上 */
+  private readonly ground: (x: number, z: number) => number;
+
+  constructor(preset: QualityPreset, terrain: Terrain, ground?: (x: number, z: number) => number) {
     this.preset = preset;
+    this.ground = ground ?? ((x, z) => terrain.getHeightAt(x, z));
     this.group.name = 'vegetation';
     this.group.add(this.groupTrees, this.groupBushes);
     this.buildPlacements(terrain);
@@ -506,6 +514,36 @@ export class Vegetation {
         x, y, z,
         rotY: r1 * Math.PI * 2,
         scale: 0.5 + r2 * 0.5,
+        bury: BUSH_BURY,
+        variant: 0,
+      });
+    }
+
+    // ---- 路边灌丛：贴着护坡的一层矮灌木 ----
+    //
+    // 树与灌木都从 16m 起种，于是路缘到 16m 之间什么都没有——
+    // 骑在路上看两侧是一条光秃的草带，读不出「被绿夹着」。
+    // 这一层更矮（缩放约为外圈灌木的一半）、更密，离路至少 `VERGE_ROAD_CLEAR`，
+    // 不会碰到车把；高度按护坡取，不会一半埋进坡里。
+    const nVerge = Math.floor(TOTAL_ARCLENGTH / VERGE_SPACING);
+    for (let i = 0; i < nVerge; i++) {
+      if (i % 3 === 0 && this.preset.treeDensity < 0.75) continue;
+      if (i % 2 === 0 && this.preset.treeDensity < 0.5) continue;
+      const t = (i * VERGE_SPACING + hashGrid(i, 10, 4421) * 2) / TOTAL_ARCLENGTH;
+      const r1 = hashGrid(i, 11, 7103);
+      const r2 = hashGrid(i, 12, 2687);
+      const r3 = hashGrid(i, 13, 9419);
+      const { p, tx, tz } = this.sampleAt(Math.min(t, 1));
+      const side = hashGrid(i, 14, 1777) < 0.5 ? -1 : 1;
+      const off = VERGE_OFFSET[0] + r3 * (VERGE_OFFSET[1] - VERGE_OFFSET[0]);
+      const x = p.x + -tz * off * side;
+      const z = p.z + tx * off * side;
+      if (distToCenterline(x, z) < VERGE_ROAD_CLEAR) continue;
+      if (insideStationClear(x, z)) continue;
+      chunks[chunkAt(x, z)].bush.push({
+        x, y: this.ground(x, z), z,
+        rotY: r1 * Math.PI * 2,
+        scale: 0.3 + r2 * 0.25,
         bury: BUSH_BURY,
         variant: 0,
       });

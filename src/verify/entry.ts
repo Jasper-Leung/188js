@@ -35,7 +35,7 @@ import { Scenery } from '../world/scenery';
 import { Terrain } from '../world/terrain';
 // `ROAD` 这个名字在 `data/raw` 已经被路面网格数据占用了，
 // 这里要的是 `world/road` 里那组**派生**常量（铺面半宽、站脚半宽…），所以取别名。
-import { Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
+import { EMBANK, Road, ROAD as ROAD_GEOM, sideAt } from '../world/road';
 import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT, FOV_MIN_HORIZONTAL, FOV_MAX } from '../core/fov';
 import { afterCheckInRoute, canGoPhase, canRide, isInWorld, WorldVisibility, phaseEdgeErrors, phaseReachErrors, settleTextKey, settleMs, unwrapArc, recheckGate, STATION_REACH } from '../game/phase';
 import { RIDE } from '../data/raw';
@@ -6282,6 +6282,65 @@ check('verify_offslow', () => {
         : probs.join('；'),
     asserts,
   };
+});
+
+/**
+ * 护坡：骑出路面不再是从路沿上掉下去（见 `EMBANK`）。
+ *
+ * 沿中心线每 1m、左右各横扫到护坡外 3m，0.1m 一步问 `surfaceHeightAt`，
+ * 量**相邻两步的最大高差**。没有护坡时下坡侧路缘是一面墙，单步落差接近 1m。
+ * 交叉口压平范围内不量：那里两条支路互相挤占，路基填方是 `flattenJunction` 的事。
+ */
+check('verify_embankment', () => {
+  let asserts = 0;
+  const probs: string[] = [];
+  const terrain = new Terrain();
+  const road = new Road(terrain);
+  const cl = road.centerline;
+  const H = ROAD_GEOM.ROAD_HALF_WIDTH;
+  const skip = ROAD_GEOM.JUNCTION_FLAT_RADIUS + EMBANK.MAX;
+  let worst = 0;
+  let worstAt = '';
+  let edgeGap = 0;
+  let sumW = 0;
+  let nW = 0;
+  for (let i = 0; i < cl.length; i += 2) {
+    const p = cl[i];
+    if (Math.hypot(p.x - ROAD_GEOM.PLAZA_CENTER.x, p.z - ROAD_GEOM.PLAZA_CENTER.z) < skip) continue;
+    const s = sideAt(cl, i);
+    for (const [k, sg] of [[0, 1], [1, -1]] as const) {
+      sumW += road.embankWidth[k][i];
+      nW++;
+      let prev = road.surfaceHeightAt(p.x, p.z);
+      for (let d = 0.1; d <= H + EMBANK.MAX + 3; d += 0.1) {
+        const y = road.surfaceHeightAt(p.x + s.x * d * sg, p.z + s.z * d * sg);
+        if (Math.abs(y - prev) > worst) {
+          worst = Math.abs(y - prev);
+          worstAt = `(${p.x.toFixed(0)}, ${p.z.toFixed(0)}) 横向 ${d.toFixed(1)}m`;
+        }
+        prev = y;
+      }
+      const inY = road.getHeightAt(p.x + s.x * (H - 0.05) * sg, p.z + s.z * (H - 0.05) * sg);
+      const outY = road.surfaceHeightAt(p.x + s.x * (H + 0.05) * sg, p.z + s.z * (H + 0.05) * sg);
+      if (Number.isFinite(inY)) edgeGap = Math.max(edgeGap, Math.abs(outY - inY));
+    }
+  }
+  // 1. 横扫的单步高差：0.1m 走出 0.1m 高差就是 45°，那已经是台阶不是坡
+  asserts++;
+  if (!(worst < 0.1)) probs.push(`横扫单步最大高差 ${worst.toFixed(3)}m（${worstAt}）——路边还有台阶`);
+  // 2. 路缘两侧 5cm 的高差：护坡必须从路缘那一条线上接起来
+  asserts++;
+  if (!(edgeGap < 0.05)) probs.push(`路缘内外高差 ${edgeGap.toFixed(3)}m——护坡没接上路面`);
+  // 3. 护坡真的铺了：平均宽度不低于下限（被支路/弯道截短的只是少数）
+  asserts++;
+  const meanW = sumW / Math.max(nW, 1);
+  if (!(meanW >= EMBANK.MIN * 0.9)) probs.push(`护坡平均宽 ${meanW.toFixed(2)}m，低于下限 ${EMBANK.MIN}m`);
+  // 4. 路面查询的语义没变：护坡不算路面（离路惩罚、打卡判定都读它）
+  asserts++;
+  const p0 = cl[Math.floor(cl.length / 3)];
+  const s0 = sideAt(cl, Math.floor(cl.length / 3));
+  if (Number.isFinite(road.getHeightAt(p0.x + s0.x * (H + 1), p0.z + s0.z * (H + 1)))) probs.push('护坡被算进了路面（getHeightAt 在路缘外 1m 有值）');
+  return expect(probs.length === 0, probs.length ? probs.join('；') : `横扫最大单步 ${worst.toFixed(3)}m · 路缘高差 ${edgeGap.toFixed(3)}m · 护坡均宽 ${meanW.toFixed(2)}m`, asserts);
 });
 
 

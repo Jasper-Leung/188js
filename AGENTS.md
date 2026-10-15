@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：107 条 / 2484 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：108 条 / 2492 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
 **不要因为不放心就重复跑。** 当前基线是 `PASS 100 / FAIL 0 / 没跑成 0`，
-断言 2484 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+断言 2492 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -181,7 +181,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 **别用 PowerShell 的 `Measure-Object -Line` 重新数**——它只数非空行，
 会把 `entry.ts` 报成 8,395，差 576 行，量出来是「表格过期」而其实没过期。
 
-`entry.ts` 仍有 **9,091 行**。**要再拆的话，照抄这个形状：**
+`entry.ts` 仍有 **9,150 行**。**要再拆的话，照抄这个形状：**
 
 - 拆出去的模块导出 **`registerXxxChecks(check)`**，由 `entry.ts`
   **在原来的位置调用一次**。
@@ -235,7 +235,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 107 条 / 2484 断言
+npm run verify      # 108 条 / 2492 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事

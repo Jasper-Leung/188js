@@ -649,6 +649,8 @@ class App {
     audio.setFullyMuted(this.settings.mutedAll);
     if (audio.bgmMuted !== this.settings.mutedBgm) audio.setBgmMuted(this.settings.mutedBgm);
     if (audio.sfxMuted !== this.settings.mutedSfx) audio.setSfxMuted(this.settings.mutedSfx);
+    // 构造函数里先调一次，那时 `ready()` 还没建 UI；UI 那半在建好之后补上
+    if (!this.ui) return;
     this.ui.setColorblind(this.settings.colorblind);
     this.ui.setReduceMotion(this.settings.reduceMotion);
   }
@@ -779,6 +781,8 @@ class App {
     installTouchDetection();
     this.touchMode = touchEnabled();
     this.ui.setTouchMode(this.touchMode);
+    this.ui.setColorblind(this.settings.colorblind);
+    this.ui.setReduceMotion(this.settings.reduceMotion);
 
     mark('boot_step_load');
     const loaded = game.load();

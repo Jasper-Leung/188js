@@ -45,7 +45,7 @@ import { BufferGeometry, BufferAttribute, Mesh, MeshStandardMaterial } from 'thr
 import { ROADMESH } from '../data/raw';
 import { CENTERLINE, type Vec3Flat } from '../data/route';
 import { patchStandard, ROAD_PATCH } from '../shaders/world';
-import type { Terrain } from './terrain';
+import { groundTint, type Terrain } from './terrain';
 
 const {
   ROAD_HALF_WIDTH,
@@ -60,6 +60,31 @@ const {
   PLAZA_CENTER_Z,
   PLAZA_RADIUS,
 } = ROADMESH;
+
+/**
+ * 护坡：路缘到地形之间的一条缓坡。
+ *
+ * 路面是「左中右三点地形取最高 + 抬升」，所以下坡那一侧的路缘比地面高——
+ * 中位 0.18m，最坏处接近 2m。原来那一侧是一面**竖直的墙**
+ * （`TOTAL_HALF_WIDTH === ROAD_HALF_WIDTH`，路肩外缘与路缘在同一条线上），
+ * 骑出路面就是从墙上掉下去：一步落差、车身一顿、相机一跳。
+ *
+ * 现在每一侧从路缘起铺一条宽 `MIN + 落差 × RUN` 的缓坡（截到 `MAX`），
+ * 截面是 smoothstep：两端坡度为 0，与路面、地形都相切，骑过去不会被「顶」一下。
+ * 用地形的材质画，所以它读出来是**路边的草坡**，不是第二种路面。
+ */
+export const EMBANK = {
+  MIN: 2.5,
+  MAX: 9,
+  /** 每米落差要多少米水平距离 */
+  RUN: 3.5,
+  /** 横向分几段 */
+  RINGS: 6,
+  /** 外缘往地下沉一点，接缝藏在地形下面 */
+  SINK: 0.08,
+  /** 弧长相差多少米以上才算「另一条支路」 */
+  OTHER_ARC: 40,
+} as const;
 
 /** 路面宽度常量，供植被/驿站偏移等处引用（唯一出处） */
 export const ROAD = {
@@ -197,6 +222,12 @@ export class Road {
   private tris: Tri[] = [];
   /** 8m 一格的空间哈希 */
   private grid = new Map<number, number[]>();
+  /** 护坡网格（见 `EMBANK`）。是 `mesh` 的子节点，显隐跟着路面走 */
+  readonly embankment: Mesh;
+  /** 每个中心线点两侧的护坡宽度（米）：`[0]` 是 +side 侧，`[1]` 是 −side 侧 */
+  readonly embankWidth: [Float32Array, Float32Array];
+  private embankTris: Tri[] = [];
+  private embankGrid = new Map<number, number[]>();
   private readonly uEdge = (ROAD_HALF_WIDTH + TOTAL_HALF_WIDTH) / TOTAL_WIDTH;
   /** 存一份地形，`groundHeightAt` 要用（`buildRoadYs` 之后地形就不再是参数了） */
   private readonly terrain: Terrain;
@@ -220,6 +251,15 @@ export class Road {
     this.mesh.castShadow = false;
     this.mesh.matrixAutoUpdate = false;
     this.mesh.updateMatrix();
+
+    this.embankWidth = this.buildEmbankWidths(terrain);
+    this.embankment = new Mesh(this.buildEmbankmentGeometry(terrain), terrain.material);
+    this.embankment.name = 'road-embankment';
+    this.embankment.receiveShadow = true;
+    this.embankment.castShadow = false;
+    this.embankment.matrixAutoUpdate = false;
+    this.embankment.updateMatrix();
+    this.mesh.add(this.embankment);
   }
 
   /** 加进场景。交叉口是路面自己的一部分，这里没有第二个网格了 */
@@ -451,39 +491,158 @@ export class Road {
    * 用法：`const h = road.getHeightAt(x,z); if (!Number.isFinite(h)) { ... }`
    */
   getHeightAt(wx: number, wz: number): number {
-    const cx = Math.floor(wx / GRID_CELL);
-    const cz = Math.floor(wz / GRID_CELL);
-    let bestY = -Infinity;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dz = -1; dz <= 1; dz++) {
-        const arr = this.grid.get((cx + dx) * 100003 + (cz + dz));
-        if (!arr) continue;
-        for (const ti of arr) {
-          const t = this.tris[ti];
-          const bx = t.bx - t.ax;
-          const bz = t.bz - t.az;
-          const cx2 = t.cx - t.ax;
-          const cz2 = t.cz - t.az;
-          const px = wx - t.ax;
-          const pz = wz - t.az;
-          const denom = bx * cz2 - bz * cx2;
-          if (Math.abs(denom) < 1e-10) continue;
-          const v = (px * cz2 - pz * cx2) / denom;
-          const w = (bx * pz - bz * px) / denom;
-          const u = 1 - v - w;
-          if (u < -1e-6 || v < -1e-6 || w < -1e-6) continue;
-          const y = t.ay * u + t.by * v + t.cy * w;
-          if (y > bestY) bestY = y;
+    return queryTris(this.tris, this.grid, wx, wz);
+  }
+
+  /** 护坡高度（米）。不在护坡上返回 -Infinity */
+  embankHeightAt(wx: number, wz: number): number {
+    return queryTris(this.embankTris, this.embankGrid, wx, wz);
+  }
+
+  /**
+   * 骑行用的地面：路面 → 护坡 → 地形，三段连续。
+   * 护坡与地形取高者：挖方一侧护坡可能略低于粗网格地形，看得见的是高的那一个。
+   */
+  surfaceHeightAt(wx: number, wz: number): number {
+    const r = this.getHeightAt(wx, wz);
+    if (Number.isFinite(r)) return r;
+    const t = this.terrain.getHeightAt(wx, wz);
+    const e = this.embankHeightAt(wx, wz);
+    return e > t ? e : t;
+  }
+
+  /** 每个中心线点两侧的护坡宽度，按落差定，再被弯道内侧与邻近支路截短 */
+  private buildEmbankWidths(terrain: Terrain): [Float32Array, Float32Array] {
+    const cl = this.centerline;
+    const n = cl.length;
+    const H = ROAD_HALF_WIDTH;
+    const cap: [Float32Array, Float32Array] = [new Float32Array(n), new Float32Array(n)];
+    const closed = Math.hypot(cl[0].x - cl[n - 1].x, cl[0].z - cl[n - 1].z) < 4 * EMBANK.MAX;
+    const idx = (i: number) => (closed ? (i + n) % n : Math.min(Math.max(i, 0), n - 1));
+    const B = 16;
+    const buckets = new Map<number, number[]>();
+    const keyOf = (x: number, z: number) => Math.floor(x / B) * 100003 + Math.floor(z / B);
+    for (let i = 0; i < n; i++) {
+      const k = keyOf(cl[i].x, cl[i].z);
+      let arr = buckets.get(k);
+      if (!arr) buckets.set(k, (arr = []));
+      arr.push(i);
+    }
+    const otherIdx = EMBANK.OTHER_ARC / RESAMPLE_STEP;
+    const reach = 2 * H + 2 * EMBANK.MAX;
+    for (let i = 0; i < n; i++) {
+      const p = cl[i];
+      const s = sideAt(cl, i);
+      for (let k = 0; k < 2; k++) {
+        const sg = k === 0 ? 1 : -1;
+        const drop = Math.max(0, this.roadYs[i] - terrain.getHeightAt(p.x + s.x * H * sg, p.z + s.z * H * sg));
+        cap[k][i] = Math.min(EMBANK.MIN + drop * EMBANK.RUN, EMBANK.MAX);
+      }
+      // 弯道内侧：外缘不能越过曲率中心，否则护坡自己折叠
+      const a = cl[idx(i - 4)];
+      const b = cl[idx(i + 4)];
+      const cross = (p.x - a.x) * (b.z - a.z) - (p.z - a.z) * (b.x - a.x);
+      if (Math.abs(cross) > 1e-6) {
+        const R = (Math.hypot(p.x - a.x, p.z - a.z) * Math.hypot(b.x - p.x, b.z - p.z) * Math.hypot(b.x - a.x, b.z - a.z)) / (2 * Math.abs(cross));
+        const inner = cross > 0 ? 0 : 1;
+        cap[inner][i] = Math.min(cap[inner][i], Math.max(0, R - H - 1.5));
+      }
+      // 另一条支路靠近（8 字的交叉口与回头弯）：外缘不许压到它的路面上。
+      // 两条护坡互相叠一点没关系——高度查询取高者，看得见的也是高者
+      const gx = Math.floor(p.x / B);
+      const gz = Math.floor(p.z / B);
+      const span = Math.ceil(reach / B);
+      for (let dx = -span; dx <= span; dx++) {
+        for (let dz = -span; dz <= span; dz++) {
+          const arr = buckets.get((gx + dx) * 100003 + (gz + dz));
+          if (!arr) continue;
+          for (const j of arr) {
+            let di = Math.abs(i - j);
+            if (closed) di = Math.min(di, n - di);
+            if (di < otherIdx) continue;
+            const q = cl[j];
+            const d = Math.hypot(q.x - p.x, q.z - p.z);
+            if (d > reach) continue;
+            const k = (q.x - p.x) * s.x + (q.z - p.z) * s.z >= 0 ? 0 : 1;
+            cap[k][i] = Math.min(cap[k][i], Math.max(0, d - 2 * H - 0.3));
+          }
         }
       }
     }
-    return bestY;
+    // 先腐蚀再均值：均值半径不超过腐蚀半径，平滑之后每一点仍不超过它自己的上限
+    const r = 8;
+    return cap.map((c) => {
+      const eroded = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let m = Infinity;
+        for (let o = -r; o <= r; o++) m = Math.min(m, c[idx(i + o)]);
+        eroded[i] = m;
+      }
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        let sum = 0;
+        for (let o = -r; o <= r; o++) sum += eroded[idx(i + o)];
+        out[i] = sum / (2 * r + 1);
+      }
+      return out;
+    }) as [Float32Array, Float32Array];
+  }
+
+  private buildEmbankmentGeometry(terrain: Terrain): BufferGeometry {
+    const cl = this.centerline;
+    const n = cl.length;
+    const RINGS = EMBANK.RINGS;
+    const per = RINGS + 1;
+    const positions = new Float32Array(n * 2 * per * 3);
+    const colors = new Float32Array(n * 2 * per * 3);
+    for (let i = 0; i < n; i++) {
+      const p = cl[i];
+      const s = sideAt(cl, i);
+      const roadY = this.roadYs[i];
+      for (let k = 0; k < 2; k++) {
+        const sg = k === 0 ? 1 : -1;
+        const w = this.embankWidth[k][i];
+        for (let j = 0; j < per; j++) {
+          const t = j / RINGS;
+          const off = ROAD_HALF_WIDTH + w * t;
+          const x = p.x + s.x * off * sg;
+          const z = p.z + s.z * off * sg;
+          const f = t * t * (3 - 2 * t);
+          const ground = terrain.getHeightAt(x, z) - EMBANK.SINK * t;
+          const vi = (i * 2 + k) * per + j;
+          writeVert(positions, vi, x, roadY + (ground - roadY) * f, z);
+          groundTint(x, z, 1, colors, vi);
+        }
+      }
+    }
+    const indices: number[] = [];
+    for (let i = 0; i < n - 1; i++) {
+      for (let k = 0; k < 2; k++) {
+        const a = (i * 2 + k) * per;
+        const b = ((i + 1) * 2 + k) * per;
+        for (let j = 0; j < RINGS; j++) {
+          indices.push(a + j, b + j, a + j + 1, a + j + 1, b + j, b + j + 1);
+        }
+      }
+    }
+    orientUp(indices, positions);
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new BufferAttribute(positions, 3));
+    geo.setAttribute('color', new BufferAttribute(colors, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    for (let t = 0; t < indices.length; t += 3) {
+      this.registerTri(indices[t], indices[t + 1], indices[t + 2], positions, this.embankTris, this.embankGrid);
+    }
+    return geo;
   }
 
   /** 玩家在路面上？（比高度查询更宽松，含路肩） */
   isOnRoad(wx: number, wz: number): boolean {
     return Number.isFinite(this.getHeightAt(wx, wz));
   }
+
 
   /** 当地地面高度（不含路面抬升）。自检与调试用 */
   groundHeightAt(wx: number, wz: number): number {
@@ -549,19 +708,7 @@ export class Road {
     // ——这两个说法指向同一个几何，翻转条件必须写成 `< 0`。
     // 写成 `> 0` 的后果很安静：整条路面向下，被背面剔除，地面上什么都不剩，
     // 而地形、车、小地图、驿站全都正常——于是"路不见了"看起来像是资产没加载。
-    for (let t = 0; t < indices.length; t += 3) {
-      const a = indices[t];
-      const b = indices[t + 1];
-      const c = indices[t + 2];
-      const abx = positions[b * 3] - positions[a * 3];
-      const abz = positions[b * 3 + 2] - positions[a * 3 + 2];
-      const acx = positions[c * 3] - positions[a * 3];
-      const acz = positions[c * 3 + 2] - positions[a * 3 + 2];
-      if (abz * acx - abx * acz < 0) {
-        indices[t + 1] = c;
-        indices[t + 2] = b;
-      }
-    }
+    orientUp(indices, positions);
 
     const geo = new BufferGeometry();
     geo.setAttribute('position', new BufferAttribute(positions, 3));
@@ -577,14 +724,21 @@ export class Road {
     return geo;
   }
 
-  private registerTri(a: number, b: number, c: number, positions: Float32Array) {
+  private registerTri(
+    a: number,
+    b: number,
+    c: number,
+    positions: Float32Array,
+    tris: Tri[] = this.tris,
+    grid: Map<number, number[]> = this.grid,
+  ) {
     const tri: Tri = {
       ax: positions[a * 3], ay: positions[a * 3 + 1], az: positions[a * 3 + 2],
       bx: positions[b * 3], by: positions[b * 3 + 1], bz: positions[b * 3 + 2],
       cx: positions[c * 3], cy: positions[c * 3 + 1], cz: positions[c * 3 + 2],
     };
-    const ti = this.tris.length;
-    this.tris.push(tri);
+    const ti = tris.length;
+    tris.push(tri);
     const cx0 = Math.floor(Math.min(tri.ax, tri.bx, tri.cx) / GRID_CELL);
     const cx1 = Math.floor(Math.max(tri.ax, tri.bx, tri.cx) / GRID_CELL);
     const cz0 = Math.floor(Math.min(tri.az, tri.bz, tri.cz) / GRID_CELL);
@@ -592,10 +746,10 @@ export class Road {
     for (let x = cx0; x <= cx1; x++) {
       for (let z = cz0; z <= cz1; z++) {
         const key = x * 100003 + z;
-        let arr = this.grid.get(key);
+        let arr = grid.get(key);
         if (!arr) {
           arr = [];
-          this.grid.set(key, arr);
+          grid.set(key, arr);
         }
         arr.push(ti);
       }
@@ -641,6 +795,55 @@ function makeRoadMaterial(): MeshStandardMaterial {
     junction_wide: { value: ROAD.JUNCTION_WIDE },
   });
   return mat;
+}
+
+
+/** 三角形空间哈希上的高度查询。不在任何三角形上返回 -Infinity */
+function queryTris(tris: Tri[], grid: Map<number, number[]>, wx: number, wz: number): number {
+  const cx = Math.floor(wx / GRID_CELL);
+  const cz = Math.floor(wz / GRID_CELL);
+  let bestY = -Infinity;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const arr = grid.get((cx + dx) * 100003 + (cz + dz));
+      if (!arr) continue;
+      for (const ti of arr) {
+        const t = tris[ti];
+        const bx = t.bx - t.ax;
+        const bz = t.bz - t.az;
+        const cx2 = t.cx - t.ax;
+        const cz2 = t.cz - t.az;
+        const px = wx - t.ax;
+        const pz = wz - t.az;
+        const denom = bx * cz2 - bz * cx2;
+        if (Math.abs(denom) < 1e-10) continue;
+        const v = (px * cz2 - pz * cx2) / denom;
+        const w = (bx * pz - bz * px) / denom;
+        const u = 1 - v - w;
+        if (u < -1e-6 || v < -1e-6 || w < -1e-6) continue;
+        const y = t.ay * u + t.by * v + t.cy * w;
+        if (y > bestY) bestY = y;
+      }
+    }
+  }
+  return bestY;
+}
+
+/** 逐三角形绕序修正：统一成法线朝上（判据的符号说明见 `buildRibbonGeometry`） */
+function orientUp(indices: number[], positions: Float32Array): void {
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t];
+    const b = indices[t + 1];
+    const c = indices[t + 2];
+    const abx = positions[b * 3] - positions[a * 3];
+    const abz = positions[b * 3 + 2] - positions[a * 3 + 2];
+    const acx = positions[c * 3] - positions[a * 3];
+    const acz = positions[c * 3 + 2] - positions[a * 3 + 2];
+    if (abz * acx - abx * acz < 0) {
+      indices[t + 1] = c;
+      indices[t + 2] = b;
+    }
+  }
 }
 
 function writeVert(arr: Float32Array, i: number, x: number, y: number, z: number) {

@@ -247,7 +247,6 @@ export class Ride {
   private camInit = false;
   private camMode: CamMode = 'forward';
 
-  private terrain: Terrain;
   private road: Road;
   private stations: Stations;
 
@@ -255,8 +254,8 @@ export class Ride {
   private _right = new Vector3();
   private _tmp = new Vector3();
 
-  constructor(terrain: Terrain, road: Road, stations: Stations, camera: PerspectiveCamera) {
-    this.terrain = terrain;
+  // 地形不再直接查：地面高度统一走 `road.surfaceHeightAt`（路面 → 护坡 → 地形）
+  constructor(_terrain: Terrain, road: Road, stations: Stations, camera: PerspectiveCamera) {
     this.road = road;
     this.stations = stations;
     // 相机是**渲染器用的那一个**，不是这里另建的一个。
@@ -500,11 +499,9 @@ export class Ride {
     }
   }
 
-  /** 路面优先，场外回落地形 */
+  /** 路面 → 护坡 → 地形（见 `EMBANK`）：骑出路面是顺着草坡下去，不是从路沿上掉下去 */
   groundHeight(x: number, z: number): number {
-    const roadH = this.road.getHeightAt(x, z);
-    if (Number.isFinite(roadH)) return roadH;
-    return this.terrain.getHeightAt(x, z);
+    return this.road.surfaceHeightAt(x, z);
   }
 
   onRoad(x = this.position.x, z = this.position.z): boolean {

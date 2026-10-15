@@ -408,7 +408,8 @@ export const ROAD_PATCH: PatchHooks = {
     // 加上双白实线之后整条路读成"双向两车道国道"：
     // 虚线中线、白色实线、砂石路肩，一整套高速公路语汇。
     // 而这条路空了六百年。这三样东西是全作最响的调性冲突。
-    float shoulder = smoothstep(road_half_width * wide * 0.72, total_half_width * wide, edge);
+    // 0.86 而不是 0.72：路缘外已经有一条草坡（护坡），土黄带只留窄窄一道，路才像被草夹着
+    float shoulder = smoothstep(road_half_width * wide * 0.86, total_half_width * wide, edge);
     rcol = mix(rcol, dirt_color, shoulder * mark);
 
     // 草从沥青边缘往里长。乡道的沥青边不是一刀切的，是被草吃掉的。

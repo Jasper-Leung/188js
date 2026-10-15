@@ -268,7 +268,7 @@ export class World {
     this.road.addTo(this.scene);
     this.water = new Water(preset.waterDetail);
     step('水面');
-    this.veg = new Vegetation(preset, this.terrain);
+    this.veg = new Vegetation(preset, this.terrain, (x, z) => this.road.surfaceHeightAt(x, z));
     step('植被布置');
     this.scenery = new Scenery(this.terrain);
     step('区域散布');
