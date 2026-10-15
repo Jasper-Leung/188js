@@ -435,6 +435,14 @@ card.appendChild(rule());
     this.syncAccessibility();
   }
 
+  /** 宿主在构造之后才把存档里的开关推进来（`App.ready()`），面板要跟着改显示 */
+  setSwitches(v: { colorblind?: boolean; reduceMotion?: boolean; holdToToggle?: boolean }): void {
+    if (v.colorblind !== undefined) this.colorblind = v.colorblind;
+    if (v.reduceMotion !== undefined) this.reduceMotion = v.reduceMotion;
+    if (v.holdToToggle !== undefined) this.holdToToggle = v.holdToToggle;
+    this.syncAccessibility();
+  }
+
   private syncAccessibility(): void {
     setFlag(this.cbBtn, 'is-on', this.colorblind);
     setText(this.cbBtn, this.colorblind ? t('on') : t('off'));

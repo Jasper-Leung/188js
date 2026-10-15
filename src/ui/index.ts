@@ -514,11 +514,13 @@ readonly touch: {
    */
   setHoldToToggle(on: boolean): void {
     this.holdToToggle = on;
+    this.pause.setSwitches({ holdToToggle: on });
   }
 
   setColorblind(on: boolean): void {
     this.colorblind = on;
     this.root.dataset.cb = on ? 'on' : 'off';
+    this.pause.setSwitches({ colorblind: on });
     this.hud.setColorblind(on);
   }
 
@@ -534,6 +536,7 @@ readonly touch: {
   setReduceMotion(on: boolean): void {
     this.reduceMotion = on;
     this.root.dataset.reduceMotion = on ? 'on' : 'off';
+    this.pause.setSwitches({ reduceMotion: on });
     this.hud.setReduceMotion(on);
   }
 
