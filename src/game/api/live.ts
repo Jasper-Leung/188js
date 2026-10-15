@@ -29,8 +29,8 @@ import {
   summarize,
   type AiAction,
   type AiEvent,
-  type AiHeldAction,
   type AiObservation,
+  type AiTapAction,
 } from './types';
 import type { Phase } from '../phase';
 
@@ -46,6 +46,14 @@ export interface LiveApiHost {
   dialogueOpen(): boolean;
   dialogueText(): string;
   minigameRunning(): boolean;
+  /**
+   * 正在跑的是哪一件乐事，没在跑就是 `null`。
+   *
+   * 它和上面的 `minigameRunning()` 是**两件事**：那个回答"有没有"，
+   * 这个回答"是哪一件"——而 `describeActions()` 要靠后者才给得出
+   * 那一屏真正的键位（见 `types.ts` 的 `MINI_GAME_AI_ACTIONS`）。
+   */
+  minigameId(): string | null;
   /** 暂停 / 商店 / 明信片 / 结算 任一压着。 */
   panelOpen(): boolean;
   canCheckIn(): boolean;
@@ -59,8 +67,14 @@ export interface LiveApiHost {
 export interface LiveApi {
   readonly version: string;
   observe(): AiObservation;
+  /**
+   * 按住 / 松开一个**可按住**的动作：四个骑行键 + 确认键。
+   *
+   * 确认键为什么也能按：茶要按住 3 秒、描云要按住落笔、钓鱼要按住收线
+   * （见 `types.ts` 的 `AiHoldableAction`）。点一下用 `tap()`。
+   */
   act(action: AiAction, down: boolean): Promise<{ accepted: boolean; reason?: string }>;
-  tap(action: AiAction): Promise<{ accepted: boolean; reason?: string }>;
+  tap(action: AiTapAction): Promise<{ accepted: boolean; reason?: string }>;
   drain(): AiEvent[];
   frame(n?: number): Promise<void>;
   /** 按住 `seconds` 秒。`wait(2)` 比 `frame(120)` 读得懂。 */
@@ -72,8 +86,11 @@ export interface LiveApi {
    * 它和 `releaseAll()` 是**同一份**记账（`AiSession` 内部那个 `held`），
    * 所以策略可以随时问"我是不是正卡着一个键"——
    * 而这件事以前只能靠人去翻游戏源码里的 `keys` 集合。
+   *
+   * 返回的是 `AiAction` 而不是四个骑行键：确认键现在也能按住了
+   * （见 `types.ts` 的 `AiHoldableAction`），所以这里的类型跟着放宽。
    */
-  heldKeys(): AiHeldAction[];
+  heldKeys(): AiAction[];
   help(): string;
   summary(): string;
   /** 原始事件出口：不想用这层抽象的人可以直接收。 */
@@ -160,11 +177,11 @@ export function createLiveApi(host: LiveApiHost): LiveApi {
     version: '1.0.0',
     observe: () => session.observe(),
     async act(action, down) {
-      const r = await session.act(action as never, down);
+      const r = await session.act(action, down);
       return { accepted: r.accepted, reason: r.reason };
     },
     async tap(action) {
-      const r = await session.tap(action as never);
+      const r = await session.tap(action);
       return { accepted: r.accepted, reason: r.reason };
     },
     drain: () => {

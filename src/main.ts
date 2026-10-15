@@ -2596,6 +2596,10 @@ private onConfirm() {
       dialogueOpen: () => this.ui.aiScreen().dialogueOpen,
       dialogueText: () => this.ui.aiScreen().dialogueText,
       minigameRunning: () => this.mg.isRunning,
+      // 「哪一件」和「有没有」分开报：`describeActions()` 靠 id 才给得出
+      // 那一屏真正的键位（描云要方向键、古琴要数字键、茶要按住）。
+      // 只报布尔的话，AI 在小游戏里被锁死在"只能按空格"——五件里四件打不动。
+      minigameId: () => this.mg.id,
       panelOpen: () => this.ui.aiScreen().panelOpen,
       canCheckIn: () => this.world.canCheckIn().ok,
       observation: () => this.aiObservation(),
@@ -2684,6 +2688,7 @@ private onConfirm() {
       dialogueOpen: screen.dialogueOpen,
       dialogueText: screen.dialogueText,
       minigame: this.mg.isRunning,
+      minigameId: this.mg.id,
       panelOpen: screen.panelOpen,
     };
   }

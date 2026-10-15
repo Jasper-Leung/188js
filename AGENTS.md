@@ -10,11 +10,11 @@
 ## 1. 测试只有一个入口，而且是绿的
 
 ```bash
-npm run verify     # 无头回归：110 条 / 2510 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
+npm run verify     # 无头回归：111 条 / 2560 条断言 + 文案三判据（死字 / 缺字 / 界面硬编码中文）
 ```
 
-**不要因为不放心就重复跑。** 当前基线是 `PASS 100 / FAIL 0 / 没跑成 0`，
-断言 2510 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
+**不要因为不放心就重复跑。** 当前基线是 `PASS 111 / FAIL 0 / 没跑成 0`，
+断言 2560 条、0 条红。判断要不要跑，按下面的规则，而不是按"改了多少行"：
 
 | 情况 | 动作 |
 |---|---|
@@ -156,7 +156,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 | 交付（提交页 / 资产源 / 编码 / 湖边场景） | `src/verify/delivery.ts` | 449 行 |
 | 两条界面回归（第九轮新加） | `src/verify/ui_regressions.ts` | 344 行 |
 | 景物布置 | `src/verify/scenery.ts` | 566 行 |
-| AI 可玩接口契约 | `src/verify/ai.ts` | 647 行 |
+| AI 可玩接口契约 | `src/verify/ai.ts` | 802 行 |
 | 本轮三件新内容（茶倒水 / 躲避挑战 / 古琴） | `src/verify/features.ts` | 814 行 |
 
 **这张表只列了一种形状，而实际有两种。** 第二种是「导出单个 `assertXxx()`，
@@ -235,7 +235,7 @@ npm run probe      # 场景探针：远近草/树木数量、地形高程
 ```bash
 npm run typecheck   # strict + noUnusedLocals + noUnusedParameters
 npm run build       # tsc --noEmit && vite build
-npm run verify      # 110 条 / 2510 断言
+npm run verify      # 111 条 / 2560 断言
 ```
 
 ### 暂存要逐个文件核对，不要整份 add 就完事

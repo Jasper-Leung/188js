@@ -28,21 +28,27 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { expect, stripComments, type CheckFn } from './harness';
+import { expect, fakeCtx, stripComments, type CheckFn } from './harness';
 import {
   AI_HELD_ACTIONS,
+  AI_HOLDABLE_ACTIONS,
   AI_KEYS,
   AI_TAP_ACTIONS,
   ARROWS,
+  MINI_GAME_AI_ACTIONS,
+  MINI_GAME_AI_ACTIONS_ANY,
   arrowGlyph,
   actionOfCode,
   actionVector,
   describeActions,
+  keysOf,
   summarize,
   AI_HELP,
   type AiAction,
   type AiTapAction,
 } from '../game/api/types';
+import { MINI_GAME_IDS, createMiniGame } from '../game/minigames';
+import type { MiniGameContext, MiniGameId, MiniGameResult } from '../game/minigames';
 import { keyToVec } from '../core/stick';
 import { HeadlessAdapter, headlessSession } from '../game/api/headless';
 import { AiSession, runScriptSync } from '../game/api/session';
@@ -167,10 +173,44 @@ export function registerAiApiChecks(check: CheckFn): void {
       probs.push(`对白中可用动作是 [${talking}]，应只有 advance`);
     }
 
-    // 小游戏期间宿主把键盘整体吃掉（`if (this.mg.isRunning) return`）。
+    /**
+     * 小游戏期间宿主把键盘整体吃掉——**但它只吃掉骑行那一套**。
+     *
+     * 这条断言原来写的是 `if (mg.includes('throttle')) probs.push('小游戏期间仍列出了骑行键')`，
+     * 而它把「AI 在小游戏里一步都走不了」**当成正确行为钉住了**：
+     * 那一屏的 `available` 只有 `['advance']`，于是描云/竹挪不动光标、
+     * 古琴/禽语发不出数字键。判据全绿，而五件乐事里四件打不动。
+     *
+     * 现在反过来钉：那一屏必须给出**它真正的**键位。
+     * 「骑行键在小游戏里没用」这半句仍然成立——但那是**游戏侧**的事
+     * （`bindInput()` 第一行 `if (this.mg.isRunning) return`），
+     * 而接口侧的 `available` 说的是"小游戏这一层收什么"。
+     */
     const mg = describeActions({ ...base, phase: 'roaming', minigame: true });
     asserts++;
-    if (mg.includes('throttle')) probs.push('小游戏期间仍列出了骑行键');
+    if (mg.length <= 1) {
+      probs.push(`小游戏期间只给出了 [${mg}] —— AI 在里面一步都走不了`);
+    }
+    for (const want of ['advance', 'throttle', 'left', 'item1'] as const) {
+      asserts++;
+      if (!mg.includes(want)) probs.push(`小游戏期间缺了「${want}」——有乐事要靠它`);
+    }
+    // 给了 id 就必须**精确**，而不是退回并集：列一个按了没反应的动
+    // 会让策略学不会区别（见 `describeActions` 的注释）。
+    asserts++;
+    {
+      const tea = describeActions({ ...base, phase: 'minigame', minigame: true, minigameId: 'tea' });
+      if (tea.length !== 1 || tea[0] !== 'advance') {
+        probs.push(`茶那一屏给出的动作是 [${tea}]，应只有 advance`);
+      }
+    }
+    asserts++;
+    {
+      const zither = describeActions({ ...base, phase: 'minigame', minigame: true, minigameId: 'zither' });
+      if (zither.includes('advance') || !zither.includes('item1')) {
+        probs.push(`古琴那一屏给出的动作是 [${zither}]，应是数字键而不是确认键`);
+      }
+    }
 
     /**
      * 每个相位**真实**的界面状态。
@@ -227,6 +267,121 @@ export function registerAiApiChecks(check: CheckFn): void {
     }
 
     return expect(probs.length === 0, probs.join('；') || `${Object.keys(REAL).length} 个相位按真实界面状态都有出路`, asserts);
+  });
+
+  /**
+   * 小游戏那一屏列出来的动作，**按下去必须真的有人接**。
+   *
+   * ## 它守的是哪一件事
+   *
+   * `MINI_GAME_AI_ACTIONS` 是一张**手写**的表，而"表里写了、游戏里其实不接"
+   * 这一类漂移**不会报任何错**——症状只是"AI 在小游戏里按了什么也没发生"，
+   * 而那种症状和"AI 策略太笨"长得一模一样，几乎不可能被归因到这张表。
+   *
+   * 反过来更贵：表里**少**一个动作，那一件乐事就变成打不动的。
+   * 这正是修这条 bug 之前的样子（五件里四件）。
+   *
+   * ## 为什么必须"边推进边试"
+   *
+   * 古琴与禽语**开局不接键**：古琴要先看示范、禽语要先看观察，
+   * 键盘在那两段里被 `state` 挡掉。所以在 t=0 试一次就下结论是错的——
+   * 它会把这两件乐事判成"没人接"，而它们其实好好的。
+   *
+   * ## 为什么每个动作都**新开一局**
+   *
+   * 古琴按错一个音就 `finish('lose')`，之后所有按键都被 `finished` 挡掉。
+   * 复用同一局的话，第一个动作之后就再也问不出第二个了。
+   */
+  check('verify_minigame_ai_actions', () => {
+    const probs: string[] = [];
+    let asserts = 0;
+
+    // 表的 id 必须和轮换表对得上：少一个 = 那件乐事退回并集（能玩但不精确），
+    // 多一个 = 一个永远不可能命中的条目。
+    for (const id of MINI_GAME_IDS) {
+      asserts++;
+      if (!MINI_GAME_AI_ACTIONS[id]) probs.push(`轮换表里的「${id}」在 MINI_GAME_AI_ACTIONS 里没有条目`);
+    }
+    for (const id of Object.keys(MINI_GAME_AI_ACTIONS)) {
+      asserts++;
+      if (!MINI_GAME_IDS.includes(id as MiniGameId) && id !== 'qin') {
+        probs.push(`MINI_GAME_AI_ACTIONS 里有个不存在的乐事 id：「${id}」`);
+      }
+    }
+
+    const W = 960;
+    const H = 540;
+    const ctx = fakeCtx(W, H);
+
+    /** 新开一局，边推进边把 `action` 的键码发进去，看有没有人真的吃掉它。 */
+    const reactsTo = (id: MiniGameId, action: AiAction): boolean => {
+      let eaten = false;
+      const context: MiniGameContext = {
+        ctx,
+        width: W,
+        height: H,
+        lang: 'zh',
+        palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+        audio: { sfx() {}, note() {}, noteFree() {}, duckAmbient() {} },
+        t: (k: string) => k,
+        seed: 4242,
+        onDone: (_r: MiniGameResult) => {},
+      };
+      const g = createMiniGame(id, context);
+      g.resize(W, H);
+      const codes = keysOf(action);
+      for (let i = 0; i < 900 && !eaten; i++) {
+        g.step(1 / 60);
+        for (const c of codes) {
+          if (g.onKeyDown(c, false)) {
+            eaten = true;
+            break;
+          }
+        }
+      }
+      for (const c of codes) g.onKeyUp(c);
+      g.dispose();
+      return eaten;
+    };
+
+    for (const [id, actions] of Object.entries(MINI_GAME_AI_ACTIONS)) {
+      asserts++;
+      if (actions.length === 0) probs.push(`「${id}」一个动作都没给——那一屏是死屏`);
+      for (const a of actions) {
+        asserts++;
+        if (!reactsTo(id as MiniGameId, a)) {
+          probs.push(`「${id}」列了「${a}」，真发进去却没人接——表和游戏漂了`);
+        }
+      }
+    }
+
+    // id 未知时退回的并集不许是空的：空集会把那一屏变成死屏，
+    // 而"退回并集"这条兜底路径只有真宿主漏报 id 时才会走到。
+    asserts++;
+    if (MINI_GAME_AI_ACTIONS_ANY.length === 0) probs.push('id 未知时的并集兜底是空集');
+
+    // 确认键必须真的能按住——茶、描云、钓鱼**只有**这一种表达方式。
+    asserts++;
+    if (!(AI_HOLDABLE_ACTIONS as readonly AiAction[]).includes('advance')) {
+      probs.push('advance 不在可按住的动作里——茶/描云/钓鱼都只能点，按不住');
+    }
+    // 契约说能按住，真按下去就得被接受——两件事分开验。
+    asserts++;
+    {
+      const a = new HeadlessAdapter();
+      a.setScreen({ phase: 'minigame', minigame: true, minigameId: 'tea' });
+      const s = new AiSession(a);
+      const r = s.actSync('advance', true);
+      if (!r.accepted) probs.push(`茶那一屏 act('advance', true) 被拒：${r.reason}`);
+      s.releaseAll();
+      a.resetScreen();
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.join('；') || `${Object.keys(MINI_GAME_AI_ACTIONS).length} 件乐事列出的动作按下去都有人接`,
+      asserts,
+    );
   });
 
   /**

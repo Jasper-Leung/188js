@@ -83,17 +83,23 @@ export interface HeadlessScreen {
   dialogueOpen?: boolean;
   dialogueText?: string;
   minigame?: boolean;
+  /** 正在跑哪一件乐事。给 `describeActions()` 算那一屏真正的键位用。 */
+  minigameId?: string | null;
   panelOpen?: boolean;
   narrativeBusy?: boolean;
   /** 不给就按"脚下离驿站够近"算，和真实玩法一致。 */
   canCheckIn?: boolean;
 }
 
-const DEFAULT_SCREEN: Required<Omit<HeadlessScreen, 'dialogueText'>> & { dialogueText: string } = {
+const DEFAULT_SCREEN: Required<Omit<HeadlessScreen, 'dialogueText' | 'minigameId'>> & {
+  dialogueText: string;
+  minigameId: string | null;
+} = {
   phase: 'roaming',
   dialogueOpen: false,
   dialogueText: '',
   minigame: false,
+  minigameId: null,
   panelOpen: false,
   narrativeBusy: false,
   canCheckIn: false,
@@ -253,6 +259,7 @@ export class HeadlessAdapter implements AiAdapter {
       dialogueOpen: sc.dialogueOpen,
       dialogueText: sc.dialogueText,
       minigame: sc.minigame,
+      minigameId: sc.minigameId,
       panelOpen: sc.panelOpen,
       narrativeBusy: sc.narrativeBusy,
     };

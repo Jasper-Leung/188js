@@ -25,11 +25,11 @@
  */
 
 import {
-  AI_HELD_ACTIONS,
+  AI_HOLDABLE_ACTIONS,
   describeActions,
   type AiAction,
   type AiEvent,
-  type AiHeldAction,
+  type AiHoldableAction,
   type AiObservation,
   type AiTapAction,
 } from './types';
@@ -57,7 +57,7 @@ export interface AiActionResult {
 export class AiSession {
   private readonly adapter: AiAdapter;
   /** 本会话按住的键。`observe()` 与 `releaseAll()` 都要用。 */
-  private readonly held = new Set<AiHeldAction>();
+  private readonly held = new Set<AiAction>();
   private lastObservation: AiObservation | null = null;
 
   constructor(adapter: AiAdapter) {
@@ -74,6 +74,7 @@ export class AiSession {
       canCheckIn: raw.canCheckIn,
       dialogueOpen: raw.dialogueOpen,
       minigame: raw.minigame,
+      minigameId: raw.minigameId,
       panelOpen: raw.panelOpen,
       narrativeBusy: raw.narrativeBusy,
     });
@@ -95,15 +96,19 @@ export class AiSession {
   // -------------------------------------------------------------- 动
 
   /**
-   * 按住或松开一个 held 动作。
+   * 按住或松开一个**可按住**的动作。
+   *
+   * 可按住的全集是 `AI_HOLDABLE_ACTIONS` —— 四个骑行键**加上确认键**。
+   * 确认键为什么必须能按住，见 `types.ts` 里 `AiHoldableAction` 的注释：
+   * 茶、描云、钓鱼三处只有"按住"这一种表达方式。
    *
    * 重复按同一个状态会被**吞掉**：游戏那边是 `Set.add/delete`，
    * 重复发不会出错，但会让适配器的调用计数虚高，
    * 而调用计数正是策略判断"我这一帧到底干了什么"的依据。
    */
-  async act(action: AiHeldAction, down: boolean): Promise<AiActionResult> {
-    if (!AI_HELD_ACTIONS.includes(action)) {
-      return this.reject(`「${action}」不是 held 动作`);
+  async act(action: AiAction, down: boolean): Promise<AiActionResult> {
+    if (!(AI_HOLDABLE_ACTIONS as readonly AiAction[]).includes(action)) {
+      return this.reject(`「${action}」不是可按住的动作`);
     }
     if (this.held.has(action) === down) {
       return { accepted: true, observation: this.last() };
@@ -155,7 +160,7 @@ export class AiSession {
   }
 
   /** 本会话此刻按着的键。给策略日志用。 */
-  heldKeys(): AiHeldAction[] {
+  heldKeys(): AiAction[] {
     return [...this.held];
   }
 
@@ -194,9 +199,9 @@ export class AiSession {
   // 浏览器那一侧**必须**用 async 版本——它要真的等下一次渲染。
 
   /** 同步按住/松开。和 `act()` 同一份判断，只是不等任何东西。 */
-  actSync(action: AiHeldAction, down: boolean): AiActionResult {
-    if (!AI_HELD_ACTIONS.includes(action)) {
-      return this.reject(`「${action}」不是 held 动作`);
+  actSync(action: AiAction, down: boolean): AiActionResult {
+    if (!(AI_HOLDABLE_ACTIONS as readonly AiAction[]).includes(action)) {
+      return this.reject(`「${action}」不是可按住的动作`);
     }
     if (this.held.has(action) === down) {
       return { accepted: true, observation: this.last() };
@@ -252,7 +257,7 @@ export class AiSession {
 
 /** `tools/ai-play.mjs` 和 `verify` 共用的一步。 */
 export type AiStep =
-  | { hold: AiHeldAction; seconds?: number }
+  | { hold: AiHoldableAction; seconds?: number }
   | { tap: AiTapAction }
   | { wait: number }
   | { observe: true };

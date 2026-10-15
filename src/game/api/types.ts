@@ -67,6 +67,103 @@ export const AI_TAP_ACTIONS: readonly AiTapAction[] = [
   'advance',
 ];
 
+/**
+ * 既能点、也**能按住**的动作。
+ *
+ * ## 它为什么必须存在
+ *
+ * `act()` 原来只收 `AI_HELD_ACTIONS`（四个骑行键），于是**确认键按不住**——
+ * 而"按住确认键"在这三处是**唯一**的表达方式，不是可选项：
+ *   · **茶**：按住 3 秒才注满。连点不行——`tea.ts` 的 `setHolding(false)`
+ *     会把 `holdTime` **清零**，点一次加一帧、松手归零，永远到不了 3 秒。
+ *   · **描云**：按住空格才落笔（`cloud.ts` 的 `kDown`）。
+ *   · **钓鱼**：按住收线（`lakeside` 读 `keys.has('Space')`）。
+ *
+ * 连点能**碰巧**近似出"按住"（宿主逐帧读 `keys`，两帧之间那一下 keyup
+ * 落在帧与帧的空隙里），钓鱼就是这么被蒙过去的——但茶绕不过去，
+ * 而"靠事件时序的巧合"本来也不该是接口的语义。
+ *
+ * ## 它为什么不算进 `AI_TAP_ACTIONS`
+ *
+ * `advance` **仍然在** `AI_TAP_ACTIONS` 里——`tap('advance')` 是合法的
+ * （抛竿、咬钩、对白推进都是点一下）。所以
+ * `AI_HELD_ACTIONS.length + AI_TAP_ACTIONS.length` 这个计数**不变**，
+ * `verify_ai_actions` 那条"动作集不许少一个"的判据一个字都不用改。
+ */
+export type AiHoldableAction = AiHeldAction | 'advance';
+
+/** 能按住的全集。`act()` 收的是它，`tap()` 收的是 `AI_TAP_ACTIONS`。 */
+export const AI_HOLDABLE_ACTIONS: readonly AiHoldableAction[] = [...AI_HELD_ACTIONS, 'advance'];
+
+/**
+ * 动作在 `AI_HELP` 里的分类标签。
+ *
+ * 单独成一个函数而不是在模板里写三目：`advance` 是唯一一个**两边都在**的动作
+ * （能点也能按），而三目嵌套写出来之后，"help 里说它能按住"和
+ * "`act()` 真的收它"会各自漂——所以两边读**同一个** `AI_HOLDABLE_ACTIONS`。
+ */
+export function actionKind(a: AiAction): 'held' | 'tap' | 'both' {
+  const canHold = (AI_HOLDABLE_ACTIONS as readonly AiAction[]).includes(a);
+  const canTap = (AI_TAP_ACTIONS as readonly AiAction[]).includes(a);
+  if (canHold && canTap) return 'both';
+  return canHold ? 'held' : 'tap';
+}
+
+/**
+ * 小游戏期间**此刻真的按得出反应**的动作，按乐事 id 给。
+ *
+ * ## 它治的是什么
+ *
+ * 这里原来是一句 `out.push('advance')`——理由是"小游戏期间键盘被整体吃掉"。
+ * 那半句只对了一半：**骑行键**确实被吃掉（`bindInput()` 第一行就
+ * `if (this.mg.isRunning) return`），但小游戏自己那套键**恰恰是要用的**。
+ * 于是驱动 `window.__gift188` 的机器人被锁死在"只能按空格"：
+ *   · 古琴与禽语要 `Digit1..4` —— 一个动作都发不出，只能干等 30 秒超时；
+ *   · 描云与竹要方向键 —— 光标/刀位一步都挪不动；
+ *   · 茶要按住 —— 见 `AiHoldableAction`，按不住。
+ * 实测：五件乐事里合规机器人只能赢下**竹**（狂点空格，约一半概率），
+ * 另外四件全输，其中三件是超时。
+ *
+ * ## 为什么是「按 id 查表」而不是「一律给并集」
+ *
+ * 本项目对 `available` 的要求是**宁可少列一个，也不要列一个按了没反应的**
+ * ——列错了的代价是策略学不会区别。并集会让"禽语能按方向键"这种谎
+ * 出现在观测里，所以能精确就精确。
+ *
+ * 表里的每一项都必须**真的被那个小游戏吃掉**，这条由
+ * `verify_minigame_ai_actions` 把动作真发进去验，而不是靠读代码。
+ */
+export const MINI_GAME_AI_ACTIONS: Readonly<Record<string, readonly AiAction[]>> = {
+  /** 描云：空格落笔（可按住）+ 方向键挪光标（`cloud.ts` 的 `kDown` / `kx,ky`）。 */
+  cloud: ['advance', 'throttle', 'brake', 'left', 'right'],
+  /** 倒茶：只有确认键，而且必须**按住**满 3 秒。 */
+  tea: ['advance'],
+  /** 古琴：`NOTE_KEYS = Digit1..4`（`zither.ts`）。确认键在这屏什么也不做。 */
+  zither: ['item1', 'item2', 'item3', 'item4'],
+  /** 竹：空格挥刀（点，不是按）+ 左右挪刀位。上下不接。 */
+  bamboo: ['advance', 'left', 'right'],
+  /** 禽语：`CHOICE_KEYS = Digit1..4` 选答案（`bird.ts`）。 */
+  bird: ['item1', 'item2', 'item3', 'item4'],
+  /**
+   * 琴音林的自由演奏（不轮换、不计分，见 `MINI_GAME_IDS` 的注释）。
+   * 三个八度压在 `ZXCVBNM` / `QWERTYU` / `Digit1..7` 上，其中能被 AI 动作
+   * 够到的只有：数字行高八度（`item1..4` → `Digit1..4`）、
+   * `KeyV` / `KeyE` / `KeyM`（`camera` / `vehicle` / `mute`）。
+   */
+  qin: ['item1', 'item2', 'item3', 'item4', 'camera', 'vehicle', 'mute'],
+};
+
+/**
+ * id 未知时退回的并集。
+ *
+ * 只在"宿主没报 id"时用得上（真实宿主一定报）。它存在的理由是
+ * **空集比并集坏得多**：这一屏从"能玩"退化成"一步都走不了"，
+ * 正是修这条 bug 之前的样子。宁可多给，也不要把一屏变成死屏。
+ */
+export const MINI_GAME_AI_ACTIONS_ANY: readonly AiAction[] = [
+  ...new Set(Object.values(MINI_GAME_AI_ACTIONS).flat()),
+];
+
 /** 动作 → `KeyboardEvent.code`。**这是键盘与接口之间唯一的翻译表。**
  *
  * 用 `code` 而不是 `key`，和 `bindInput()` 保持一致：
@@ -267,6 +364,18 @@ export interface AiObservation {
   dialogueText: string;
   /** 小游戏正在跑。 */
   minigame: boolean;
+  /**
+   * 正在跑的是哪一件乐事（`'cloud' | 'tea' | 'zither' | 'bamboo' | 'bird' | 'qin'`），
+   * 没在跑就是 `null`。
+   *
+   * **它是 `minigame` 那个布尔之外的附加字段，不是它的替代。**
+   * 布尔回答"有没有"，这个回答"是哪一件"——而 `describeActions()`
+   * 要靠后者才给得出那一屏**真正的**键位（见 `MINI_GAME_AI_ACTIONS`）。
+   * 两件事分开而不是把布尔换成联合类型，是因为前者有六个调用方
+   * （`live.ts` 的事件影子比对、`session.ts` 的闸门、两处回归），
+   * 而它们全都只关心"有没有"。
+   */
+  minigameId: string | null;
   /** 面板类 UI 是否压着（暂停 / 商店 / 明信片 / 结算）。 */
   panelOpen: boolean;
 
@@ -342,17 +451,26 @@ export function describeActions(o: {
   panelOpen: boolean;
   /** 有叙事段落/打卡过场正在占着屏幕。 */
   narrativeBusy?: boolean;
+  /**
+   * 正在跑哪一件乐事。**给了就按它的真实键位给动作**，不给就退回并集。
+   *
+   * 它是可选参数而不是必填，是为了让"只想问某个相位能按什么"的调用方
+   * （回归里那张 `REAL` 表）不用为小游戏单独编一个 id。
+   */
+  minigameId?: string | null;
 }): AiAction[] {
   const out: AiAction[] = [];
-  // 小游戏自己吃键盘：`bindInput()` 第一行就 `if (this.mg.isRunning) return`。
+  // 小游戏自己吃键盘——但**只吃掉骑行那一套**。
+  // `bindInput()` 第一行 `if (this.mg.isRunning) return` 拦的是宿主自己那层；
+  // 小游戏模块自己的 `onKeyDown` 恰恰在等这些键。原来这里一律只给 `advance`，
+  // 后果见 `MINI_GAME_AI_ACTIONS` 的注释（五件里四件打不动）。
   // 判据上要认**两个**信号：宿主自己报的 `minigame` 布尔，
   // 以及相位已经是 `minigame` —— 后者是 `runMiniGame()` 切过去的，
   // 而两者之间有一小段谁先谁后。漏掉相位那个，
   // 症状是「AI 在小游戏刚开始的那两帧里按 W，车动了」。
   if (o.minigame || o.phase === 'minigame') {
-    // 五个小游戏都把"确认/下一步"接在确认键上，
-    // 具体落哪个键由适配器路由（见 `live.ts`）。
-    out.push('advance');
+    const known = o.minigameId ? MINI_GAME_AI_ACTIONS[o.minigameId] : undefined;
+    out.push(...(known ?? MINI_GAME_AI_ACTIONS_ANY));
     return out;
   }
   if (o.dialogueOpen) {
@@ -434,9 +552,9 @@ Gift No.188 · AI 可游玩接口
   2. 无头 Node  npm run ai:play    —— 不占显卡，跑策略与批量搜索
   3. 回归      src/verify/ai.ts   —— 守住动作集与接线
 
-动作（held = 按住不放，tap = 点一下）：
+动作（held = 按住不放，tap = 点一下，both = 两种都行）：
 ${(Object.keys(AI_KEYS) as AiAction[])
-  .map((a) => `  ${a.padEnd(9)} ${AI_HELD_ACTIONS.includes(a as AiHeldAction) ? 'held' : 'tap '}  ${AI_KEYS[a].join(' / ')}`)
+  .map((a) => `  ${a.padEnd(9)} ${actionKind(a).padEnd(5)}${AI_KEYS[a].join(' / ')}`)
   .join('\n')}
 
 方法（全部挂在同一个对象上）：
@@ -455,7 +573,12 @@ ${(Object.keys(AI_KEYS) as AiAction[])
 
 动作此刻无效时 act / tap **返回 { accepted: false, reason }**，
 不会默默发出去——策略需要知道自己这一步被拒了。
-只有 held 动作进 heldKeys()；tap 不进，也不用 releaseAll() 兜底。
+只有能按住的动（四个骑行键 + advance）进 heldKeys()；纯 tap 的不进，
+也不用 releaseAll() 兜底。
+
+小游戏期间 available 会变成**那一件乐事真正的键位**（见 MINI_GAME_AI_ACTIONS）：
+描云/竹要方向键、古琴/禽语要 item1..4、茶要按住 advance。
+观测里的 minigameId 告诉你正在跑哪一件。
 
 典型循环：
   while (true) {

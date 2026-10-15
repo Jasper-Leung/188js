@@ -263,6 +263,20 @@ export class MiniGameHost {
     return this.running;
   }
 
+  /**
+   * 正在跑的是哪一件乐事，没在跑就是 `null`。
+   *
+   * 给 AI 可游玩接口用：`describeActions()` 靠它算出这一屏**真正的**键位
+   * （描云要方向键、古琴与禽语要数字键、茶要按住确认键）。
+   * 只报"有没有在跑"是不够的——那正是五件乐事里四件打不动的原因。
+   *
+   * 读 `this.game` 而不是另存一个字段：`settle()` 与 `dispose()` 都把
+   * `game` 置回 `null`，多存一份就多一处会忘记同步的地方。
+   */
+  get id(): MiniGameId | null {
+    return this.game?.id ?? null;
+  }
+
   // ---------------------------------------------------------------- 结算
   private finish(result: MiniGameResult) {
     if (!this.running || this.resultT >= 0) return;
