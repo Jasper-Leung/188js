@@ -1,3 +1,5 @@
+import { registerQualityChecks } from './quality';
+import { registerExperienceChecks } from './experience';
 /**
  * 回归自检 —— 移植后这些数必须仍然成立。
  *
@@ -59,7 +61,7 @@ import { PausePanel } from '../ui/pausePanel';
 import { isShown } from '../ui/dom';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
-import { PRESETS, clampTier } from '../core/settings';
+import { PRESETS } from '../core/settings';
 import { DEFAULT_LANG, getLang, isEnglish, setLang, t, stationNameOf } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
@@ -300,20 +302,11 @@ check('verify_stations', () => {
     }
   }
 
-  // ---- 琴音林：林冠地块必须拉成"高的树"，且标签浮在它上面 ----
-  //
-  // `station_2.glb` 的贴图是**从空中俯拍的一整片林冠**，不是亭子，
-  // 所以它天然是 10.0m 宽 × 9.0m 高的地块（高宽比 0.903），摆出来
-  // 是一块扁平绿毯。见 `stations.ts` 的 `STATION_STRETCH`。
-  //
-  // 两条各自会红的做法：
-  //   · 把 `[1, 2.6]` 改回 `[1, 1]` → 高宽比 0.903 < 1.6，红。
-  //   · 拉高了却不抬 `labelY` → 标签挂在 26m 而树只有 9m，
-  //     或者反过来标签埋进 23.4m 的树冠里，红。
+  // v1.0.2 用户要求保留原比例，标签仍必须高于树冠。
   asserts++;
   if (ZITHER_STATION_IDX >= 0) {
     const [sx, sy] = stationStretch(ZITHER_MODEL_IDX);
-    if (sx !== 1) {
+    if (sx !== sy) {
       probs.push(`琴音林的水平倍率是 ${sx}，拉高不许动占地（18−5=13m，只剩 0.7m 余量到 13.7m 判据）`);
     }
     // 模型实测尺寸（模型单位，贴图与顶点量出来的）
@@ -321,8 +314,8 @@ check('verify_stations', () => {
     const MODEL_H = 0.903;
     const scale = WORLD.STATION_GLB_CONFIG[ZITHER_MODEL_IDX].scale;
     const ratio = (MODEL_H * scale * sy) / (MODEL_W * scale * sx);
-    if (ratio < 1.6) {
-      probs.push(`琴音林拉高后高宽比只有 ${ratio.toFixed(2)}，读不成"高的树"（应 ≥1.6）`);
+    if (Math.abs(ratio - MODEL_H / MODEL_W) > 1e-6) {
+      probs.push(`琴音林拉高后高宽比只有 ${ratio.toFixed(2)}，应保持源模型比例`);
     }
     // 站名标签必须浮在树冠之上
     const labelY = labelYFor(ZITHER_MODEL_IDX, WORLD.STATION_GLB_CONFIG[ZITHER_MODEL_IDX].label_y);
@@ -1978,7 +1971,7 @@ check('verify_skip_and_affordance', () => {
     // 必须排在 `mg.run(` **之前**：排在之后，那句话就被小游戏盖住了，
     // 而它本来就是给「接下来要玩」这件事做解释的。
     const whyAt = main.indexOf('minigame_why');
-    const runAt = main.indexOf('this.mg.run(');
+    const runAt = main.indexOf('this.mg.run(', main.indexOf('private async runMiniGame('));
     if (whyAt < 0) {
       probs.push('main.ts 里没有那条「为什么要玩」的说明——玩家看到的是"按了空格 → 它开始考我"');
     } else {
@@ -2686,63 +2679,7 @@ check('verify_mini_game', () => {
 });
 
 // ---------------------------------------------------------------- 画质分档
-check('verify_quality', () => {
-  let asserts = 0;
-  const probs: string[] = [];
-  const lo = PRESETS[0];
-  const mid = PRESETS[1];
-  const hi = PRESETS[2];
-
-  // 低档必须真的低：这是整个项目对"低配电脑"承诺的兑现点
-  asserts++;
-  if (lo.renderScale >= mid.renderScale || mid.renderScale >= hi.renderScale) {
-    probs.push('渲染分辨率没有随档位单调下降');
-  }
-  asserts++;
-  if (lo.shadowMapSize !== 0) probs.push('低档没关阴影');
-
-  // 地面细节必须随档位单调下降，而且**低档必须是 0**。
-  // 它现在是着色器里的两项噪声（草丛斑块 + 方向性短纹），
-  // 比几何体草皮便宜得多，但仍然是全屏的 fbm —— 低档该省还是得省。
-  asserts++;
-  if (!(lo.groundDetail < mid.groundDetail && mid.groundDetail < hi.groundDetail)) {
-    probs.push(`地面细节没有随档位单调上升：${lo.groundDetail} / ${mid.groundDetail} / ${hi.groundDetail}`);
-  }
-  asserts++;
-  if (lo.groundDetail !== 0) probs.push(`低档地面细节是 ${lo.groundDetail}，应当为 0`);
-
-  // 植被半径单调
-  asserts++;
-  if (!(lo.treeRadius < mid.treeRadius && mid.treeRadius < hi.treeRadius)) probs.push('树半径不单调');
-  asserts++;
-  if (!(lo.groundDetailRadius < mid.groundDetailRadius && mid.groundDetailRadius < hi.groundDetailRadius)) {
-    probs.push('地面细节半径不单调');
-  }
-
-  // 雾的远端必须盖过植被半径，否则会看见"从雾里长出来"的树
-  asserts++;
-  for (const [name, p] of [['低', lo], ['中', mid], ['高', hi]] as const) {
-    if (p.fogFar < p.treeRadius) probs.push(`${name}档雾远 ${p.fogFar}m < 树半径 ${p.treeRadius}m`);
-  }
-
-  // 地标加载距离也要被雾盖住
-  asserts++;
-  for (const [name, p] of [['低', lo], ['中', mid], ['高', hi]] as const) {
-    if (p.stationLoadDistance > p.fogFar) probs.push(`${name}档地标加载距离超过雾远`);
-  }
-
-  // 夹取
-  asserts++;
-  if (clampTier(9) !== 2 || clampTier(-3) !== 0) probs.push('tier 夹取坏了');
-  asserts++;
-  if (!(TIER_LOW === 0 && TIER_MEDIUM === 1 && TIER_HIGH === 2)) probs.push('档位常量不是 0/1/2');
-
-  // 分档表必须正好三档，UI 的按钮是按这个数量摆的
-  asserts++;
-  if (Object.keys(PRESETS).length !== 3) probs.push(`画质预设 ${Object.keys(PRESETS).length} 档，应为 3`);
-
-  return expect(probs.length === 0, probs.length ? probs.join('；') : `低 ${lo.renderScale}× / 高 ${hi.renderScale}×`, asserts);
-});
+registerQualityChecks(check);
 
 // ---------------------------------------------------------------- 心神
 check('verify_mood', () => {
@@ -3951,7 +3888,7 @@ check('verify_save_notice', () => {
       probs.push('main.ts 里没有 announceSaveState()——两条提示没有落点');
     } else if (fixed < 0) {
       probs.push("main.ts 里找不到 `private fixed(dt` —— 这条判据要跟着改");
-    } else if (main.indexOf('this.announceSaveState();') < 0 || main.indexOf('this.announceSaveState();') > fixed + 900) {
+    } else if (!main.slice(fixed, main.indexOf('private tickPoseSave', fixed)).includes('this.announceSaveState();')) {
       probs.push('announceSaveState() 没有从 fixed() 里调到——挂在 render() 上会让暂停面板里也冒提示');
     }
   }
@@ -6409,15 +6346,16 @@ check('verify_phase', () => {
     // 迁移**只**能通过 goPhase 发生：调用点一个都不能少。
     // 14 → 15 是琴音林那张琴（`runGuqin()` 复用 `checkin` 相位）。
     // 15 → 17 是湖边一屏的进与出（`enterLakeside()` / `exitLakeside()`）。
-    // 这个数是**下界**，不是装饰：有人把一处 `goPhase()` 改成直接赋值时，
+    // 17 → 18 是经营面板进入 checkin；关闭仍复用 toRoaming。
+    // 有人把一处 `goPhase()` 改成直接赋值时，
     // 上面那条 `writes !== 1` 会先红；而有人**删掉**一处调用点时，
     // 下一条迁移就没了入口——那两件事都只有计数能看见。
     asserts++;
     const calls = [...main.matchAll(/this\.goPhase\('/g)].length;
     asserts++;
-    if (calls !== 17) {
-      probs.push(`main.ts 里 this.goPhase() 的调用点有 ${calls} 处，应为 17 处`
-        + '（15 处原迁移 + 琴音林自由演奏 + 湖边一屏的进/出）');
+    if (calls !== 18) {
+      probs.push(`main.ts 里 this.goPhase() 的调用点有 ${calls} 处，应为 18 处`
+        + '（14 处原迁移 + 琴音林 + 湖边进/出 + 经营面板）');
     }
   }
 
@@ -7545,16 +7483,15 @@ check('verify_pedal_sync', () => {
         //     老实现在 2 m/s 是 3.19 倍，所以 1.5 这个闸门足够把这族故障挡住，
         //     又留得住 ±8% 里那点素材噪声（见文件头）。
         const rows: string[] = [];
-        for (const speed of [2, 5, 8]) {
+        for (const speed of [1, 2, 5, 8, 12, 15]) {
           asserts++;
           const r = drive(speed, 6);
           const ratio = r.crank > 1e-6 ? r.foot / r.crank : 0;
-          const capped = crankOf(speed) / RATE >= PEDAL_CADENCE_MAX;
           rows.push(`${speed}m/s 倍率 ${r.ts.toFixed(2)} 脚 ${r.foot.toFixed(2)} 圈 / 曲柄 ${r.crank.toFixed(2)} 圈 = ${ratio.toFixed(2)}`);
           if (ratio > 1.5) {
             probs.push(`${speed} m/s：脚比曲柄快 ${ratio.toFixed(2)} 倍（${r.foot.toFixed(2)} 圈 vs ${r.crank.toFixed(2)} 圈）—— 回到「脚在抡」那一族了`);
           }
-          if (!capped && (ratio < 0.85 || ratio > 1.15)) {
+          if (ratio < 0.85 || ratio > 1.15) {
             probs.push(`${speed} m/s（未撞上限）：脚/曲柄 = ${ratio.toFixed(2)}，应在 1 附近`);
           }
           asserts++;
@@ -7580,8 +7517,9 @@ check('verify_pedal_sync', () => {
             const a = new Vector3();
             const b = new Vector3();
             const d: number[] = [];
-            for (let i = 0; i < 360; i++) {
-              v.update(1 / 60, 8, 0);
+            for (let i = 0; i < 1200; i++) {
+              const speed = [1, 5, 8, 12, 15][Math.floor(i / 240)];
+              v.update(1 / 60, speed, 0);
               realModels.char.updateMatrixWorld(true);
               realModels.bicycle.updateMatrixWorld(true);
               pL.getWorldPosition(a);
@@ -7592,10 +7530,13 @@ check('verify_pedal_sync', () => {
               }
             }
             const mean = d.reduce((x, y) => x + y, 0) / d.length;
+            const peak = Math.max(...d);
+            asserts++;
+            if (peak > 0.08) probs.push(`全速度脚踏偏差峰值 ${peak.toFixed(3)}m > 0.08m`);
             if (mean > 0.06) {
               probs.push(`脚离最近踏板均值 ${mean.toFixed(3)}m（应 ≤ 0.06m）—— 骑手读作在旁边空踩`);
             }
-            notes.push(`脚→踏板均值 ${(mean * 100).toFixed(1)}cm（烘焙前 17.1cm）`);
+            notes.push(`脚→踏板均值 ${(mean * 100).toFixed(1)}cm、峰值 ${(peak * 100).toFixed(1)}cm（1/5/8/12/15 m/s）`);
             // ②c-2 ★★ **循环必须真的闭合**：这一条是专门给「跨腿复用可变量」
             //   那一族 bug 留的。
             //
@@ -9220,6 +9161,7 @@ function ensureStubDom(): StubDom {
 // 以保住注册顺序——理由见那个文件的头。
 registerDeliveryChecks(check);
 registerSceneryChecks(check);
+registerExperienceChecks(check);
 
 /**
  * 第一次玩的人撞得到、而回归套件一条都问不到的那一族：
