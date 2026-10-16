@@ -81,6 +81,9 @@ export class XrSession {
   private bound = false;
   /** 现在真的在会话里吗。用来让 `onSessionChange(false)` 只发一次。 */
   private wasPresenting = false;
+  private entering = false;
+  private generation = 0;
+  private controllerDisposers: Array<() => void> = [];
 
   constructor(host: XrHost) {
     this.host = host;
@@ -131,9 +134,9 @@ export class XrSession {
    * 于是"进出湖边两次"会让这两个会话事件挂上两遍——正是上面那个症状。
    */
   enable(): void {
+    this.gl.xr.enabled = true;
     if (this.bound) return;
     this.bound = true;
-    this.gl.xr.enabled = true;
     this.gl.xr.addEventListener('sessionstart', () => this.onSessionStart());
     this.gl.xr.addEventListener('sessionend', () => this.onSessionEnd());
     // `onEnd` 是宿主给的「会话结束回调注册」，一次性。
@@ -168,6 +171,7 @@ export class XrSession {
    * 那个事件是幂等的）。
    */
   disable(): void {
+    this.generation++;
     this.gl.xr.enabled = false;
     this.onSessionEnd();
     // 先记账再结束会话：`onSessionEnd()` 已经把 `wasPresenting` 按成 false，
@@ -216,19 +220,28 @@ export class XrSession {
    */
   async enter(): Promise<boolean> {
     if (this.gl.xr.isPresenting) return true;
-    if (!XrSession.hasApi()) return false;
+    if (!XrSession.hasApi() || this.entering) return false;
+    this.entering = true;
+    const generation = this.generation;
+    let pending: XRSession | null = null;
     this.enable();
     try {
       const session = await navigator.xr!.requestSession('immersive-vr', {
         optionalFeatures: ['local-floor', 'bounded-floor'],
       });
+      pending = session;
+      if (generation !== this.generation) { await session.end(); return false; }
       await this.gl.xr.setSession(session);
+      if (generation !== this.generation) {
+        this.onSessionEnd();
+        await session.end();
+        return false;
+      }
       return true;
     } catch {
-      // 玩家拒绝授权、头显被拔掉、或者这一台机器其实不支持。
-      // 三种都不该把游戏弄坏——按钮按了没成，说一声就够了。
+      await pending?.end().catch(() => {});
       return false;
-    }
+    } finally { this.entering = false; }
   }
 
   private onSessionStart(): void {
@@ -243,6 +256,7 @@ export class XrSession {
     void session
       .requestReferenceSpace('local')
       .then(() => {
+        if (!this.wasPresenting || this.gl.xr.getSession() !== session) return;
         // **只手，不用 grip。** three r169 只有 `getController(i)` 这个单数形式，
         // 而 `getControllerGrips()` 是后来才有的；两只手各取一个就够了——
         // 这一屏不需要手柄的位姿（玩家自己走动），只需要按键与摇杆。
@@ -266,12 +280,16 @@ export class XrSession {
       addEventListener(t: string, fn: (ev: unknown) => void): void;
       userData: Record<string, unknown>;
     };
-    s.addEventListener('selectstart', () => this.down(codeOf(BUTTON_ACTIONS.trigger)));
-    s.addEventListener('selectend', () => this.up(codeOf(BUTTON_ACTIONS.trigger)));
-    s.addEventListener('squeezestart', () => this.down(codeOf(BUTTON_ACTIONS.grip)));
-    s.addEventListener('squeezeend', () => this.up(codeOf(BUTTON_ACTIONS.grip)));
+    const listen = (name: string, fn: (ev: unknown) => void) => {
+      s.addEventListener(name, fn);
+      this.controllerDisposers.push(() => src.removeEventListener(name as never, fn as never));
+    };
+    listen('selectstart', () => this.down(codeOf(BUTTON_ACTIONS.trigger)));
+    listen('selectend', () => this.up(codeOf(BUTTON_ACTIONS.trigger)));
+    listen('squeezestart', () => this.down(codeOf(BUTTON_ACTIONS.grip)));
+    listen('squeezeend', () => this.up(codeOf(BUTTON_ACTIONS.grip)));
     // 模拟摇杆：把轴值当成方向键，跨过死区时**按下**、回到死区内时**松开**。
-    s.addEventListener('axismove', (ev) => {
+    listen('axismove', (ev) => {
       const e = ev as { axis?: number; value?: number };
       const idx = e.axis;
       if (idx == null) return;
@@ -320,6 +338,8 @@ export class XrSession {
     this.buttons.clear();
     this.axes.clear();
     this.pressedThisFrame.clear();
+    for (const dispose of this.controllerDisposers) dispose();
+    this.controllerDisposers = [];
     for (const c of this.controllers) c.parent?.remove(c);
     this.controllers = [];
   }

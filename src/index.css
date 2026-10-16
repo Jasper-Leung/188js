@@ -74,7 +74,8 @@ body {
   z-index: 10;
 }
 
-#ui-root > * {
+/* HUD 根必须穿透到湖边画布；弹层和按钮各自声明交互区域。 */
+#ui-root > :not(.g-root) {
   pointer-events: auto;
 }
 

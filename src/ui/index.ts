@@ -1074,6 +1074,7 @@ readonly touch: {
   /** 触屏控件开关（由 main 根据 `pointer: coarse` 决定）。 */
   setTouchMode(on: boolean): void {
     this.touchMode = on;
+    this.root.dataset.touch = on ? 'on' : 'off';
     this.onboarding.setTouch(on);
     this.hud.setTouchMode(on);
     this.applyTouchVisibility();
