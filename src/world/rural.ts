@@ -1,4 +1,4 @@
-import { Group, InstancedMesh, BoxGeometry, PlaneGeometry, CircleGeometry, MeshStandardMaterial, MeshBasicMaterial, Object3D, DoubleSide } from 'three';
+import { Group, InstancedMesh, BoxGeometry, PlaneGeometry, MeshStandardMaterial, MeshBasicMaterial, Object3D, DoubleSide, DataTexture, RGBAFormat, LinearFilter, AdditiveBlending, Vector3 } from 'three';
 import { pointAtArcLength, TOTAL_ARCLENGTH, STATIONS, distToCenterline } from '../data/route';
 import { WORLD_EXPERIENCE } from '../data/worldExperience';
 import { getBasins, WATER_LEVEL } from './basins';
@@ -44,11 +44,28 @@ export function ruralPlan(seed: number = C.seed): RuralPlacement[] {
   }
   return out;
 }
+/** Compact radial texture with zero alpha and zero slope at its entire boundary. */
+export function lampHaloTexture(size = 64): DataTexture {
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const r = Math.hypot((x / (size - 1) - .5) * 2, (y / (size - 1) - .5) * 2);
+    const taper = Math.max(0, 1 - r * r);
+    const i = (y * size + x) * 4;
+    data[i] = data[i+1] = data[i+2] = 255;
+    data[i+3] = Math.round(255 * Math.exp(-3 * r * r) * taper * taper);
+  }
+  const texture = new DataTexture(data, size, size, RGBAFormat);
+  texture.magFilter = texture.minFilter = LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
 export class Rural {
   readonly group = new Group();
   readonly placements = ruralPlan();
   private glow = new MeshBasicMaterial({color:0xffd28a,transparent:true,opacity:0,depthWrite:false});
-  private pool = new MeshBasicMaterial({color:0xffce83,transparent:true,opacity:0,depthWrite:false,side:DoubleSide});
+  private haloMap = lampHaloTexture();
+  private pool = new MeshBasicMaterial({map:this.haloMap,color:0xffd6a0,transparent:true,opacity:0,depthWrite:false,side:DoubleSide,blending:AdditiveBlending,toneMapped:false});
+  private halo = new MeshBasicMaterial({map:this.haloMap,color:0xffdfa8,transparent:true,opacity:0,depthWrite:false,side:DoubleSide,blending:AdditiveBlending,toneMapped:false});
   private windows = new MeshBasicMaterial({color:0xffd89b});
   private lit: InstancedMesh[] = [];
   private radius = 100;
@@ -56,15 +73,22 @@ export class Rural {
     this.group.name='rural-road'; this.setPreset(preset);
     const lamps=this.placements.filter(p=>p.kind==='lamp'), posts=this.placements.filter(p=>p.kind==='post'), crops=this.placements.filter(p=>p.kind==='crop');
     const metal=new MeshStandardMaterial({color:0x526057,roughness:1}), white=new MeshStandardMaterial({color:0xd8d2bf,roughness:1}), green=new MeshStandardMaterial({color:0x69794a,roughness:1});
-    const make=(geo: BoxGeometry | PlaneGeometry | CircleGeometry,mat:MeshStandardMaterial|MeshBasicMaterial, list:readonly RuralPlacement[],offset:number,tilt=false)=>{
+    const make=(geo: BoxGeometry | PlaneGeometry,mat:MeshStandardMaterial|MeshBasicMaterial, list:readonly RuralPlacement[],offset:number,tilt=false)=>{
       const mesh=new InstancedMesh(geo,mat,list.length),o=new Object3D();
-      list.forEach((p,i)=>{o.position.set(p.x,Math.max(terrain.getHeightAt(p.x,p.z),WATER_LEVEL+.2)+offset,p.z);o.rotation.set(tilt?-Math.PI/2:0,p.yaw,0);o.updateMatrix();mesh.setMatrixAt(i,o.matrix);});
+      list.forEach((p,i)=>{o.position.set(p.x,Math.max(terrain.getHeightAt(p.x,p.z),WATER_LEVEL+.2)+offset,p.z);o.rotation.set(0,p.yaw,0);
+        if (tilt) {
+          const normal = new Vector3(terrain.getHeightAt(p.x-.5,p.z)-terrain.getHeightAt(p.x+.5,p.z),1,terrain.getHeightAt(p.x,p.z-.5)-terrain.getHeightAt(p.x,p.z+.5)).normalize();
+          o.quaternion.setFromUnitVectors(new Vector3(0,0,1),normal);
+        }
+        o.updateMatrix();mesh.setMatrixAt(i,o.matrix);});
       mesh.userData.placements=list; mesh.instanceMatrix.needsUpdate=true; mesh.computeBoundingSphere(); this.group.add(mesh);return mesh;
     };
     make(new BoxGeometry(.12,C.lampHeight,.12),metal,lamps,C.lampHeight/2);
     make(new BoxGeometry(1.5,.12,.18),metal,lamps,C.lampHeight);
     this.lit.push(make(new BoxGeometry(1,.08,.3),this.glow,lamps,C.lampHeight-.1));
-    this.lit.push(make(new CircleGeometry(3,12),this.pool,lamps,.08,true));
+    this.lit.push(make(new PlaneGeometry(C.lightRadius*2,C.lightRadius*2),this.pool,lamps,.1,true));
+    this.lit.push(make(new PlaneGeometry(2.2,2.2),this.halo,lamps,C.lampHeight-.1));
+    this.lit.push(make(new PlaneGeometry(2.2,2.2),this.halo,lamps.map(p=>({...p,yaw:p.yaw+Math.PI/2})),C.lampHeight-.1));
     make(new BoxGeometry(.18,.9,.18),white,posts,.45);
     make(new BoxGeometry(.21,.15,.21),this.windows,posts,.7);
     make(new BoxGeometry(.28,.35,1.5),green,crops,.17);
@@ -73,7 +97,7 @@ export class Rural {
   }
   setPreset(p: QualityPreset):void { this.radius = p.shadowMapSize === 0 ? C.viewDistance[0] : p.shadowMapSize <= 1024 ? C.viewDistance[1] : C.viewDistance[2]; }
   update(night:number,x:number,z:number):void {
-    this.glow.opacity=night*.95;this.pool.opacity=night*.17;
+    this.glow.opacity=night*.95;this.pool.opacity=night*C.poolOpacity;this.halo.opacity=night*C.haloOpacity;
     this.windows.color.setHex(night>.5?0xf1d5a0:0xe2d8c3);
     for(const mesh of this.lit) mesh.visible=night>.01;
     // 少量实例共用材料；按每种设施整体包围范围剔除，不增加实时灯或阴影。

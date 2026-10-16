@@ -124,6 +124,7 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     this.root.appendChild(stickWrap);
 
     this.stick.addEventListener('pointerdown', (e) => {
+      if (this.pointerId !== -1) return;
       this.pointerId = e.pointerId;
       this.stick.setPointerCapture(e.pointerId);
       this.moveTo(e);
@@ -173,6 +174,7 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     // `click` 只在没有指针参与时才发——否则一次点按会派发两次，
     // 而钓鱼那 1.15 秒的咬钩窗里按两下和按一下不是一回事。
     let pointerCast = false;
+    let actionPointer = -1;
     this.checkBtn = button(t('touch_checkin_button'), {
       cls: 'g-touch-check',
       onClick: () => {
@@ -184,6 +186,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       },
     });
     const press = (e: PointerEvent) => {
+      if (actionPointer !== -1) return;
+      actionPointer = e.pointerId;
       try { this.checkBtn.setPointerCapture(e.pointerId); } catch { /* 某些浏览器拒绝 */ }
       pointerCast = true;
       this.state.holdPressed = true;
@@ -191,6 +195,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       e.preventDefault();
     };
     const releaseAction = (e: PointerEvent) => {
+      if (actionPointer !== e.pointerId) return;
+      actionPointer = -1;
       try { this.checkBtn.releasePointerCapture(e.pointerId); } catch { /* 同上 */ }
       this.state.holdPressed = false;
     };
@@ -274,6 +280,9 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
      * 所以只靠那四个监听器不够，这里再兜一层。
      */
     const dropAll = () => {
+      actionPointer = -1;
+      pointerCast = false;
+      actPointer = false;
       this.state.moveX = 0;
       this.state.moveY = 0;
       this.state.checkInPressed = false;
@@ -405,6 +414,12 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
    */
   private toggleMute(): void {
     this.hooks.onMuteChange(audio.bgmMuted, audio.sfxMuted, !audio.fullyMuted);
+  }
+
+  /** Hiding chrome must stop held actions without stopping the invisible joystick. */
+  releaseActions(): void {
+    this.state.holdPressed = false;
+    this.state.checkInPressed = false;
   }
 
   setMode(on: boolean): void {

@@ -59,6 +59,7 @@ import { MAP_BAND_FRAC } from '../game/postcard/layout';
 import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/storyCard';
 import { PausePanel } from '../ui/pausePanel';
 import { isShown } from '../ui/dom';
+import { registerInteractionChecks } from './interaction';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS } from '../core/settings';
@@ -9162,6 +9163,7 @@ function ensureStubDom(): StubDom {
 registerDeliveryChecks(check);
 registerSceneryChecks(check);
 registerExperienceChecks(check);
+registerInteractionChecks(check, () => ensureStubDom().parent());
 
 /**
  * 第一次玩的人撞得到、而回归套件一条都问不到的那一族：

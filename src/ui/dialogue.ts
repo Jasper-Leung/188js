@@ -37,6 +37,13 @@ import { t } from '../i18n';
  */
 const CHARS_PER_SEC = 26;
 
+export type DialogueLines = readonly (string | readonly string[])[];
+
+/** Paragraph arrays preserve the selected story branch; punctuation is never guessed. */
+export function dialogueLines(parts: DialogueLines): string[] {
+  return parts.flatMap(part => typeof part === 'string' ? [part] : [...part]).filter(line => line.trim().length > 0);
+}
+
 export class Dialogue {
   readonly root: HTMLDivElement;
 
@@ -47,6 +54,7 @@ export class Dialogue {
   private skipHintEl: HTMLDivElement;
 
   private lines: string[] = [];
+  private onSkipToNext: (() => void) | null = null;
   private lineIdx = 0;
   /** 当前行已经露出几个字。 */
   private shownChars = 0;
@@ -66,10 +74,7 @@ export class Dialogue {
     box.appendChild(this.textEl);
 
     const bar = el('div', 'g-dlg-bar');
-    // 「连按两次才跳完整段」是一条**规则**，玩家第一次看到「跳到最后一句」
-    // 时会以为是自己读漏了。所以那一句得挂在按钮旁边，而不是记在脑子里。
-    // 只在**还剩两句以上**时出现——只剩一句时按钮已经叫「跳到最后一句」，
-    // 再挂一句"连按两次"是废话。
+    // 提示区分普通文本的末句与宿主指定的小游戏/特殊节点。
     this.skipHintEl = el('div', 'g-dlg-skip-hint', t('dialogue_skip_hint'));
     bar.appendChild(this.skipHintEl);
     this.nextBtn = button(t('dialogue_next'), { cls: 'g-dlg-next' });
@@ -81,7 +86,11 @@ export class Dialogue {
     parent.appendChild(this.root);
 
     // 点击框外的空白处也推进：原作是点哪都行，而对话框只占屏幕下方一条
-    this.root.addEventListener('click', () => this.advance());
+    this.root.addEventListener('click', (e) => {
+      if (!(e?.target as HTMLElement)?.closest?.('button')) this.advance();
+    });
+    this.nextBtn.addEventListener('click', (e) => { e?.stopPropagation(); this.advance(); });
+    this.skipBtn.addEventListener('click', (e) => { e?.stopPropagation(); this.skipToEnd(); });
 
     wireKeyActivate(this.nextBtn, () => this.advance());
     wireKeyActivate(this.skipBtn, () => this.skipToEnd());
@@ -101,9 +110,12 @@ export class Dialogue {
   private autoAdvanceSec = 0;
   private autoT = 0;
 
-  show(speaker: string, lines: string[]): Promise<void> {
+  show(speaker: string, lines: DialogueLines, onSkipToNext?: () => void): Promise<void> {
     this.finish();
-    this.lines = lines.length ? lines : [''];
+    this.lines = dialogueLines(lines);
+    this.onSkipToNext = onSkipToNext ?? null;
+    this.autoT = 0;
+    if (!this.lines.length) { this.onSkipToNext = null; return Promise.resolve(); }
     this.lineIdx = 0;
     this.shownChars = 0;
     this.typing = this.lines[0].length > 0;
@@ -173,6 +185,7 @@ export class Dialogue {
   /** 空格 / 点击：先把这一行吐完，吐完了再下一行。 */
   private advance(): void {
     if (!this.active) return;
+    this.autoT = 0;
     if (this.typing) {
       this.shownChars = this.lines[this.lineIdx]?.length ?? 0;
       this.typing = false;
@@ -191,32 +204,18 @@ export class Dialogue {
     this.syncButtons();
   }
 
-  /**
-   * 「跳过」：**跳到最后一句**，而不是直接收场。
-   *
-   * ## 为什么不是"跳过整段"
-   *
-   * 原来 `skipBtn` 直接调 `finish()`，症状是玩家点了「跳过 >>」，
-   * 整段对白瞬间消失——包括**他还没读的那几句**。
-   *
-   * 这三句不是提示，是叙事：序章那七句交代了主角是谁、为什么上路、
-   * "她"是谁。一点就全没了，于是这个按钮的读法变成"我把这段故事弄丢了"，
-   * 而玩家的本意只是"别一句一句点了"。
-   *
-   * ## 为什么**不能**把最后一句也跳掉
-   *
-   * 因为 `runMiniGame()` 是 `await whenDialogueIdle()` 之后才开小游戏的
-   * （`main.ts:1480`）。**最后一句正是"要玩一件乐事"这件事的落点**——
-   * 前两句讲地方，第三句讲"你坐进这一趟里"。跳到最后一句，玩家读到的
-   * 恰好是衔接的那一句，而"接下来要玩"这件事也就说清楚了。
-   *
-   * 换句话说：跳到最后一句之后**再按一次就真的进小游戏**，
-   * 两下点完，而不是一下跳过全部。
-   */
+  /** 普通文本停在最后一句；宿主已选定的特殊终点直接进入，收尾只能执行一次。 */
   private skipToEnd(): void {
     if (!this.active) return;
+    if (this.onSkipToNext) {
+      const next = this.onSkipToNext;
+      this.finish();
+      next();
+      return;
+    }
+    this.autoT = 0;
     const last = this.lines.length - 1;
-    if (this.lineIdx >= last) {
+    if (this.lineIdx >= last && !this.typing) {
       // 已经在最后一句了 —— 这才是真的"跳过"（要交给 finish）。
       this.finish();
       return;
@@ -232,6 +231,7 @@ export class Dialogue {
   private finish(): void {
     const r = this.resolveCurrent;
     this.resolveCurrent = null;
+    this.onSkipToNext = null;
     this.typing = false;
     setShown(this.root, false);
     this.unbindKeys();
@@ -259,7 +259,7 @@ export class Dialogue {
         ? t('dialogue_next')
         : `${this.lineIdx + 1} / ${n}`,
     );
-    setShown(this.skipBtn, n > 1 || this.typing);
+    setShown(this.skipBtn, !!this.onSkipToNext || this.lineIdx < n - 1 || this.typing);
     // 只在真的还有"两下"可按的时候提示它。已经跳到最后一句时按钮会
     // 变成真的跳过，再挂一句「连按两次」就是骗人。
     setShown(this.skipHintEl, n > 2 && this.lineIdx < n - 2);

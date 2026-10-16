@@ -16,9 +16,9 @@
  *                                    `wd` 是**裁切宽度**，对齐在 [pos.x, pos.x+wd]
  *                                    这段里做（见 drawText）
  *
- * 零贴图：这里没有任何 drawImage/createPattern，五个小游戏的每一个像素都是
- * 路径 + 渐变，跟 Godot 版一样。
+ * 背景由路径与渐变绘制，缓存为离屏画布后复用；不下载外部贴图。
  */
+import { cachedBackdrop, sceneBackdrop } from './backdrops';
 import type { Lang } from '../../data/raw';
 import type { MiniGameContext } from './types';
 
@@ -80,11 +80,12 @@ export function rgba(c: Rgb, a = 1): string {
 }
 
 /** `#rrggbb` → Rgb。启动时用一次，拆主题表。 */
-function hex(h: string): Rgb {
+export function hex(h: string): Rgb {
+  const value = h.replace(/^#/, '');
   return [
-    parseInt(h.slice(1, 3), 16) / 255,
-    parseInt(h.slice(3, 5), 16) / 255,
-    parseInt(h.slice(5, 7), 16) / 255,
+    parseInt(value.slice(0, 2), 16) / 255,
+    parseInt(value.slice(2, 4), 16) / 255,
+    parseInt(value.slice(4, 6), 16) / 255,
   ];
 }
 
@@ -193,7 +194,12 @@ export function drawText(
 
 /** 整行居中（等价 `draw_string(..., (0, y), s, CENTER, w, ...)`）。 */
 export function drawTextCentered(g: CanvasRenderingContext2D, text: string, w: number, y: number, sizePx: number, col: string): void {
-  drawText(g, text, 0, y, sizePx, col, 'center', w);
+  const measured = textW(g, text, sizePx);
+  const fit = w > 0 ? Math.min(sizePx, sizePx * Math.max(1, w - 32) / Math.max(1, measured)) : sizePx;
+  g.save();
+  g.shadowColor = 'rgba(12,21,22,.6)'; g.shadowBlur = 3; g.shadowOffsetY = 1;
+  drawText(g, text, 0, y, fit, col, 'center', w);
+  g.restore();
 }
 
 /** 量的宽度。Godot 的 `Font.get_string_size(...).x`。 */
@@ -333,7 +339,7 @@ const THEMES: readonly ThemeCfg[] = [
   // 注意 `far` 是画在**上层**（h*0.62）那一层，`mid` 才是近景（h*0.74），
   // 所以正确方向是"远山被雾抬亮、近山沉下去"——我第一版反过来调，
   // 把近景调亮了，实测远↔近从 1.59 掉到 1.16，比原来更糊。
-  makeTheme('2A3A33', '546B52', '667E6F', '1E2D28'),
+  makeTheme('303D3B', '4C5D56', '7B8A7E', '253630'),
   // 3 竹 · 竹雨庭：夜雨，湿的、发亮的
   //
   // ⚠ **这一屏原来最糊**，原因不是画得少，是三层全挤在同一个亮度上：
@@ -351,139 +357,16 @@ const THEMES: readonly ThemeCfg[] = [
 ];
 
 export function drawBackdrop(g: CanvasRenderingContext2D, w: number, h: number, theme: Theme): void {
+  cachedBackdrop(g, w, h, theme, paintTheme);
+}
+function paintTheme(g: CanvasRenderingContext2D, w: number, h: number, theme: number): void {
   const t = THEMES[theme];
-  // 天光渐变。
-  //
-  // ⚠ 原来是把天分成 4 段、每段填一个纯色（`SKY = 4` + 4 次 `fillRect`）。
-  // 那是**四道可见的横边**——两段之间的亮度差在夜雨那张图上尤其明显，
-  // 读起来像"贴了四条色带"，也就是玩家说的"背景粗糙"的一半来源。
-  //
-  // 换成一条真正的 `createLinearGradient`：Godot 那边是 `draw_rect` 逐行画的，
-  // 本身连续，Web 侧用四段纯色去逼近它才是失真。
-  // 建一次渐变对象、每帧复用（存进 `g` 的 `__skyGrad`），别每帧新建。
-  const sky = (g as CanvasRenderingContext2D & { __skyGrad?: CanvasGradient }).__skyGrad;
-  const grad = sky && (g as CanvasRenderingContext2D & { __skyKey?: string }).__skyKey === `${theme}`
-    ? sky
-    : (() => {
-        const lg = g.createLinearGradient(0, 0, 0, h);
-        lg.addColorStop(0, rgba(t.top));
-        // 中间插两站，让过渡的曲率接近真实天光而不是一条直线。
-        lg.addColorStop(0.55, rgba(lerpRgb(t.top, t.bot, 0.55)));
-        lg.addColorStop(1, rgba(t.bot));
-        (g as CanvasRenderingContext2D & { __skyGrad?: CanvasGradient; __skyKey?: string }).__skyGrad = lg;
-        (g as CanvasRenderingContext2D & { __skyKey?: string }).__skyKey = `${theme}`;
-        return lg;
-      })();
-  g.fillStyle = grad;
-  g.fillRect(0, 0, w, h);
-  // 两层远景：远的一层更淡（空气透视），近的一层更沉
-  horizon(g, w, h, h * 0.62, t.farCol);
-  horizon(g, w, h, h * 0.74, t.midCol);
-  switch (theme) {
-    case 0: clouds(g, w, h); break;
-    case 1: steamScene(g, w, h, t); break;
-    case 2: grove(g, w, h, t); break;
-    case 3: rain(g, w, h, t); break;
-    case 4: water(g, w, h, t); break;
-  }
-}
-
-/** 一层起伏的地面/山脊剪影。振幅和波长都随高度走，换分辨率不会变形。 */
-function horizon(g: CanvasRenderingContext2D, w: number, h: number, baseY: number, col: string): void {
-  const steps = 48;
-  g.fillStyle = col;
-  g.beginPath();
-  g.moveTo(0, baseY + Math.sin(baseY * 0.01) * h * 0.022 + Math.sin(0) * h * 0.010);
-  for (let i = 1; i <= steps; i++) {
-    const k = i / steps;
-    g.lineTo(w * k, baseY + Math.sin(k * 7.0 + baseY * 0.01) * h * 0.022 + Math.sin(k * 19.0) * h * 0.010);
-  }
-  g.lineTo(w, h);
-  g.lineTo(0, h);
-  g.closePath();
-  g.fill();
-}
-
-/**
- * 背景的五片云 —— 和云影台小游戏里那朵**要描的云**用的是同一套画法（三团圆叠），
- * 那是 MiniGameCloud 里 `CLOUD_CIRCLES` 那段注释的由来：轮廓由这五团圆算出来，
- * 所以"背景里的云"和"要描的云"必然是同一个东西。
- */
-function clouds(g: CanvasRenderingContext2D, w: number, h: number): void {
-  for (let i = 0; i < 5; i++) {
-    const cx = w * (0.08 + 0.21 * i) + Math.sin(i * 2.1) * w * 0.04;
-    const cy = h * (0.12 + 0.07 * (i % 3));
-    const r = h * (0.045 + 0.02 * (i % 2));
-    circle(g, cx, cy, r, 'rgba(255,255,255,0.42)');
-    circle(g, cx + r * 0.9, cy + r * 0.18, r * 0.74, 'rgba(255,255,255,0.30)');
-    circle(g, cx - r * 0.85, cy + r * 0.26, r * 0.62, 'rgba(255,255,255,0.26)');
-  }
-}
-
-/** 屋里另外两处灶烟。**避开正中**：茶壶在 w*0.5，中间那道从壶后面笔直穿上去，
- *  图上会读成三道划痕而不是烟。 */
-function steamScene(g: CanvasRenderingContext2D, w: number, h: number, t: ThemeCfg): void {
-  for (let i = 0; i < 2; i++) {
-    const bx = w * (i === 0 ? 0.17 : 0.83);
-    g.strokeStyle = `rgba(255,240,214,${0.1 - 0.03 * i})`;
-    g.lineWidth = 3;
-    g.beginPath();
-    for (let s = 0; s < 13; s++) {
-      const k = s / 12;
-      const x = bx + Math.sin(k * 4.0 + i * 2.0) * w * 0.028 * k;
-      const y = h * 0.58 - k * h * 0.26;
-      if (s === 0) g.moveTo(x, y); else g.lineTo(x, y);
-    }
-    g.stroke();
-  }
-  // 桌面：一条暖色的横带，把下半截压住
-  g.fillStyle = t.midDark;
-  g.fillRect(0, h * 0.8, w, h * 0.2);
-}
-
-/** 几竿竹叶的剪影，从下往上斜着插进画面。 */
-function grove(g: CanvasRenderingContext2D, w: number, h: number, t: ThemeCfg): void {
-  for (let i = 0; i < 4; i++) {
-    const bx = w * (0.06 + 0.26 * i);
-    const lean = w * (i % 2 === 0 ? 0.05 : -0.04);
-    line(g, bx, h, bx + lean, h * 0.52, t.midDark18, 5);
-    for (let n = 0; n < 3; n++) {
-      const ky = h * (0.86 - 0.10 * n);
-      // Godot 的 `lerpf(bx, bx + lean, 1.0 - ky / h)`：叶子从**根部**往上插，
-      // 所以离地越远（ky 越小）越往梢那一侧取。
-      const kx = bx + lean * (1 - ky / h);
-      line(g, kx, ky, kx + lean * 0.7 * (n % 2 === 0 ? 1 : -1), ky - h * 0.03, t.midDark10, 3);
-    }
-  }
-}
-
-/** 雨：一批斜线，按 y 错开，看起来是下着的而不是贴上去的。位置只由 i 决定 ⇒ 静态。 */
-function rain(g: CanvasRenderingContext2D, w: number, h: number, t: ThemeCfg): void {
-  g.strokeStyle = 'rgba(184,204,209,0.16)';
-  g.lineWidth = 1;
-  g.beginPath();
-  for (let i = 0; i < 46; i++) {
-    const rx = (i * 97.3) % w;
-    const ry = (i * 61.7) % h;
-    const len = h * 0.035;
-    g.moveTo(rx, ry);
-    g.lineTo(rx - len * 0.22, ry + len);
-  }
-  g.stroke();
-  // 湿地面上一道反光
-  g.fillStyle = rgba(t.mid);
-  g.fillRect(0, h * 0.86, w, h * 0.14);
-}
-
-/** 湖面：比天暗一档，几道横向的反光条。 */
-function water(g: CanvasRenderingContext2D, w: number, h: number, t: ThemeCfg): void {
-  g.fillStyle = t.midLight;
-  g.fillRect(0, h * 0.7, w, h * 0.3);
-  g.fillStyle = 'rgba(255,250,235,0.14)';
-  for (let i = 0; i < 7; i++) {
-    const ry = h * (0.73 + 0.035 * i);
-    g.fillRect(w * (0.12 + 0.1 * (i % 4)), ry, w * (0.1 + 0.09 * (i % 3)), 2);
-  }
+  const sky = g.createLinearGradient(0, 0, 0, h);
+  sky.addColorStop(0, rgba(t.top));
+  sky.addColorStop(.55, rgba(lerpRgb(t.top, t.bot, .55)));
+  sky.addColorStop(1, rgba(t.bot));
+  g.fillStyle = sky; g.fillRect(0, 0, w, h);
+  sceneBackdrop(g, w, h, theme, t.farCol, t.midCol);
 }
 
 // ---------------------------------------------------------------- 进度条

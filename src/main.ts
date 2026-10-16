@@ -689,6 +689,7 @@ class App {
    * 于是新增迁移**必须**先过这里，也就必然被表收编或者被回归抓住。
    */
   private goPhase(next: Phase): void {
+    this.ui?.setHudControlsAvailable(next === 'roaming');
     this.phase = next;
     if (next !== 'roaming') this.business?.hideEntry();
   }
@@ -2746,7 +2747,9 @@ private onConfirm() {
     if (e.type === 'dialogue') {
       // 剧情对白锁操作，播完再放开
       this.world.narrativeBusy = true;
-      void this.ui.showDialogue(e.speaker, e.lines).then(() => {
+      void this.ui.showDialogue(e.speaker, e.lines, e.continuation
+        ? () => this.world.completeCheckInNow() : undefined).then(() => {
+        if (this.ui.aiScreen().dialogueOpen) return;
         this.world.narrativeBusy = false;
         this.world.retryVillain();
       });

@@ -19,7 +19,7 @@ export class BusinessPanel {
   private hour = 8;
   constructor(parent: HTMLElement, private game: GameStateManager, private hooks: { open(): void; close(): void; qin(mode: 'game' | 'free'): void }) {
     this.entry = button(t('biz_open'), { cls: 'g-business-entry g-hidden', onClick: () => this.open(this.nearby) });
-    (parent.querySelector<HTMLElement>('.g-frags-h') ?? parent).appendChild(this.entry);
+    parent.appendChild(this.entry);
     this.root = el('div', 'g-screen g-business g-hidden');
     this.root.setAttribute('role', 'dialog'); this.root.setAttribute('aria-modal', 'true'); this.root.setAttribute('aria-label', t('biz_title'));
     this.content = el('div', 'g-card g-business-card');

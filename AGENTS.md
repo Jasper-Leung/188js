@@ -5,10 +5,10 @@
 ## 1. 验证与文案
 
 ```bash
-npm run verify     # 无头回归：116 条 / 3774 条断言 + 文案三判据
+npm run verify     # 无头回归：122 条 / 4121 条断言 + 文案三判据
 ```
 
-当前已记录基线：`PASS 116 / FAIL 0 / 没跑成 0`，断言 3774 条、0 条红。
+当前已记录基线：`PASS 122 / FAIL 0 / 没跑成 0`，断言 4121 条、0 条红。
 改 src/** 逻辑/数据或 submission/** 后收尾跑一次；只改文档、注释、配色、素材不跑。新增改动、实际失败或修改判据后才重跑，不做重复“体检”。
 
 - 通过必须同时满足 `asserts > 0`、无 `[FAIL]`、无异常；`NO-ASSERT` 是失败。汇报 `PASS x / FAIL y / 没跑成 z` 和断言数。
@@ -35,14 +35,14 @@ npm run desktop:dev
 - `tripo-bake.mjs` 的 sharp 和 gltf-transform/functions 必须分进程；修改后用干净 Node 进程验证，不靠 npm ls 判断。
 - 拆分导出 `registerXxxChecks(check)`，在 entry.ts **原位置**调用；禁止模块顶层 check 或副作用 import 改注册顺序。注册表留 entry.ts，expect/fakeCtx/stripComments 共用 harness.ts。
 - 先查 import/helper 依赖，机械搬移须保持条数与逐条断言数（编码扫描 +1 除外）。只在无他人在途修改时拆分。本轮已满足干净起点条件。
-- `entry.ts` 仍有 **9,318 行**。按 `split('\n').length` 计，不能用只计非空行的工具。
+- `entry.ts` 仍有 **9,320 行**。按 `split('\n').length` 计，不能用只计非空行的工具。
 
 ## 4. 提交与发布
 
 ```bash
 npm run typecheck
 npm run build
-npm run verify      # 116 条 / 3774 断言
+npm run verify      # 122 条 / 4121 断言
 ```
 
 必须先 build 再 verify：verify_payload 读 dist 的真实字节。每批按相关检查验证，整合后回归一次。

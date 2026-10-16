@@ -374,7 +374,20 @@
     "lake_waiting": "浮漂已落水，等鱼咬钩…",
     "lake_strike_touch": "咬钩了！现在按住收线",
     "lake_hold_touch": "按住收线 · 松开让鱼缓口气",
-    "touch_joystick_key": "移动摇杆"
+    "touch_joystick_key": "移动摇杆",
+    "ui_hide_all": "隐藏所有界面",
+    "ui_show_all": "显示界面",
+    "ui_customize": "界面选项",
+    "ui_restore_hint": "隐藏后，点击原右上角位置或按 {key} 恢复。摇杆原区域仍可移动。",
+    "ui_module_items": "道具栏",
+    "ui_module_tasks": "任务与状态",
+    "ui_module_actions": "功能按钮",
+    "ui_module_map": "小地图",
+    "items_show": "显示道具",
+    "items_hide": "隐藏道具",
+    "storycard_next": "继续 / 提前关闭",
+    "dialogue_skip": "跳到剧情结尾",
+    "dialogue_skip_hint": "跳到最后一句；若结尾是活动，则直接进入。"
   },
   "en": {
     "quality_hint_low": "The lowest tier: shadows and ground detail both off, trees pulled in to 95m and shrubs to 40m, and the fog pulled closer — vegetation range applies on your next ride",
@@ -773,6 +786,19 @@
     "lake_waiting": "The float is out. Wait for a bite…",
     "lake_strike_touch": "A bite! Hold Reel now",
     "lake_hold_touch": "Hold Reel · release to let the fish rest",
-    "touch_joystick_key": "Movement joystick"
+    "touch_joystick_key": "Movement joystick",
+    "ui_hide_all": "Hide all UI",
+    "ui_show_all": "Show UI",
+    "ui_customize": "UI options",
+    "ui_restore_hint": "When hidden, tap this top-right corner or press {key} to restore. The original joystick area still moves you.",
+    "ui_module_items": "Items",
+    "ui_module_tasks": "Tasks & status",
+    "ui_module_actions": "Action buttons",
+    "ui_module_map": "Minimap",
+    "items_show": "Show items",
+    "items_hide": "Hide items",
+    "storycard_next": "Continue / dismiss",
+    "dialogue_skip": "Jump to story end",
+    "dialogue_skip_hint": "Jump to the last line, or enter the closing activity."
   }
 }

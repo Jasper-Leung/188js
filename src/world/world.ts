@@ -40,7 +40,7 @@ import { clamp } from '../core/math';
 
 export type WorldEvent =
   | { type: 'stationPassed'; index: number }
-  | { type: 'dialogue'; speaker: string; lines: string[] }
+  | { type: 'dialogue'; speaker: string; lines: string[]; continuation?: 'minigame' | 'synthesis' }
   | { type: 'villain'; sceneIndex: number }
   /**
    * 顺路读到的一句话（驿站/石碑）。**不锁操作、不吃点击**
@@ -962,6 +962,24 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
   private camMoveTo = { x: 0, y: 0, z: 0 };
   private lookTarget = { x: 0, y: 0, z: 0 };
 
+  /** Finish the selected transition exactly once, including camera and revisit gates. */
+  completeCheckInNow(): void {
+    if (this.checkInStage !== 'holding' && this.checkInStage !== 'outro') return;
+    const idx = this.checkInTarget;
+    const cb = this.onCheckInComplete;
+    this.checkInStage = 'none';
+    this.stageT = 0;
+    this.checkInTarget = -1;
+    this.onCheckInComplete = null;
+    this.ride.setCameraLocked(false);
+    this.narrativeBusy = false;
+    this.ride.snapCamera();
+    this.lastCheckInPos.copy(this.ride.pos);
+    this.recheckArmed = false;
+    this.homeBeat = false;
+    cb?.(idx);
+  }
+
   private advanceCheckIn(dt: number) {
     if (this.checkInStage === 'none') return;
     this.stageT += dt;
@@ -981,6 +999,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
           this.emit({
             type: 'dialogue',
             speaker: t('home_speaker'),
+            continuation: 'synthesis',
             lines: ['home_arrive_1', 'home_arrive_2', 'home_arrive_3']
               .map((k) => t(k))
               .filter((v) => v && !v.startsWith('⟨')),
@@ -998,6 +1017,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
             this.emit({
               type: 'dialogue',
               speaker: st ? stationNameOf(st.placement.def) : '',
+              continuation: 'minigame',
               lines: [...lines],
             });
           } else if (count === 1 || count === 2) {
@@ -1042,19 +1062,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
     } else if (this.checkInStage === 'outro') {
       this.ride.placeCamera(this.camMoveTo.x, this.camMoveTo.y, this.camMoveTo.z, this.lookTarget.x, this.lookTarget.y, this.lookTarget.z);
       if (this.stageT >= 0.4) {
-        const idx = this.checkInTarget;
-        const cb = this.onCheckInComplete;
-        this.checkInStage = 'none';
-        this.stageT = 0;
-        this.checkInTarget = -1;
-        this.onCheckInComplete = null;
-        this.ride.setCameraLocked(false);
-        this.narrativeBusy = false;
-        this.ride.snapCamera();
-        this.lastCheckInPos.copy(this.ride.pos);
-        this.recheckArmed = false;
-        this.homeBeat = false;
-        cb?.(idx);
+        this.completeCheckInNow();
       }
     }
   }

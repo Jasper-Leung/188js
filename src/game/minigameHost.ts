@@ -70,6 +70,7 @@ export class MiniGameHost {
   private freeMode = false;
   private resolveFn: ((h: MiniGameHandle) => void) | null = null;
   private dpr = 1;
+  private pointerId = -1;
 
   constructor(parent: HTMLElement) {
     this.root = document.createElement('div');
@@ -124,6 +125,7 @@ export class MiniGameHost {
     this.elapsed = 0;
     this.resultT = -1;
     this.running = true;
+    this.pointerId = -1;
     this.freeMode = free;
     this.resize();
 
@@ -136,7 +138,7 @@ export class MiniGameHost {
         ink: '#2a2622',
         paper: '#e8e0cd',
         accent: '#b4552f',
-        dim: '#7a6f5e',
+        dim: '#cbd0bc',
         ok: '#4a7a44',
         bad: '#a8442f',
       },
@@ -236,27 +238,38 @@ export class MiniGameHost {
 
     const toLocal = (e: PointerEvent) => {
       const r = this.canvas.getBoundingClientRect();
-      return { x: e.clientX - r.left, y: e.clientY - r.top };
+      return { x: (e.clientX - r.left) * this.cssW / Math.max(1,r.width), y: (e.clientY - r.top) * this.cssH / Math.max(1,r.height) };
     };
     this.canvas.addEventListener('pointerdown', (e) => {
       if (!this.running || !this.game) return;
+      if (this.game.id === 'qin' || this.game.id === 'zither' || this.game.id === 'bird') {
+        const p = toLocal(e); this.game.onPointerDown(p.x, p.y); e.preventDefault(); return;
+      }
+      if (this.pointerId !== -1) return;
+      this.pointerId = e.pointerId;
       this.canvas.setPointerCapture(e.pointerId);
       const p = toLocal(e);
       this.game.onPointerDown(p.x, p.y);
       e.preventDefault();
     });
     this.canvas.addEventListener('pointermove', (e) => {
-      if (!this.running || !this.game) return;
+      if (!this.running || !this.game || e.pointerId !== this.pointerId) return;
       const p = toLocal(e);
       this.game.onPointerMove(p.x, p.y);
     });
     const up = (e: PointerEvent) => {
-      if (!this.running || !this.game) return;
+      if (!this.running || !this.game || e.pointerId !== this.pointerId) return;
+      this.pointerId = -1;
       const p = toLocal(e);
       this.game.onPointerUp(p.x, p.y);
     };
     this.canvas.addEventListener('pointerup', up);
     this.canvas.addEventListener('pointercancel', up);
+    this.canvas.addEventListener('lostpointercapture', up);
+    window.addEventListener('blur', () => {
+      if (this.pointerId !== -1) this.game?.onPointerUp(-1, -1);
+      this.pointerId = -1;
+    });
   }
 
   get isRunning() {

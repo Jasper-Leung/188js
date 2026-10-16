@@ -527,7 +527,7 @@ class CloudGame implements MiniGame {
     fillRect(g, this.board, 'rgba(41,56,71,0.34)');
     strokeRect(g, this.board, 'rgba(255,255,255,0.55)', 2);
 
-    drawTextCentered(g, tf(this.sh, 'mg_cloud_title'), w, h * 0.1, 28, paper);
+    drawTextCentered(g, tf(this.sh, 'mg_cloud_title'), w, h * 0.1, 28, this.sh.ink);
 
     // 云本身：一层压淡的实心剪影。原来只有一圈点和虚线，中间是透出天光的空板子——
     // 玩家描的是"一个圈"，而"云"是这块圈围出来的**面**。

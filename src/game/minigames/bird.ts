@@ -260,12 +260,12 @@ class BirdGame implements MiniGame {
 
   onPointerDown(x: number, y: number): void {
     if (this.finished) return;
-    if (this.state !== ST_CHOICE) return;
     // 取消。热区走画笔那一处，见 chrome.ts 取消按钮那段注释。
     // 这一屏原来**留了热区却没画**：那块矩形只写在点击处理里，右下角于是变成一块
     // 点得着、读不出是什么的地方——玩家在那一带点空了，小游戏就没了，
     // 而界面上没有任何东西告诉他那里能点。画出来，这块角落才是它自己声称的那样。
     if (pointInRect(this.cancelBtn, x, y)) { this.finish('cancel'); return; }
+    if (this.state !== ST_CHOICE) return;
     for (let i = 0; i < CHOICE_COUNT; i++) {
       if (pointInRect(this.cards[i], x, y)) { this.choose(i); return; }
     }
@@ -315,6 +315,7 @@ class BirdGame implements MiniGame {
     drawBackdrop(g, w, h, THEME.BIRD);
     if (this.state === ST_SHOW) this.drawShow(g, w, h);
     else this.drawChoice(g, w, h);
+    if (this.state === ST_SHOW) drawCancel(g, this.cancelBtn, tf(this.sh, 'mg_cancel'));
   }
 
   private drawShow(g: CanvasRenderingContext2D, w: number, h: number): void {

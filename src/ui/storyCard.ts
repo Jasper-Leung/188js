@@ -31,7 +31,7 @@
  *   而"来不及读完"读作"字太多了"，于是玩家开始主动跳过。
  */
 import { t, isEnglish } from '../i18n';
-import { el, setShown, setText } from './dom';
+import { button, el, setShown, setText } from './dom';
 import { settleMs, settleTextKey, type SettleOutcome } from '../game/phase';
 
 /** 结算三态从 `game/phase` 来——判定不许在这层再抄一份。 */
@@ -283,6 +283,10 @@ export class StoryCards {
       // 绑在这一张上而不是 `.g-cards` 容器上：容器要保持
       // `pointer-events: none`，否则路边那些字也会开始吃点击。
       card.addEventListener('click', () => this.dismiss(card));
+      const next = button(t('storycard_next'), { cls: 'g-card-next', onClick: (e) => {
+        e?.stopPropagation(); this.dismiss(card);
+      } });
+      card.appendChild(next);
       // **可点这件事必须看得见。** 这一层不做点击的可见反馈，
       // 于是"可点掉"这件事在屏上零信息——玩家不知道这张黑卡能点，
       // 只能干等它自己走完（序章那七句中文侧要 66 秒）。

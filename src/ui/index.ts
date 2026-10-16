@@ -42,11 +42,11 @@ import type { Tier } from '../core/capability';
 import type { World, WorldEvent } from '../world/world';
 import type { GameStateManager } from '../game/state';
 import type { Capability } from '../core/capability';
-import { el, isShown, setShown, setStyle } from './dom';
+import { bindTouchButtons, el, isShown, setShown, setStyle } from './dom';
 import { TitleScreen } from './titleScreen';
 import { Onboarding } from './onboarding';
 import { Hud } from './hud';
-import { Dialogue } from './dialogue';
+import { Dialogue, type DialogueLines } from './dialogue';
 import { ShopPanel } from './shopPanel';
 import { PausePanel } from './pausePanel';
 import { PostcardPanel } from './postcardPanel';
@@ -56,6 +56,7 @@ import { TouchControls } from './touchControls';
 import { Toast, type ToastKind } from './toast';
 import { LakesidePanel } from './lakesidePanel';
 import type { LakesideFrame } from '../world/lakeside';
+import { HudVisibility } from './visibility';
 import { ItemBar } from './itemBar';
 import { StoryCards, ResultCard, setNarrativeQuiet, type SettleOutcome } from './storyCard';
 import { WorldVisibility } from '../game/phase';
@@ -308,6 +309,7 @@ readonly touch: {
   private toast: Toast;
   private lakeside!: LakesidePanel;
   private itemBar!: ItemBar;
+  private visibility!: HudVisibility;
   private storyCards!: StoryCards;
   private resultCard!: ResultCard;
   private mood: MoodMask;
@@ -329,6 +331,8 @@ readonly touch: {
   private reduceMotion = false;
   private holdToToggle = false;
   private lakesideOn = false;
+  private hudControlsEnabled = true;
+  private unbindTouchButtons: () => void;
 
   constructor(opts: UIOptions) {
     this.opts = opts;
@@ -342,6 +346,7 @@ readonly touch: {
 
     this.root = el('div', 'g-root');
     this.root.setAttribute('aria-live', 'off');
+    this.unbindTouchButtons = bindTouchButtons(this.root);
     opts.parent.appendChild(this.root);
 
     // ---- 顺序就是层序：遮罩在最底，面板在中间，触屏在最上 ----
@@ -427,6 +432,7 @@ readonly touch: {
       game: this.game,
     });
     this.touch = this.touchCtl.state;
+    this.visibility = new HudVisibility(this.root, () => this.touchCtl.releaseActions());
     this.perf = new PerfPanel({ parent: this.root, world: this.world, tier: this.tier });
 
     // 触屏判定是**活的**：玩家第一次用手指碰屏、手机转个屏、
@@ -466,8 +472,13 @@ readonly touch: {
    * **用 `visibility` 而不是 `display: none`**：后者会让
    * `getBoundingClientRect` 返回 0，某些面板的布局测量会跟着错位。
    */
+  setHudControlsAvailable(on: boolean): void {
+    this.hudControlsEnabled = on;
+    this.visibility.setAvailable(on && this.worldVisible && !this.dialogue.active);
+  }
+
   setCleanMode(on: boolean): void {
-    this.root.classList.toggle('is-clean', on);
+    this.visibility.setClean(on);
   }
 
   /**
@@ -495,6 +506,7 @@ readonly touch: {
     // 道具栏跟着 HUD 一起进出世界：它和 HUD 一样是"在世界里的信息"，
     // 标题页上摆一排空格子只会让人以为少了什么。
     this.itemBar.setVisible(v);
+    this.visibility.setAvailable(v && this.hudControlsEnabled);
     // 触屏控件跟着 HUD 一起进出世界。
     // 标题页/引导页上摆一个活的摇杆是有害的：那里点它什么也不会发生，
     // 而摇杆长得又很像"可以拖"，于是玩家会在标题页上推两下、发现没反应、
@@ -706,6 +718,7 @@ readonly touch: {
   }
 
   showPause(): void {
+    this.visibility.setAvailable(false);
     this.pause.show();
   }
 
@@ -730,6 +743,7 @@ readonly touch: {
   }
 
   showSynthesis(mode: 'chapter' | 'maxed' | 'plain' = 'plain'): void {
+    this.visibility.setAvailable(false);
     this.synthesis.show(mode);
   }
 
@@ -839,9 +853,11 @@ readonly touch: {
     }
   }
 
-  /** 播对白，返回 Promise，播完 resolve。空格/点击推进，Esc 一次跳完。 */
-  showDialogue(speaker: string, lines: string[]): Promise<void> {
-    const p = this.dialogue.show(speaker, lines);
+  /** 播对白，返回 Promise；空格/点击推进，跳转停在末句或进入指定终点。 */
+  showDialogue(speaker: string, lines: DialogueLines, onSkipToNext?: () => void): Promise<void> {
+    this.visibility.setAvailable(false);
+    const p = this.dialogue.show(speaker, lines, onSkipToNext);
+    void p.then(() => { if (!this.dialogue.active) this.visibility.setAvailable(this.worldVisible && this.hudControlsEnabled); });
     this.dialogueIdle = p;
     return p;
   }
@@ -933,6 +949,7 @@ readonly touch: {
     if (isShown(this.title.root)) this.title.sync();
     if (isShown(this.onboarding.root)) this.onboarding.sync();
     this.dialogue.sync();
+    this.itemBar.sync();
   }
 
   /** 宿主把画质/自适应改回去了（读档、onQualityChange 之后）。 */
@@ -1062,11 +1079,15 @@ readonly touch: {
   setShopOpen(open: boolean): void {
     if (!open) {
       this.shop.close();
+      this.applyTouchVisibility();
+      this.visibility.setAvailable(this.worldVisible && this.hudControlsEnabled);
       return;
     }
     const name = this.world.nearby.shopName;
     if (!name) return;
+    this.visibility.setAvailable(false);
     this.shop.open(name);
+    this.applyTouchVisibility();
   }
 
   // ---------------------------------------------------------------- 触屏
@@ -1110,7 +1131,7 @@ private applyTouchVisibility(): void {
       this.lakeside.setTouchMode(this.touchMode);
       return;
     }
-    this.touchCtl.setMode(this.touchMode && this.worldVisible);
+    this.touchCtl.setMode(this.touchMode && this.worldVisible && !this.shop.isOpen);
     // 湖边出口那一行跟着同一个值换文案。
     // 控件藏起来的那一次，恰恰是**最需要那句「点这里」**的那一次。
     this.lakeside.setTouchMode(this.touchMode);
@@ -1124,6 +1145,7 @@ private applyTouchVisibility(): void {
    */
   setLakesideActive(on: boolean): void {
     if (this.lakesideOn === on) return;
+    this.visibility.setClean(false);
     this.lakesideOn = on;
     this.touchCtl.setLakesideMode(on);
     this.applyTouchVisibility();
@@ -1141,6 +1163,8 @@ private applyTouchVisibility(): void {
     this.unbindLang = null;
     this.unbindTouch?.();
     this.unbindTouch = null;
+    this.unbindTouchButtons();
+    this.visibility.dispose();
     this.dialogue.dispose();
     this.hud.dispose();
     this.shop.dispose();
