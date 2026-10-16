@@ -1,3 +1,4 @@
+import { WORLD_EXPERIENCE } from './worldExperience';
 /**
  * 路线几何 —— 8 字环线（lemniscate）与 16 座驿站的最终落位。
  *
@@ -252,7 +253,7 @@ function canvasTangent(lmIdx: number): V2 {
  */
 function stationOff(lmIdx: number): V2 {
   const p2 = canvasToWorld2(localToCanvas(ROAD.LEMNISCATE_LOCAL[lmIdx]));
-  let dist = ROAD.STATION_OFFSET;
+  let dist: number = WORLD_EXPERIENCE.station.roadsideOffset;
   // 广场盘上那座要越界到盘外：那里两条 ribbon 夹角只有 ~76°，
   // 按 18m 推过去仍然落在盘内、压在另一条路的沥青上。
   if (Math.hypot(p2.x - ROAD.PLAZA_CENTER.x, p2.y - ROAD.PLAZA_CENTER.y) < ROAD.PLAZA_RADIUS) {

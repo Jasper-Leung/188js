@@ -90,7 +90,7 @@ export interface StationRuntime {
  * 抬到 26m 之后标签浮在树冠之上 2.6m。
  */
 const STATION_STRETCH: Record<number, readonly [number, number]> = {
-  2: [1, 2.6],
+  2: [1, 1],
 };
 /** 站名标签要跟着竖直倍率一起抬，否则会埋进被拉高的树冠里。 */
 const STATION_LABEL_LIFT = 26;
@@ -210,8 +210,7 @@ export class Stations {
     const g = new Group();
     g.add(model.root);
     const scale = cfg.scale;
-    // **非等比缩放**：琴音林那片林冠要拉高成"高的树"（见 STATION_STRETCH）。
-    // 水平倍率恒为 1，所以 keepout 半径仍然是 `horizontalRadius(box) * scale`。
+    // 琴音林保留原模型比例；仍走统一缩放入口供包围盒与植被避让共用。
     const [sx, sy] = stationStretch(st.modelIdx);
     g.scale.set(scale * sx, scale * sy, scale * sx);
     // 朝向有两种来源。`world.json` 里显式给了 `rot_y` 的站（五座图集模型 +

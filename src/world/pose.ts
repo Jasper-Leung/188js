@@ -1035,7 +1035,7 @@ export function bakeRideToPedals(
   const yFix = rootTrack0 ? rootTrack0.values[1] - rootTrack0.values[(rootTrack0.values.length / 3 - 1) * 3 + 1] : 0;
   for (let i = 0; i < times.length && ok; i++) {
     const t = times[i];
-    const theta = opts.phase + opts.sense * 2 * Math.PI * opts.turns * (i / (times.length - 1));
+    const theta = opts.phase + opts.sense * 2 * Math.PI * opts.turns * (t / clip.duration);
     for (let li = 0; li < legs.length; li++) {
       const l = legs[li];
       probe.seek(t);
