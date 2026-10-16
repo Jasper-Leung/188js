@@ -307,7 +307,7 @@ check('verify_stations', () => {
   if (ZITHER_STATION_IDX >= 0) {
     const [sx, sy] = stationStretch(ZITHER_MODEL_IDX);
     if (sx !== sy) {
-      probs.push(`琴音林的水平倍率是 ${sx}，拉高不许动占地（18−5=13m，只剩 0.7m 余量到 13.7m 判据）`);
+      probs.push(`琴音林必须等比缩放，当前水平 ${sx} / 竖直 ${sy}`);
     }
     // 模型实测尺寸（模型单位，贴图与顶点量出来的）
     const MODEL_W = 1.0;
@@ -7492,7 +7492,7 @@ check('verify_pedal_sync', () => {
             probs.push(`${speed} m/s：脚比曲柄快 ${ratio.toFixed(2)} 倍（${r.foot.toFixed(2)} 圈 vs ${r.crank.toFixed(2)} 圈）—— 回到「脚在抡」那一族了`);
           }
           if (ratio < 0.85 || ratio > 1.15) {
-            probs.push(`${speed} m/s（未撞上限）：脚/曲柄 = ${ratio.toFixed(2)}，应在 1 附近`);
+            probs.push(`${speed} m/s：脚/曲柄 = ${ratio.toFixed(2)}，应在 1 附近`);
           }
           asserts++;
           if (r.ts <= 0) probs.push(`${speed} m/s 的播放倍率是 ${r.ts}，动起来必须有倍率`);
