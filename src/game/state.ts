@@ -18,11 +18,13 @@
  *   顶栏、小地图、脚下提示圈三处都调它。任何一处自己抄一份判据，
  *   玩家就会同时看到三块互相打架的指示牌。
  */
+import { actBusiness, advanceBusiness, claimBusinessStory, newBusiness, readBusiness, type BusinessState, type BusinessAction } from './business';
 import { ECON, SHOPS, ROAD } from '../data/raw';
 import type { GoodDef } from '../data/raw';
 
 export interface SaveBlob {
   version: number;
+  business?: BusinessState;
   collected: Record<string, number>;
   progress_km: number;
   onboarding_shown: number;
@@ -232,6 +234,7 @@ export class GameStateManager {
 
   // ---- 状态 ----
   collected = new Map<number, number>();
+  business = newBusiness();
   lvbi = 0;
   inv = new Map<string, number>();
   spentKm = 0;
@@ -451,6 +454,7 @@ export class GameStateManager {
     for (const idx of ROAD.FRAGMENT_SLOT_STATION_IDX) this.collected.set(idx, 0);
     this.collectedFired = false;
     this.lvbi = 0;
+    this.business = newBusiness();
     this.inv = new Map();
     this.spentKm = 0;
     this.earnedTags = new Set();
@@ -806,10 +810,29 @@ export class GameStateManager {
     this.pose = null;
   }
 
+  businessAct(id: string, action: BusinessAction) {
+    const result = actBusiness(this.business, id, action, this.lvbi, this.chapter1Done);
+    if (result.ok) {
+      const delta = result.coins - this.lvbi;
+      this.lvbi = result.coins;
+      if (delta) this._l.lvbi({ delta, total: this.lvbi });
+      this.save();
+    }
+    return result;
+  }
+
+  tickBusiness(dt: number): void { advanceBusiness(this.business, dt); }
+  claimBusinessChapter(): number {
+    const story = claimBusinessStory(this.business, this.chapter1Done);
+    if (story) this.save();
+    return story;
+  }
+
   save() {
     try {
       const blob: SaveBlob = {
         version: ECON.SAVE_VERSION,
+        business: this.business,
         collected: Object.fromEntries(this.collected),
         progress_km: this.progressKm,
         onboarding_shown: this.onboardingShown ? 1 : 0,
@@ -912,6 +935,7 @@ export class GameStateManager {
       }
       // 必须在 collected 载入**之后**再对齐：这两个事件在存档写下的那一刻
       // 就已经发过了，读档回来不该再发一遍。
+      this.business = readBusiness(blob.business);
       this.collectedFired = this.allCollected();
       return true;
     } catch {
