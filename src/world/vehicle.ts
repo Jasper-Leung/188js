@@ -1487,7 +1487,7 @@ export const PEDAL_CADENCE_MAX = 3;
  * 踩踏节奏交给了传动比，而这本来就是**物理上唯一正确**的那个：
  * 8 m/s 时 2.36 倍（82 RPM），15 m/s 时被上限压到 3.0（105 RPM）。
  *
- * ⚠ 上限以上（≈8.5 m/s 以上）腿会比曲柄慢，这是**故意的**：
+ * 上限以上腿与曲柄同时封顶，车轮独立转动，表现为飞轮滑行：
  *   30fps 的低配机上 105 RPM 已经是每帧 14°，再快腿就是一片糊。
  *   本作的目标机型就是低配（见 `core/capability`）。
  *
@@ -1872,6 +1872,7 @@ export class Vehicle {
   /** 第一视角时为 true，角色整个不渲染（由 `Ride.render()` 每帧推进来）。 */
   private selfHidden = false;
   private wheelSpin = 0;
+  private crankPhase = 0;
   /** 当前速度，用来在 run / walk 之间混合 */
   private speed = 0;
   private heading = 0;
@@ -2091,6 +2092,7 @@ export class Vehicle {
   }
 
   private rebuild(): void {
+    this.crankPhase = 0;
     this.group.clear();
     // 航向基准**无条件**重置：它现在同时喂给自行车与摩托车的前端偏转，
     // 而摩托车模式下 `updateBikeRig` 不会跑（`rig` 为 null），
@@ -2227,7 +2229,6 @@ export class Vehicle {
     const bike = this.models.bike;
     if (!c?.ride || !bike || !this.rig) return;
     if (this.rideBakedFor === c.ride) return;
-    this.rideBakedFor = c.ride;
 
     const cs = char.scale.x || 1;
     if (cs < 1e-6) return;
@@ -3179,7 +3180,13 @@ export class Vehicle {
     //   后者少除了一个轮半径（0.35m），曲柄会慢 2.86 倍 ——
     //   而「慢了多少」是个带量纲的数，判据里很难一眼看出它是错的。
     // 少了整个系数的后果见 `BIKE_GEAR_RATIO`：链条在用减速把轮子往回驱。
-    const crankAng = this.wheelSpin / BIKE_WHEEL_R / BIKE_GEAR_RATIO;
+    // 脚与曲柄共用经过限速的动画时钟；高速时用飞轮滑行，不让踏板越过脚。
+    const clip = this.rideAction?.getClip();
+    const rate = clip && this.rideBakedFor === clip && clip.duration > 0
+      ? 2 * Math.PI / clip.duration * (this.rideAction?.timeScale ?? 0)
+      : speed / BIKE_WHEEL_R / BIKE_GEAR_RATIO;
+    this.crankPhase += rate * dt;
+    const crankAng = this.crankPhase;
     // 曲柄臂挂在**自转层**下，跟着它转就够了——臂自己的 rotation 保持 bind pose。
     rig.crankSpin.rotation.x = crankAng;
     // 踏板挂在**对齐层**（`crankAxis`，不转）上而不是曲柄臂上：它是一个轴承，

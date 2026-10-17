@@ -1,3 +1,5 @@
+import { BusinessPanel } from './ui/businessPanel';
+import { worldClock } from './core/dayClock';
 /**
  * 总装 —— 启动、状态机、输入路由、游戏流程。
  *
@@ -463,15 +465,19 @@ function installCineMode(app: App): void {
 
 /** 给一条可能永远 pending 的 promise 加硬超时 */
 function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T | void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     p,
-    new Promise<void>((r) =>
-      setTimeout(() => {
+    new Promise<void>((r) => {
+      timer = setTimeout(() => {
         console.warn(`[gift188] ${t('boot_slow_step', [label, ms])}`);
         r();
-      }, ms),
-    ),
-  ]);
+      }, ms);
+    }),
+  ]).finally(() => {
+    // 已加载完成就撤掉告警；不取消仍在后台流式加载的资产。
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 /**
@@ -590,6 +596,7 @@ class App {
   private epilogueShown = false;
   /** 已经报出过名字的旧物。和上面那个分开，理由见 `updateRelicHint`。 */
   private relicNamed = new Set<string>();
+  private business!: BusinessPanel;
   private touchMode = false;
   private demoActive = false;
   /** 演示模式不碰玩家的存档位置（演示只是放一段给人看）。 */
@@ -682,7 +689,9 @@ class App {
    * 于是新增迁移**必须**先过这里，也就必然被表收编或者被回归抓住。
    */
   private goPhase(next: Phase): void {
+    this.ui?.setHudControlsAvailable(next === 'roaming');
     this.phase = next;
+    if (next !== 'roaming') this.business?.hideEntry();
   }
 
   async ready() {
@@ -889,6 +898,11 @@ class App {
     // 湖边那一屏：先把实例建好，**但不加载模型**。
     // 加载是玩家第一次想进去时才发生的（见 `enterLakeside`）——
     // 0.73MB 不该在首屏关键路径上抢带宽。
+    this.business = new BusinessPanel(this.ui.root, game, {
+      open: () => { this.keys.clear(); this.goPhase('checkin'); this.ui.setWorldChromeVisible(false); this.world.narrativeBusy = true; },
+      close: () => { this.world.narrativeBusy = false; this.toRoaming(); this.ui.setWorldChromeVisible(true); this.ui.syncFromState(); },
+      qin: mode => { void this.runGuqin(mode); },
+    });
     this.lakeside = new Lakeside(this.world.camera);
     this.world.scene.add(this.lakeside.group);
     this.bindLakesideLook();
@@ -1098,6 +1112,10 @@ class App {
   // ---------------------------------------------------------------- 输入
   private bindInput() {
     window.addEventListener('keydown', (e) => {
+      if (this.business?.isOpen) {
+        if (this.actionOf(e.code) === 'pause') { e.preventDefault(); this.business.close(); }
+        return;
+      }
       if (e.repeat) {
         // 长按连发**不能**在这里被滤掉：云和茶是按住生效的。
         // 需要"只认新的一下"的地方由小游戏自己记按着状态。
@@ -1285,7 +1303,7 @@ private touchRoadside(): boolean {
       return true;
     }
     case 'qin':
-      void this.runGuqin();
+      this.business.open(this.QIN_STATION);
       return true;
     case 'sign':
       this.touchSign();
@@ -1353,7 +1371,7 @@ private touchSign() {
  * 新增一个相位会在 `PHASE_EDGES` 与 `verify_phase` 的占用集合里
  * 各添一条，而它带来不了任何新的能力。
  */
-private async runGuqin() {
+private async runGuqin(mode: 'game' | 'free' = 'free') {
   if (this.mg.isRunning || this.phase !== 'roaming') return;
   if (this.prologueBusy && this.ui.storyBusy) return;
   // 坐在琴前面时不该还在躲石头。实际不会发生（木牌在路肩上、琴在驿站院里），
@@ -1366,17 +1384,21 @@ private async runGuqin() {
   // 进度条也没有倒计时，所以玩家第一眼必须知道"我不会被打断"。
   if (!this.qinSeen) {
     this.qinSeen = true;
-    this.ui.showStoryCard(t('qin_intro_text'), t('qin_intro_title'));
+    this.ui.showStoryCard(t(mode === 'free' ? 'qin_intro_text' : 'qin_options_hint'), t('qin_intro_title'));
     await nextFrame();
     await this.ui.whenDialogueIdle();
   }
-  await this.mg.runFreePlay('qin', seedFor(this.QIN_STATION, 0));
+  if (mode === 'free') await this.mg.runFreePlay('qin', seedFor(this.QIN_STATION, 0));
+  else {
+    const result = await this.mg.run('zither', seedFor(this.QIN_STATION, 0));
+    this.ui.showResult(result.result, 2);
+  }
   this.toRoaming();
   this.ui.showToast(t('qin_left'), 2000);
 }
 
 /** 琴音林的碎片槽位。与 `World` 里那一处同源，判据 `verify_qin_station` 钉着它。 */
-private readonly QIN_STATION = 2;
+private readonly QIN_STATION = 13;
 /** 木牌那一段字读过了没有（本次会话）。和 `Relics.heard` 一样不落盘：
  *  它不是剧情进度，是"这一趟我有没有停下来读过"。 */
 private signRead = false;
@@ -1908,12 +1930,14 @@ private onConfirm() {
   private toRoaming() {
     this.goPhase('roaming');
     this.ui.hidePause();
+    this.ui.setWorldChromeVisible(true);
     this.loop.resume();
   }
 
   pause() {
     if (this.phase !== 'roaming') return;
     this.goPhase('paused');
+    this.ui.setWorldChromeVisible(false);
     this.loop.suspend();
     this.ui.showPause();
   }
@@ -2625,7 +2649,7 @@ private onConfirm() {
       // 那一屏真正的键位（描云要方向键、古琴要数字键、茶要按住）。
       // 只报布尔的话，AI 在小游戏里被锁死在"只能按空格"——五件里四件打不动。
       minigameId: () => this.mg.id,
-      panelOpen: () => this.ui.aiScreen().panelOpen,
+      panelOpen: () => this.business?.isOpen || this.ui.aiScreen().panelOpen,
       canCheckIn: () => this.world.canCheckIn().ok,
       observation: () => this.aiObservation(),
       // **合成真的 KeyboardEvent**，而不是另开一条平行输入：
@@ -2714,7 +2738,7 @@ private onConfirm() {
       dialogueText: screen.dialogueText,
       minigame: this.mg.isRunning,
       minigameId: this.mg.id,
-      panelOpen: screen.panelOpen,
+      panelOpen: this.business?.isOpen || screen.panelOpen,
     };
   }
 
@@ -2723,7 +2747,9 @@ private onConfirm() {
     if (e.type === 'dialogue') {
       // 剧情对白锁操作，播完再放开
       this.world.narrativeBusy = true;
-      void this.ui.showDialogue(e.speaker, e.lines).then(() => {
+      void this.ui.showDialogue(e.speaker, e.lines, e.continuation
+        ? () => this.world.completeCheckInNow() : undefined).then(() => {
+        if (this.ui.aiScreen().dialogueOpen) return;
         this.world.narrativeBusy = false;
         this.world.retryVillain();
       });
@@ -2824,6 +2850,11 @@ private onConfirm() {
    * 好让世界的时间继续走（对白、暂停面板背后的黄昏都要动）。
    */
   private fixed(dt: number) {
+    const active = this.phase !== 'paused' && this.phase !== 'title' && this.phase !== 'boot' && !document.hidden;
+    worldClock.tick(active ? dt : 0);
+    this.world.sky.setHour(worldClock.hour);
+    if (active) game.tickBusiness(dt);
+    this.business?.update(dt, this.phase === 'roaming' && !this.world.narrativeBusy && !this.ui.storyBusy, this.world.nearby, worldClock.hour);
     // 湖边这一屏**自己接管这一帧**：主世界不更新，相机不由 `Ride` 驱动。
     //
     // 放在最前面是有意的——`world.fixedUpdate` 会把相机拉回跟车位，

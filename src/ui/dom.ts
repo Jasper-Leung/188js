@@ -204,3 +204,54 @@ export function blurWithin(container: HTMLElement): void {
   const a = container.ownerDocument.activeElement;
   if (a && container.contains(a) && a instanceof HTMLElement) a.blur();
 }
+
+/** Native click is not guaranteed for a second touch while the joystick owns the first.
+ * Keep primary touch/pen activation native. Route only secondary taps to the same click handler.
+ * A replaced button can retarget its compatibility click to a new card, so dedupe by pointer too. */
+export function bindTouchButtons(root: HTMLElement): () => void {
+  const active = new Map<number, { button: HTMLButtonElement; x: number; y: number }>();
+  const completed = new WeakMap<HTMLButtonElement, number>();
+  const completedPointers = new Map<number, number>();
+  const down = (e: PointerEvent) => {
+    const target = (e.target as HTMLElement)?.closest?.('button');
+    if (!target || target.disabled || !root.contains(target)) return;
+    completed.delete(target); completedPointers.delete(e.pointerId);
+    if (e.isPrimary !== false || (e.pointerType !== 'touch' && e.pointerType !== 'pen')) return;
+    active.set(e.pointerId, { button: target, x: e.clientX, y: e.clientY });
+    try { target.setPointerCapture(e.pointerId); } catch { /* Pointer may already be cancelled. */ }
+  };
+  const up = (e: PointerEvent) => {
+    const press = active.get(e.pointerId); active.delete(e.pointerId);
+    if (!press) return;
+    const b = press.button, r = b.getBoundingClientRect();
+    if (b.disabled || !b.isConnected || getComputedStyle(b).visibility !== 'visible' ||
+        Math.hypot(e.clientX-press.x,e.clientY-press.y)>14 ||
+        e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom) return;
+    const now = performance.now();
+    for (const [id, time] of completedPointers) if (now - time >= 500) completedPointers.delete(id);
+    completed.set(b, now);
+    completedPointers.set(e.pointerId, now);
+    e.preventDefault();
+    b.click();
+  };
+  const cancel = (e: PointerEvent) => { active.delete(e.pointerId); };
+  const click = (e: MouseEvent) => {
+    const b = (e.target as HTMLElement)?.closest?.('button');
+    const time = Math.max(b ? completed.get(b) ?? -1000 : -1000,
+      completedPointers.get((e as PointerEvent).pointerId) ?? -1000);
+    if (e.isTrusted && e.detail > 0 && performance.now() - time < 500) {
+      e.preventDefault(); e.stopImmediatePropagation();
+    }
+  };
+  root.addEventListener('pointerdown', down, true);
+  root.addEventListener('pointerup', up, true);
+  root.addEventListener('pointercancel', cancel, true);
+  root.addEventListener('lostpointercapture', cancel, true);
+  root.addEventListener('click', click, true);
+  return () => {
+    active.clear(); completedPointers.clear();
+    root.removeEventListener('pointerdown', down, true); root.removeEventListener('pointerup', up, true);
+    root.removeEventListener('pointercancel', cancel, true); root.removeEventListener('lostpointercapture', cancel, true);
+    root.removeEventListener('click', click, true);
+  };
+}

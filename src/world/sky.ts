@@ -1,3 +1,4 @@
+import { daylightAt } from '../core/dayClock';
 /**
  * 天穹、太阳与昼夜。
  *
@@ -60,6 +61,7 @@ uniform vec3 sun_dir;
 uniform vec3 sun_color;
 uniform float star_amount;
 uniform float moon_amount;
+uniform float night;
 
 float hash13(vec3 p) {
   p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
@@ -134,6 +136,7 @@ void main() {
     col = mix(col, cloudCol, cloud * (0.62 - 0.18 * dusk));
   }
 
+  col = mix(col, mix(vec3(0.015, 0.025, 0.065), vec3(0.055, 0.075, 0.13), 1.0-h), night);
   // 日轮与它的光晕。sun_dir 指向太阳本身。
   float sd = max(dot(normalize(vDir), normalize(sun_dir)), 0.0);
   col += sun_color * pow(sd, 900.0) * 3.0;          // 盘面
@@ -225,6 +228,8 @@ export class Sky {
   private t = 0;
   /** 0 = 白天, 1 = 黄昏。`state.dusk` 是同一份值的对外只读视图。 */
   private duskValue = 0;
+  night = 0;
+  private hour: number | null = null;
 
   constructor(scene: Scene, shadowMapSize: number, shadowDistance: number) {
     // 球够大就行：它跟着相机，永远在远裁剪面之内
@@ -246,6 +251,7 @@ export class Sky {
         sun_color: { value: new Color(1, 0.93, 0.8) },
         star_amount: { value: 0 },
         moon_amount: { value: 0 },
+        night: { value: 0 },
       },
     });
     this.mesh = new Mesh(geo, this.mat);
@@ -296,7 +302,17 @@ export class Sky {
   }
 
   setDusk(v: number) {
+    this.hour = null;
     this.duskValue = Math.min(Math.max(v, 0), 1);
+    this.state.dusk = this.duskValue;
+    this.apply();
+  }
+
+  setHour(hour: number): void {
+    if (this.hour !== null && Math.abs(this.hour - hour) < .01) return;
+    this.hour = hour;
+    const light = daylightAt(hour);
+    this.duskValue = Math.max(light.night, light.twilight * .7);
     this.state.dusk = this.duskValue;
     this.apply();
   }
@@ -343,6 +359,26 @@ export class Sky {
     // 1.5 是实测出来的：主体区域的平均亮度 97.1 → 109.1，暗像素（<40）8.1% → 3.2%。
     this.rim.intensity = 0.9 * this.state.ambient;
     this.rim.color.copy(this.state.sunColor).lerp(new Color(1, 0.97, 0.94), 0.5);
+    if (this.hour !== null) {
+      const light = daylightAt(this.hour);
+      this.night = light.night;
+      u.night.value = light.night;
+      u.dusk.value = light.twilight;
+      this.state.sunDir.set(Math.cos(light.angle) * .82, light.elevation, Math.cos(light.angle) * .57).normalize();
+      const dir = this.state.sunDir;
+      u.sun_dir.value = [dir.x, dir.y, dir.z];
+      this.state.sunColor.setHex(0xfff1dc).lerp(new Color(0xffa265), light.twilight);
+      (u.sun_color.value as Color).copy(this.state.sunColor).multiplyScalar(light.day);
+      u.star_amount.value = light.night * .8; u.moon_amount.value = light.night;
+      this.state.fogColor.setHex(0xaebfca).lerp(new Color(0xd39d7b), light.twilight*.42).lerp(new Color(0x202f46), light.night);
+      this.state.ambient = .23 + light.day*.77;
+      this.sun.intensity = light.day * 2.4;
+      this.sun.color.copy(this.state.sunColor);
+      this.hemi.intensity = .24 + light.day*.66;
+      this.hemi.color.setHex(0x7c9ac4).lerp(new Color(0xbfd8ff), light.day);
+      this.ambient.intensity = .12 + light.day*.13;
+      this.rim.intensity = .2 + light.day*.7;
+    } else { this.night = 0; u.night.value = 0; }
   }
 
   /** 阴影相机要跟着玩家走，否则 800m 的世界里阴影只在原点附近有效 */

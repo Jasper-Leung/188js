@@ -925,6 +925,30 @@ function registerQinChecks(check: CheckFn): void {
     } as unknown as MiniGameContext);
     g.resize(1024, 768);
 
+    // 小屏实测曾出现右侧键名出屏、离开按钮盖住第 21 音；测真实绘制与命中。
+    for (const [w, h] of [[667, 375], [844, 390]]) {
+      const labels: number[] = [];
+      const ctx = new Proxy(fakeCtx(w, h), { get(target, key) {
+        if (key === 'fillText') return (_text: string, x: number) => { labels.push(x); };
+        return Reflect.get(target, key);
+      } });
+      const touched: number[] = [];
+      let exited = false;
+      const small = createQinGame({ ctx, width: w, height: h, lang: 'en',
+        palette: { ink: '#000', paper: '#fff', accent: '#a60', dim: '#888', ok: '#0a0', bad: '#a00' },
+        audio: { sfx() {}, note() {}, noteFree(n: number) { touched.push(n); }, duckAmbient() {} },
+        t: (k: string) => k, seed: 1, onDone: () => { exited = true; },
+      } as unknown as MiniGameContext);
+      small.draw();
+      asserts++;
+      if (!labels.length || labels.some(x => x < 0 || x > w)) probs.push(`${w}×${h}：琴的文字锚点出屏`);
+      const board = rect(), cell = rect(); boardRectInto(board, w, h);
+      for (let n = 0; n < QIN_NOTES; n++) { cellRectInto(cell, board, n); small.onPointerDown(cell.x + cell.w / 2, cell.y + cell.h / 2); }
+      asserts++;
+      if (exited || new Set(touched).size !== QIN_NOTES) probs.push(`${w}×${h}：21 音有被退出按钮覆盖的格子`);
+      small.dispose();
+    }
+
     // 全部二十一个键挨个按一遍
     for (let o = 0; o < QIN_OCTAVES; o++) {
       for (let s = 0; s < QIN_STRINGS; s++) {

@@ -1,3 +1,4 @@
+import { touchHand, requestLandscape } from '../core/touchLayout';
 /**
  * 触屏控件 —— 左下摇杆、右侧打卡、右上暂停/静音。
  *
@@ -32,7 +33,7 @@
 import { t } from '../i18n';
 import { audio } from '../core/audio';
 import { codeOf } from '../core/keymap';
-import { button, el, setFlag, setShown, setText } from './dom';
+import { button, el, setAttr, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import { STATION_REACH } from '../game/phase';
 import type { UIHooks } from './index';
@@ -77,6 +78,14 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
   private stick: HTMLDivElement;
   private knob: HTMLDivElement;
   private checkBtn: HTMLButtonElement;
+  private vehicleBtn: HTMLButtonElement;
+  private pauseBtn: HTMLButtonElement;
+  private muteBtn: HTMLButtonElement;
+  private rotate: HTMLDivElement;
+  private rotateMessage: HTMLParagraphElement;
+  private rotateBtn: HTMLButtonElement;
+  private portraitBtn: HTMLButtonElement;
+  private cleanup: Array<() => void> = [];
   /** 「摸一下」那颗。对应 `GameAction` 里的 `interact`（键盘默认 F）。 */
   private actBtn!: HTMLButtonElement;
   private pointerId = -1;
@@ -89,6 +98,17 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     this.game = o.game;
 
     this.root = el('div', 'g-touch g-hidden');
+    const hand = () => { o.parent.dataset.touchHand = touchHand(); };
+    hand(); window.addEventListener('gift188-touch-hand', hand);
+    this.cleanup.push(() => window.removeEventListener('gift188-touch-hand', hand));
+    this.rotate = el('div', 'g-rotate');
+    this.rotateMessage = el('p', '', t('touch_rotate_hint'));
+    this.rotateBtn = button(t('touch_landscape'), { onClick: () => { void requestLandscape().then(ok => { if (!ok) setText(this.rotateMessage, t('touch_rotate_manual')); }); } });
+    this.portraitBtn = button(t('touch_portrait_continue'), { onClick: () => { o.parent.dataset.portraitAllowed = 'yes'; } });
+    this.rotate.appendChild(this.rotateMessage);
+    this.rotate.appendChild(this.rotateBtn);
+    this.rotate.appendChild(this.portraitBtn);
+    o.parent.appendChild(this.rotate);
 
     // ---- 左下摇杆 ----
     const stickWrap = el('div', 'g-stick');
@@ -104,6 +124,7 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     this.root.appendChild(stickWrap);
 
     this.stick.addEventListener('pointerdown', (e) => {
+      if (this.pointerId !== -1) return;
       this.pointerId = e.pointerId;
       this.stick.setPointerCapture(e.pointerId);
       this.moveTo(e);
@@ -153,6 +174,7 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     // `click` 只在没有指针参与时才发——否则一次点按会派发两次，
     // 而钓鱼那 1.15 秒的咬钩窗里按两下和按一下不是一回事。
     let pointerCast = false;
+    let actionPointer = -1;
     this.checkBtn = button(t('touch_checkin_button'), {
       cls: 'g-touch-check',
       onClick: () => {
@@ -164,6 +186,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       },
     });
     const press = (e: PointerEvent) => {
+      if (actionPointer !== -1) return;
+      actionPointer = e.pointerId;
       try { this.checkBtn.setPointerCapture(e.pointerId); } catch { /* 某些浏览器拒绝 */ }
       pointerCast = true;
       this.state.holdPressed = true;
@@ -171,6 +195,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       e.preventDefault();
     };
     const releaseAction = (e: PointerEvent) => {
+      if (actionPointer !== e.pointerId) return;
+      actionPointer = -1;
       try { this.checkBtn.releasePointerCapture(e.pointerId); } catch { /* 同上 */ }
       this.state.holdPressed = false;
     };
@@ -183,18 +209,24 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
 
     // ---- 右上：暂停 / 静音 ----
     const top = el('div', 'g-touch-t');
-    const pauseBtn = button(t('touch_pause_button'), {
+    this.pauseBtn = button(t('touch_pause_button'), {
       cls: 'g-touch-sq',
       aria: t('key_pause'),
       onClick: () => requestPause(),
     });
-    const muteBtn = button(t('touch_mute_button'), {
+    this.muteBtn = button(t('touch_mute_button'), {
       cls: 'g-touch-sq',
       aria: t('key_mute'),
       onClick: () => this.toggleMute(),
     });
-    top.appendChild(pauseBtn);
-    top.appendChild(muteBtn);
+    this.vehicleBtn = button(t('touch_vehicle'), { cls: 'g-touch-vehicle', aria: t('touch_vehicle'), onClick: () => {
+      const code = codeOf('vehicle');
+      window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
+    } });
+    this.root.appendChild(this.vehicleBtn);
+    top.appendChild(this.pauseBtn);
+    top.appendChild(this.muteBtn);
     // ---- 「摸一下」那颗（F）----
     //
     // **它原来根本不存在**，而这是触屏上最大的一个洞：F 挂着节拍窗口、
@@ -248,6 +280,9 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
      * 所以只靠那四个监听器不够，这里再兜一层。
      */
     const dropAll = () => {
+      actionPointer = -1;
+      pointerCast = false;
+      actPointer = false;
       this.state.moveX = 0;
       this.state.moveY = 0;
       this.state.checkInPressed = false;
@@ -256,8 +291,13 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       this.paintKnob();
     };
     window.addEventListener('blur', dropAll);
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) dropAll();
+    window.addEventListener('orientationchange', dropAll);
+    window.addEventListener('resize', dropAll);
+    const visibility = () => { if (document.hidden) dropAll(); };
+    document.addEventListener('visibilitychange', visibility);
+    this.cleanup.push(() => {
+      for (const event of ['blur', 'orientationchange', 'resize']) window.removeEventListener(event, dropAll);
+      document.removeEventListener('visibilitychange', visibility);
     });
   }
 
@@ -304,6 +344,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
   setLakesideMode(on: boolean): void {
     if (this.lakesideMode === on) return;
     this.lakesideMode = on;
+    setShown(this.vehicleBtn, !on);
+    setShown(this.actBtn, !on);
     this.state.holdPressed = false;
     this.state.checkInPressed = false;
     this.state.moveX = 0;
@@ -336,6 +378,18 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
    * 「这里还欠一次到访吗」只有 `fragmentStationNeedsVisit()` 一个判据。
    */
   sync(): void {
+    setText(this.vehicleBtn, t('touch_vehicle'));
+    setAttr(this.vehicleBtn, 'aria-label', t('touch_vehicle'));
+    setText(this.pauseBtn, t('touch_pause_button'));
+    setText(this.muteBtn, t('touch_mute_button'));
+    setText(this.actBtn, t('touch_act_button'));
+    setAttr(this.pauseBtn, 'aria-label', t('key_pause'));
+    setAttr(this.muteBtn, 'aria-label', t('key_mute'));
+    setAttr(this.actBtn, 'aria-label', t('key_interact'));
+    setAttr(this.stick, 'aria-label', t('touch_joystick_key'));
+    setText(this.rotateMessage, t('touch_rotate_hint'));
+    setText(this.rotateBtn, t('touch_landscape'));
+    setText(this.portraitBtn, t('touch_portrait_continue'));
     // 湖边那一屏不跑这一段：那一侧没有驿站，也就没有"还欠一次到访吗"。
     if (this.lakesideMode) {
       setFlag(this.checkBtn, 'is-live', true);
@@ -362,6 +416,12 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     this.hooks.onMuteChange(audio.bgmMuted, audio.sfxMuted, !audio.fullyMuted);
   }
 
+  /** Hiding chrome must stop held actions without stopping the invisible joystick. */
+  releaseActions(): void {
+    this.state.holdPressed = false;
+    this.state.checkInPressed = false;
+  }
+
   setMode(on: boolean): void {
     setShown(this.root, on);
     if (!on) {
@@ -375,6 +435,8 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
   }
 
   dispose(): void {
+    this.cleanup.forEach(fn => fn());
+    this.rotate.remove();
     this.root.remove();
   }
 }

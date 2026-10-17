@@ -74,7 +74,8 @@ body {
   z-index: 10;
 }
 
-#ui-root > * {
+/* HUD 根必须穿透到湖边画布；弹层和按钮各自声明交互区域。 */
+#ui-root > :not(.g-root) {
   pointer-events: auto;
 }
 
@@ -87,7 +88,7 @@ body {
    z-index 40 落在 HUD(10) 之上、启动屏(100) 之下。 */
 .minigame-layer {
   position: fixed;
-  inset: 0;
+  inset: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   z-index: 40;
   display: grid;
   place-items: center;

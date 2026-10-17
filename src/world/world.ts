@@ -1,3 +1,4 @@
+import { Rural } from './rural';
 /**
  * 世界编排 —— 把渲染、地形、路面、水、植被、驿站、天穹、骑行装配起来，
  * 并驱动整条玩法流程。
@@ -39,7 +40,7 @@ import { clamp } from '../core/math';
 
 export type WorldEvent =
   | { type: 'stationPassed'; index: number }
-  | { type: 'dialogue'; speaker: string; lines: string[] }
+  | { type: 'dialogue'; speaker: string; lines: string[]; continuation?: 'minigame' | 'synthesis' }
   | { type: 'villain'; sceneIndex: number }
   /**
    * 顺路读到的一句话（驿站/石碑）。**不锁操作、不吃点击**
@@ -99,6 +100,7 @@ export class World {
   readonly stations: Stations;
   readonly relics: Relics;
   readonly sky: Sky;
+  readonly rural: Rural;
   readonly ride: Ride;
   readonly camera: PerspectiveCamera;
 
@@ -173,9 +175,8 @@ export class World {
 
   /** 木牌钉在环上的哪个位置。取 0.42：离起点足够远，玩家第一圈一定会经过。 */
   private readonly SIGN_ARC_T = 0.42;
-  /** 琴音林的碎片槽位。**写死 2 而不是查表**——查表会得到一个
-   *  「若驿站顺序变了琴也跟着搬」的耦合，而琴音林的名字就是琴音林。 */
-  private readonly QIN_STATION = 2;
+  /** 琴音林的实际站号（模型索引为 2，不能把模型索引当站号）。 */
+  private readonly QIN_STATION = 13;
 
   /**
    * 骑行中的节拍（竹）。**第一件和"骑"有关的乐事。**
@@ -295,6 +296,8 @@ export class World {
     step('旧物');
     this.sky = new Sky(this.scene, preset.shadowMapSize, preset.shadowDistance || 120);
     step('天穹');
+    this.rural = new Rural(this.terrain, preset);
+    this.scene.add(this.rural.group);
     // 节拍点由竹丛落位推出来，所以必须在 `Scenery` 之后。
     this.beats = new BambooBeats(this.scenery);
     step('骑行节拍');
@@ -402,6 +405,8 @@ export class World {
   render(dt: number, driveCamera = true) {
     this.ride.render(dt, driveCamera);
     this.sky.attachTo(this.ride.camera);
+    this.fogColor.copy(this.sky.state.fogColor);
+    this.rural.update(this.sky.night, this.ride.pos.x, this.ride.pos.z);
     this.sky.updateShadowFocus(this.ride.pos.x, this.ride.pos.y, this.ride.pos.z);
     // 主体补光必须排在 `ride.render()` 之后：那一步才把相机的
     // 阻尼跟随位置算完，而补光要的是"相机在主体哪一侧"。
@@ -456,9 +461,7 @@ export class World {
     } else if (this.lastArc < 0.15 && arc > 0.85) this.lap = Math.max(1, this.lap - 1);
     this.lastArc = arc;
 
-    // 昼夜：圈内进度 **与** 日期，取较晚的那个。见 sky.ts:setByProgress。
-    const lapProgress = (this.odometer % TOTAL_ARCLENGTH) / TOTAL_ARCLENGTH;
-    this.sky.setByProgress(this.lap, lapProgress, game.day, GameStateManager.DAYS_LIMIT);
+    // 天色由独立时钟驱动；仍保留原第二圈的黄昏叙事事件。
     if (this.lap >= 2 && this.sky.state.dusk > 0.35 && !this.duskAnnounced) {
       this.duskAnnounced = true;
       this.emit({ type: 'duskBegan' });
@@ -959,6 +962,24 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
   private camMoveTo = { x: 0, y: 0, z: 0 };
   private lookTarget = { x: 0, y: 0, z: 0 };
 
+  /** Finish the selected transition exactly once, including camera and revisit gates. */
+  completeCheckInNow(): void {
+    if (this.checkInStage !== 'holding' && this.checkInStage !== 'outro') return;
+    const idx = this.checkInTarget;
+    const cb = this.onCheckInComplete;
+    this.checkInStage = 'none';
+    this.stageT = 0;
+    this.checkInTarget = -1;
+    this.onCheckInComplete = null;
+    this.ride.setCameraLocked(false);
+    this.narrativeBusy = false;
+    this.ride.snapCamera();
+    this.lastCheckInPos.copy(this.ride.pos);
+    this.recheckArmed = false;
+    this.homeBeat = false;
+    cb?.(idx);
+  }
+
   private advanceCheckIn(dt: number) {
     if (this.checkInStage === 'none') return;
     this.stageT += dt;
@@ -978,6 +999,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
           this.emit({
             type: 'dialogue',
             speaker: t('home_speaker'),
+            continuation: 'synthesis',
             lines: ['home_arrive_1', 'home_arrive_2', 'home_arrive_3']
               .map((k) => t(k))
               .filter((v) => v && !v.startsWith('⟨')),
@@ -995,6 +1017,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
             this.emit({
               type: 'dialogue',
               speaker: st ? stationNameOf(st.placement.def) : '',
+              continuation: 'minigame',
               lines: [...lines],
             });
           } else if (count === 1 || count === 2) {
@@ -1039,19 +1062,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
     } else if (this.checkInStage === 'outro') {
       this.ride.placeCamera(this.camMoveTo.x, this.camMoveTo.y, this.camMoveTo.z, this.lookTarget.x, this.lookTarget.y, this.lookTarget.z);
       if (this.stageT >= 0.4) {
-        const idx = this.checkInTarget;
-        const cb = this.onCheckInComplete;
-        this.checkInStage = 'none';
-        this.stageT = 0;
-        this.checkInTarget = -1;
-        this.onCheckInComplete = null;
-        this.ride.setCameraLocked(false);
-        this.narrativeBusy = false;
-        this.ride.snapCamera();
-        this.lastCheckInPos.copy(this.ride.pos);
-        this.recheckArmed = false;
-        this.homeBeat = false;
-        cb?.(idx);
+        this.completeCheckInNow();
       }
     }
   }
@@ -1139,6 +1150,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
     this.veg.invalidate();
     this.scenery.invalidate();
     this.stations.setPreset(preset);
+    this.rural.setPreset(preset);
     this.water.setDetail(preset.waterDetail);
   }
 

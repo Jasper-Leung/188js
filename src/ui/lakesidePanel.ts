@@ -43,6 +43,8 @@ export class LakesidePanel {
   private vrBtn: HTMLButtonElement;
   /** 上一次同步的「提示 + 鱼种 + 语言」，用来判断这一屏该不该重写 DOM。 */
   private lastKey = '';
+  private capability: HTMLDivElement;
+  private vrAvailable = false;
   /**
    * 出口那颗按钮上一次写的文案。
    *
@@ -56,7 +58,7 @@ export class LakesidePanel {
     this.root.setAttribute('role', 'status');
     this.root.setAttribute('aria-live', 'polite');
 
-this.hint = el('div', 'g-lakeside-hint');
+    this.hint = el('div', 'g-lakeside-hint');
     this.bar = el('div', 'g-lakeside-bar');
     this.barFill = el('div', 'g-lakeside-bar-fill');
     this.barText = el('div', 'g-lakeside-bar-text');
@@ -86,6 +88,8 @@ this.hint = el('div', 'g-lakeside-hint');
     this.root.appendChild(this.barText);
     this.root.appendChild(this.exitLine);
     this.root.appendChild(this.vrBtn);
+    this.capability = el('div', 'g-lakeside-capability', t('lake_panorama_fallback'));
+    this.root.appendChild(this.capability);
     parent.appendChild(this.root);
     this.root.style.display = 'none';
   }
@@ -122,6 +126,8 @@ this.hint = el('div', 'g-lakeside-hint');
    * 而按钮看起来完全正常，没有任何东西能解释为什么它不工作。
    */
   setVrAvailable(on: boolean): void {
+    this.vrAvailable = on;
+    setText(this.capability, t(on ? 'lake_vr_supported' : 'lake_panorama_fallback'));
     setShown(this.vrBtn, on);
   }
 
@@ -134,7 +140,7 @@ this.hint = el('div', 'g-lakeside-hint');
    */
   sync(f: LakesideFrame): void {
     this.root.style.display = 'flex';
-    const key = `${isEnglish() ? 'en' : 'zh'}|${f.hint}|${f.fish.catchKind}`;
+    const key = `${isEnglish() ? 'en' : 'zh'}|${this.touchMode}|${f.hint}|${f.fish.phase}|${f.fish.catchKind}`;
     if (key !== this.lastKey) {
       this.lastKey = key;
       this.hint.textContent = this.hintText(f);
@@ -156,14 +162,16 @@ this.hint = el('div', 'g-lakeside-hint');
   }
 
   private hintText(f: LakesideFrame): string {
+    if (f.fish.phase === 'casting' || f.fish.phase === 'waiting') return t('lake_waiting');
+    if (f.fish.phase === 'bite') return t(this.touchMode ? 'lake_strike_touch' : 'lake_strike');
     switch (f.hint) {
-      case 'strike': return t('lake_strike');
-      case 'tension': return t('lake_hold');
+      case 'strike': return t(this.touchMode ? 'lake_strike_touch' : 'lake_strike');
+      case 'tension': return t(this.touchMode ? 'lake_hold_touch' : 'lake_hold');
       case 'caught': return t('lake_caught', { kind: kindName(f.fish.catchKind) });
       case 'snapped': return t('lake_snapped');
       case 'escaped': return t('lake_escaped');
       case 'missed': return t('lake_missed');
-      default: return t('lake_cast_hint');
+      default: return t(this.touchMode ? 'lake_cast_touch' : 'lake_cast_hint');
     }
   }
 
@@ -179,6 +187,7 @@ this.hint = el('div', 'g-lakeside-hint');
     this.lastExitKey = '';
     setText(this.exitLine, t(this.touchMode ? 'lake_exit_touch' : 'lake_exit'));
     setText(this.vrBtn, t('lake_vr_enter'));
+    setText(this.capability, t(this.vrAvailable ? 'lake_vr_supported' : 'lake_panorama_fallback'));
   }
 
   /** 记着当前的触屏态，好让 `setLang()` 不用再问一遍宿主。 */

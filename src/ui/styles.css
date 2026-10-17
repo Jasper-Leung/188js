@@ -80,6 +80,7 @@
      不这样的话，一层铺满全屏的透明 div 会把 3D 场景的点击全吃掉。 */
   pointer-events: none;
   overflow: hidden;
+  overflow: clip; /* Focus must not scroll the entire HUD outside the safe area. */
   user-select: none;
   -webkit-user-select: none;
 
@@ -1985,9 +1986,37 @@
    用 visibility 而不是 display:none —— 后者让 getBoundingClientRect 返回 0，
    依赖布局测量的面板会跟着错位。`visibility` 保留盒子，只是不画。
    ============================================================================= */
-.g-root.is-clean {
-  visibility: hidden;
+/* Hidden pixels must not remove the movement hit target. */
+.g-root.is-clean { visibility: hidden; }
+.g-root.is-clean .g-stick-base { visibility: visible; opacity: 0; }
+.g-root.is-clean .g-visibility-hide { visibility: visible; opacity: 0; animation: none; }
+.g-root.is-clean .g-visibility-hide:focus-visible { opacity: 1; }
+.g-root[data-hide-items='true'] .g-itembar,
+.g-root[data-hide-tasks='true'] .g-top,
+.g-root[data-hide-tasks='true'] .g-beat,
+.g-root[data-hide-tasks='true'] .g-dodge,
+.g-root[data-hide-map='true'] .g-minimap,
+.g-root[data-hide-actions='true'] .g-business-entry,
+.g-root[data-hide-actions='true'] .g-ring-hold,
+.g-root[data-hide-actions='true'] .g-touch-r,
+.g-root[data-hide-actions='true'] .g-touch-act,
+.g-root[data-hide-actions='true'] .g-touch-vehicle,
+.g-root[data-hide-actions='true'] .g-touch-t { visibility: hidden; }
+
+.g-root .g-visibility {
+  position: absolute; top: max(8px, env(safe-area-inset-top, 0px));
+  right: var(--g-safe-x); display: flex; gap: 6px; z-index: 30;
 }
+.g-root .g-visibility > .g-btn { background: var(--paper); min-height: 44px; padding: 6px 12px; }
+.g-root .g-visibility-panel {
+  position: absolute; top: 52px; right: 0; width: min(280px, calc(100vw - 52px));
+  max-height: calc(100dvh - 100px); overflow-y: auto; background: var(--paper);
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+  display: grid; gap: 8px; pointer-events: auto; box-shadow: 0 4px 20px #0004;
+}
+.g-root .g-visibility-panel .g-btn[aria-pressed='true'] { border-color: var(--ink); background: var(--paper-85); }
+.g-root .g-visibility-panel .g-btn[aria-pressed='false'] { text-decoration: line-through; }
+
 
 .g-root {
   /* 边缘手势安全区。26px 是实测各浏览器手势带宽度的上界；
@@ -2450,3 +2479,80 @@
 .g-lakeside-vr {
   font-size: 13px;
 }
+
+/* v1.0.2: lower corners belong to thumbs; reading stays above them. */
+.g-root .g-touch-vehicle { position:absolute; right:var(--g-safe-x); bottom:calc(var(--g-safe-b) + 7.4rem); min-width:5.6rem; min-height:44px; pointer-events:auto; color:var(--paper); background:rgba(24,20,15,.72); }
+.g-root[data-touch='on'] .g-minimap { top:calc(env(safe-area-inset-top, 0px) + 5.4rem); right:var(--g-safe-x); left:auto; bottom:auto; transform:none; pointer-events:none; }
+.g-root[data-touch='on'] .g-minimap-c { width:100px !important; height:100px !important; }
+.g-root[data-touch='on'] .g-top { padding-left:var(--g-safe-x); padding-right:calc(var(--g-safe-x) + 7rem); padding-top:max(.45em, env(safe-area-inset-top, 0px)); }
+.g-root[data-touch='on'] .g-touch-t { top:max(.5rem, env(safe-area-inset-top, 0px)); }
+.g-root[data-touch='on'] .g-touch-sq { min-width:44px; min-height:44px; }
+.g-root[data-touch='on'] .g-itembar { left:50%; transform:translateX(-50%); bottom:calc(var(--g-safe-b) + 6rem); }
+.g-root[data-touch-hand='left'] .g-stick { left:auto; right:var(--g-safe-x); }
+.g-root[data-touch-hand='left'] .g-touch-r, .g-root[data-touch-hand='left'] .g-touch-vehicle { right:auto; left:var(--g-safe-x); }
+.g-root[data-touch='on'] .g-frags { max-width:calc(100vw - 150px); }
+.g-root[data-touch='on'] .g-frags-row { flex-wrap:wrap; }
+.g-rotate { display:none; }
+.g-root .g-rotate button { min-height:44px; color:#fff4dc; border-color:rgba(255,244,220,.65); background:rgba(255,244,220,.08); }
+.g-root[data-touch='on'] .g-card-line { max-height:calc(100vh - 7rem); overflow-y:auto; }
+.g-root[data-touch='on'] .g-dlg-box { max-height:calc(100vh - 2rem); overflow-y:auto; }
+.g-root .g-business-entry { margin-left:auto; min-height:44px; padding:.3em .7em; pointer-events:auto; background:var(--paper); }
+.g-root .g-business { z-index:70; pointer-events:auto; padding: max(12px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+.g-root .g-business-card { max-height:100%; overflow-y:auto; width:min(700px, 100%); padding:1.2rem; }
+.g-business-status { white-space:pre-line; line-height:1.7; font-variant-numeric:tabular-nums; }
+.g-business-actions { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px; margin:12px 0; }
+.g-business-actions button, .g-business .g-acts button { min-height:44px; }
+.g-root .g-business-actions .g-btn:disabled { opacity:.7; color:var(--ink); }
+.g-root .g-business-card .g-note { color:var(--ink-soft); }
+.g-clock-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; }
+.g-clock-field input, .g-clock-field select { width:110px; min-height:44px; font:inherit; }
+.g-lakeside-capability { font-size:.85em; color:var(--paper); max-width:32em; text-shadow:0 1px 3px #111; }
+.g-lakeside { background:linear-gradient(transparent, rgba(12,23,25,.86)); }
+.g-root .g-lakeside-exit, .g-root .g-lakeside-vr { color:var(--paper); border-color:rgba(242,237,226,.6); }
+@media (orientation:landscape) and (max-height:520px) {
+  .g-root[data-touch='on'] .g-stick { width:112px; height:112px; }
+  .g-root[data-touch='on'] .g-touch-check { width:72px; height:72px; }
+  .g-root[data-touch='on'] .g-touch-vehicle { bottom:calc(var(--g-safe-b) + 6rem); min-width:72px; }
+  .g-root[data-touch='on'] .g-minimap-c { width:80px !important; height:80px !important; }
+  .g-root[data-touch='on'] .g-minimap { top:calc(env(safe-area-inset-top, 0px) + 3.8rem); }
+  .g-root[data-touch='on'] .g-lakeside { left:50%; right:auto; bottom:calc(var(--g-safe-b) + 1rem); transform:translateX(-50%); width:calc(100vw - 300px); max-width:38rem; border-radius:12px; padding:12px; background:rgba(12,23,25,.8); }
+  .g-root[data-touch='on'] .g-itembar { bottom:calc(var(--g-safe-b) + 5.5rem); }
+}
+@media (orientation:portrait) {
+  .g-root[data-touch='on']:not([data-portrait-allowed='yes']) .g-rotate { display:flex; position:fixed; inset:0; z-index:200; background:rgba(20,27,25,.96); color:#fff4dc; align-items:center; justify-content:center; flex-direction:column; gap:16px; padding:32px; pointer-events:auto; }
+  .g-root[data-touch='on'] .g-business-actions { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+/* 2026-10 touch layout: left movement, right actions; safe areas also apply in desktop WebViews. */
+.g-root .g-top { padding-right: calc(var(--g-safe-x) + 230px); }
+.g-root .g-business-entry { position: absolute; right: calc(var(--g-safe-x) + 90px); bottom: calc(var(--g-safe-b) + 138px); z-index: 7; max-width: 175px; }
+.g-root .g-itembar, .g-root[data-touch='on'] .g-itembar { left: auto; right: calc(var(--g-safe-x) + 90px); bottom: calc(var(--g-safe-b) + 84px); transform: none; }
+.g-root[data-touch='off'] .g-itembar, .g-root[data-touch='off'] .g-business-entry { right: calc(var(--g-safe-x) + 230px); }
+.g-root .g-item-toggle { min-height: 44px; background: var(--paper); }
+.g-root .g-item-panel { position: absolute; right: 0; bottom: 52px; display: grid; grid-template-columns: repeat(2, minmax(76px, 1fr)); gap: 8px; padding: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px; pointer-events: auto; max-width: calc(100vw - 140px); }
+.g-root .g-item { min-height: 60px; pointer-events: auto; animation: none; }
+.g-root .g-card-next, .g-root .g-card-skip { min-height: 44px; min-width: 44px; color: #efe7d6; margin: 8px 4px 0; background: #ffffff0d; border-color: #ffffff50; }
+.g-root .g-dlg { z-index: 40; padding: max(12px, env(safe-area-inset-top, 0px)) var(--g-safe-x) var(--g-safe-b); }
+.g-root .g-dlg-box { max-height: calc(100dvh - 36px); overflow-y: auto; }
+.g-root .g-dlg-bar { flex-wrap: wrap; justify-content: flex-end; }
+.g-root .g-dlg-bar .g-btn { min-height: 44px; min-width: 44px; }
+.g-root .g-screen { z-index: 50; padding-top: max(12px, env(safe-area-inset-top, 0px)); padding-bottom: var(--g-safe-b); }
+.g-root .g-card { max-height: calc(100dvh - 48px); overflow-y: auto; }
+.g-root[data-touch='on'] .g-btn, .g-root[data-touch='on'] .g-seg-b,
+.g-root[data-touch='on'] .g-fold-h, .g-root[data-touch='on'] .g-tab { min-width: 44px; min-height: 44px; touch-action: manipulation; }
+.g-root[data-touch='on'] .g-top { padding-right: calc(var(--g-safe-x) + 230px); }
+.g-root[data-touch='on'] .g-touch-t { top: calc(max(8px, env(safe-area-inset-top, 0px)) + 52px); }
+.g-root[data-touch='on'] .g-minimap { top: calc(max(8px, env(safe-area-inset-top, 0px)) + 104px); }
+.g-root[data-touch='on'] .g-touch-act { left: auto; right: calc(var(--g-safe-x) + 90px); transform: none; bottom: calc(var(--g-safe-b) + 16px); min-width: 76px; min-height: 56px; }
+.g-root[data-touch-hand='left'] .g-touch-act { right: auto; left: calc(var(--g-safe-x) + 90px); }
+.g-root[data-touch='on'][data-touch-hand='left'] .g-itembar, .g-root[data-touch='on'][data-touch-hand='left'] .g-business-entry { right: auto; left: calc(var(--g-safe-x) + 90px); }
+@media (orientation:portrait) {
+  .g-root .g-top { padding-top: calc(max(8px, env(safe-area-inset-top, 0px)) + 52px); padding-right: var(--g-safe-x); }
+  .g-root[data-touch='on'] .g-top { padding-right: var(--g-safe-x); }
+  .g-root[data-touch='on'] .g-minimap { top: 200px; }
+  .g-root[data-touch='on'] .g-touch-t { top: auto; bottom: calc(var(--g-safe-b) + 185px); }
+}
+
+.g-root .g-itembar.is-expanded { z-index: 25; }
+
+.g-root .g-top-l { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; gap: .25em .8em; }

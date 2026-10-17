@@ -206,7 +206,7 @@ export function boardRectInto(out: Rect, w: number, h: number): void {
  */
 export function qinHintLayout(h: number, boardTop: number): { y: number; right: boolean } {
   if (h >= SHORT_H) return { y: h * 0.9, right: false };
-  return { y: Math.max(h * 0.1 + 14, boardTop - 6), right: true };
+  return { y: Math.min(22, boardTop - 6), right: true };
 }
 
 /** 一格（弦 × 八度）的命中区。**几何，不碰画笔**——键盘/触屏/回归读的是同一份。 */
@@ -268,6 +268,7 @@ class QinGame implements MiniGame {
     bodyPolyInto(this.body, this.board.x, this.board.y, this.board.w, this.board.h);
     for (let n = 0; n < QIN_NOTES; n++) cellRectInto(this.cells[n], this.board, n);
     cancelRectInto(this.cancelBtn, w, h);
+    if (h < SHORT_H) Object.assign(this.cancelBtn, { x: w - 98, y: 4, w: 88, h: 44 });
   }
 
   private finish(r: MiniGameResult): void {
@@ -354,7 +355,8 @@ class QinGame implements MiniGame {
     const b = this.board;
 
     drawBackdrop(g, w, h, THEME.ZITHER);
-    drawTextCentered(g, tf(this.sh, 'qin_title'), w, h * 0.1, 28, this.sh.paper);
+    if (h < SHORT_H) drawText(g, tf(this.sh, 'qin_title'), 18, 22, 18, this.sh.paper);
+    else drawTextCentered(g, tf(this.sh, 'qin_title'), w, h * 0.1, 28, this.sh.paper);
 
     // 琴面
     g.fillStyle = rgba(COL_BODY);
@@ -473,7 +475,7 @@ class QinGame implements MiniGame {
     // 八度名压在板子正上方，键名压在每一格的右上角。
     for (let o = 0; o < QIN_OCTAVES; o++) {
       const c = this.cells[o * QIN_STRINGS];
-      drawTextCentered(g, tf(this.sh, `qin_oct_${o}`), c.x + c.w * 0.5, b.y - 26, 20, this.sh.dim);
+      drawText(g, tf(this.sh, `qin_oct_${o}`), c.x, b.y - (h < SHORT_H ? 6 : 26), h < SHORT_H ? 15 : 20, this.sh.paper, 'center', c.w);
     }
     const rowH2 = b.h / QIN_STRINGS;
     for (let o = 0; o < QIN_OCTAVES; o++) {
@@ -481,11 +483,11 @@ class QinGame implements MiniGame {
         const n = o * QIN_STRINGS + s;
         const r = this.cells[n];
         drawText(g, QIN_KEYS[o][s].replace(/^Key|^Digit/, ''),
-          r.x + r.w - 14, r.y + rowH2 * 0.34, 18, 'rgba(217,199,158,0.7)', 'right', r.w);
+          r.x, r.y + rowH2 * 0.34, 18, 'rgba(217,199,158,0.9)', 'right', r.w - 14);
       }
     }
     for (let s = 0; s < QIN_STRINGS; s++) {
-      drawText(g, String(s + 1), b.x - 14, b.y + rowH2 * (s + 0.5) + 7, 20, 'rgba(217,199,158,0.85)', 'right');
+      drawText(g, String(s + 1), 0, b.y + rowH2 * (s + 0.5) + 7, 20, 'rgba(217,199,158,0.85)', 'right', b.x - 14);
     }
 
     // 操作提示 + 离开。**这一屏没有倒计时、没有进度条**，
@@ -494,7 +496,7 @@ class QinGame implements MiniGame {
     const hint = qinHintLayout(h, b.y);
     if (hint.right) {
       // 矮视口：提示挪到标题那一行右侧，免得压到弦上
-      drawText(g, tf(this.sh, 'qin_hint'), w - 18, hint.y, 17, this.sh.dim, 'right', w - 36);
+      drawText(g, tf(this.sh, 'qin_touch_hint'), 220, hint.y, 12, this.sh.paper, 'right', Math.max(1, w - 340));
     } else {
       drawTextCentered(g, tf(this.sh, 'qin_hint'), w, hint.y, 20, this.sh.dim);
     }

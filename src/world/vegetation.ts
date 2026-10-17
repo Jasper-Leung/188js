@@ -1,3 +1,4 @@
+import { WORLD_EXPERIENCE } from '../data/worldExperience';
 /**
  * 植被 —— 行道树、灌木、草皮。全部 InstancedMesh，按块（chunk）流式进出场景。
  *
@@ -168,7 +169,7 @@ export const STATION_TREE_CLEAR_R = STATION_TREE_CLEAR;
 /** 世界坐标是否落在任意一座驿站的让位圈里。 */
 function insideStationClear(x: number, z: number): boolean {
   for (const s of STATIONS) {
-    if (Math.hypot(x - s.x, z - s.z) < STATION_TREE_CLEAR) return true;
+    if (Math.hypot(x - s.x, z - s.z) < (s.def.model_idx === 2 ? WORLD_EXPERIENCE.station.qinClearRadius : STATION_TREE_CLEAR)) return true;
   }
   return false;
 }

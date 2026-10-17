@@ -1,3 +1,6 @@
+import { touchHand, setTouchHand } from '../core/touchLayout';
+import { worldSettings } from './worldSettings';
+import { worldClock } from '../core/dayClock';
 /**
  * 暂停面板 —— 继续 / 重开 / 收工，外加画质、自适应、静音、语言、操作说明。
  *
@@ -69,6 +72,13 @@ export class PausePanel {
   private touchSeg: HTMLDivElement;
   private touchBtns: HTMLButtonElement[] = [];
   private touchWhy: HTMLElement;
+  private handBtn: HTMLButtonElement;
+  private worldTime: ReturnType<typeof worldSettings>;
+  private captions: { node: HTMLElement; key: string }[] = [];
+  private caption<T extends HTMLElement>(node: T, key: string): T {
+    this.captions.push({ node, key });
+    return node;
+  }
 
   private tierBtns: HTMLButtonElement[] = [];
   private summaryBox: HTMLDivElement;
@@ -96,12 +106,12 @@ export class PausePanel {
 
     this.root = el('div', 'g-screen g-pause g-hidden');
     const card = el('div', 'g-card g-card-pause');
-    card.appendChild(el('h2', 'g-h2', t('pause_title')));
+    card.appendChild(this.caption(el('h2', 'g-h2', t('pause_title')), 'pause_title'));
 
     // ---- 三个大动作 ----
     const acts = el('div', 'g-acts');
-    acts.appendChild(button(t('continue'), { cls: 'g-btn-major', onClick: () => this.hooks.onResume() }));
-    acts.appendChild(button(t('restart'), { cls: 'g-btn-major', onClick: () => this.hooks.onRestart() }));
+    acts.appendChild(this.caption(button(t('continue'), { cls: 'g-btn-major', onClick: () => this.hooks.onResume() }), 'continue'));
+    acts.appendChild(this.caption(button(t('restart'), { cls: 'g-btn-major', onClick: () => this.hooks.onRestart() }), 'restart'));
     card.appendChild(acts);
 
     this.finishBtn = button(t('finish_run'), {
@@ -115,7 +125,7 @@ export class PausePanel {
     card.appendChild(rule());
 
     // ---- 画质 ----
-    card.appendChild(el('div', 'g-group-h', t('quality')));
+    card.appendChild(this.caption(el('div', 'g-group-h', t('quality')), 'quality'));
     const seg = el('div', 'g-seg');
     for (let i = 0; i < TIER_KEYS.length; i++) {
       const b = button(t(TIER_KEYS[i]), {
@@ -135,7 +145,7 @@ export class PausePanel {
     const ad = el('div', 'g-group');
     this.adaptBtn = button(t('adaptive_on'), { cls: 'g-btn-toggle', onClick: () => this.toggleAdaptive() });
     const adHead = el('div', 'g-group-h');
-    adHead.appendChild(el('span', null, t('hud_scale')));
+    adHead.appendChild(this.caption(el('span', null, t('hud_scale')), 'hud_scale'));
     adHead.appendChild(this.adaptBtn);
     ad.appendChild(adHead);
     this.adaptTargets = el('div', 'g-seg g-seg-sm');
@@ -149,7 +159,7 @@ export class PausePanel {
       );
     }
     ad.appendChild(this.adaptTargets);
-    ad.appendChild(note(t('adaptive_hint'), 'g-note-dim'));
+    ad.appendChild(this.caption(note(t('adaptive_hint'), 'g-note-dim'), 'adaptive_hint'));
     card.appendChild(ad);
 
     // ---- 触屏操作 ----
@@ -160,7 +170,7 @@ export class PausePanel {
     // "自动"要能找回——一个被误判成触屏的桌面用户需要一条退路。
     const tc = el('div', 'g-group');
     const tcHead = el('div', 'g-group-h');
-    tcHead.appendChild(el('span', null, t('touch_mode')));
+    tcHead.appendChild(this.caption(el('span', null, t('touch_mode')), 'touch_mode'));
     tc.appendChild(tcHead);
     this.touchSeg = el('div', 'g-seg');
     for (const m of TOUCH_MODES) {
@@ -175,13 +185,20 @@ export class PausePanel {
     tc.appendChild(this.touchSeg);
     this.touchWhy = note(t('touch_why'), 'g-note-dim');
     tc.appendChild(this.touchWhy);
+    this.handBtn = button(t(touchHand() === 'right' ? 'touch_hand_right' : 'touch_hand_left'), { onClick: () => {
+      setTouchHand(touchHand() === 'right' ? 'left' : 'right');
+      setText(this.handBtn, t(touchHand() === 'right' ? 'touch_hand_right' : 'touch_hand_left'));
+    } });
+    tc.appendChild(this.handBtn);
     card.appendChild(tc);
+    this.worldTime = worldSettings(worldClock);
+    card.appendChild(this.worldTime);
 
     card.appendChild(rule());
 
     // ---- 静音 ----
     const mu = el('div', 'g-group');
-    mu.appendChild(el('div', 'g-group-h', t('mute')));
+    mu.appendChild(this.caption(el('div', 'g-group-h', t('mute')), 'mute'));
     const muSeg = el('div', 'g-seg');
     this.allBtn = button(t('mute'), { cls: 'g-seg-b', onClick: () => this.toggleAll() });
     this.bgmBtn = button(t('bgm_short'), { cls: 'g-seg-b', aria: t('bgm_mute'), onClick: () => this.toggleBgm() });
@@ -213,7 +230,7 @@ card.appendChild(rule());
     this.langBtn = button(t('language'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onLangToggle() });
     tools.appendChild(this.langBtn);
     tools.appendChild(
-      button(t('controls_title'), { cls: 'g-btn-quiet', onClick: () => this.setHelpOpen(true) }),
+      this.caption(button(t('controls_title'), { cls: 'g-btn-quiet', onClick: () => this.setHelpOpen(true) }), 'controls_title'),
     );
     card.appendChild(tools);
 
@@ -537,6 +554,7 @@ for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motio
   private paintTouch(): void {
     const cur = touchMode();
     this.touchBtns.forEach((b, i) => {
+      setText(b, t(TOUCH_MODES[i].key));
       setFlag(b, 'is-on', TOUCH_MODES[i].value === cur);
     });
     // 把判定理由写在下面：触屏控件"不出现"是最难排查的一类问题，
@@ -635,11 +653,15 @@ for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motio
    * 画面的档位则跟着 `tier` 成员走。
    */
   sync(): void {
+    for (const { node, key } of this.captions) setText(node, t(key));
     for (let i = 0; i < this.tierBtns.length; i++) {
       setText(this.tierBtns[i], t(TIER_KEYS[i]));
+      this.tierBtns[i].setAttribute('aria-label', `${t(TIER_KEYS[i])} · ${t('quality')}`);
       setFlag(this.tierBtns[i], 'is-on', (i as Tier) === this.tier);    }
     this.paintSummary();
     this.paintTouch();
+    setText(this.handBtn, t(touchHand() === 'right' ? 'touch_hand_right' : 'touch_hand_left'));
+    this.worldTime.refresh();
 
     setText(this.adaptBtn, this.adaptiveOn ? t('adaptive_on') : t('adaptive_off'));
     setFlag(this.adaptBtn, 'is-on', this.adaptiveOn);

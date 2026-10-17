@@ -2,10 +2,11 @@
 
 > **English** · [简体中文](README.zh-CN.md)
 
-The web edition of *Gift No.188*, originally written in Godot 4.6. Gameplay,
-numbers and text are carried over 1:1; the presentation layer and the project
-structure were rebuilt, with **low-end compatibility** treated as a first-class
-design goal.
+The web edition of *Gift No.188*, originally written in Godot 4.6, built for
+**low-end compatibility**. v1.0.2 preserves the original narrative and adds station
+businesses, a configurable day/night cycle and touch controls. See the
+[design](docs/v1.0.2-plan.md) and [validation record](docs/v1.0.2-validation.md)
+for the implemented scope and device tests still required.
 
 ## From Godot to three.js
 
@@ -139,7 +140,7 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 521-key string table match exactly.
+and both sides of the 626-key string table match exactly.
 
 ### Two: translate geometry point by point
 
@@ -158,7 +159,7 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        521 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        626 strings consistent across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise
