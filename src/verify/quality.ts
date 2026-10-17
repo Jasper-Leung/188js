@@ -1,5 +1,6 @@
 import { PRESETS, clampTier } from '../core/settings';
 import { TIER_LOW, TIER_MEDIUM, TIER_HIGH } from '../core/capability';
+import { TRAIL_LIFE_MAX, TRAIL_MAX_PARTICLES } from '../world/skateTrail';
 import { expect } from './harness';
 import type { Check } from './entry';
 export function registerQualityChecks(check: (name: string, run: Check['run']) => void): void {
@@ -54,11 +55,44 @@ check('verify_quality', () => {
   asserts++;
   if (!(TIER_LOW === 0 && TIER_MEDIUM === 1 && TIER_HIGH === 2)) probs.push('档位常量不是 0/1/2');
 
+  // 滑板尾迹预算：三档单调。这把"按设备分级"兑现在特效上——
+  // 低配不是没有尾迹，是尾迹稀（见 settings.ts 里那两个字段的注释）。
+  asserts++;
+  if (!(lo.trailParticles < mid.trailParticles && mid.trailParticles < hi.trailParticles)) {
+    probs.push(
+      `尾迹粒子预算没有随档位单调上升：${lo.trailParticles} / ${mid.trailParticles} / ${hi.trailParticles}`,
+    );
+  }
+  asserts++;
+  if (!(lo.trailEmitRate < mid.trailEmitRate && mid.trailEmitRate < hi.trailEmitRate)) {
+    probs.push(`尾迹发射率没有随档位单调上升：${lo.trailEmitRate} / ${mid.trailEmitRate} / ${hi.trailEmitRate}`);
+  }
+
+  // 池子必须装得下"满速跑完一条命"的发射量。装不下不崩溃，
+  // 是 spawn 里静默丢粒子——症状只是尾迹比预算短，看画面永远看不出来。
+  // 另外三档都不许超过数组硬上限，那是内存分配的担保。
+  asserts++;
+  for (const [name, p] of [['低', lo], ['中', mid], ['高', hi]] as const) {
+    if (p.trailParticles > TRAIL_MAX_PARTICLES) {
+      probs.push(`${name}档尾迹预算 ${p.trailParticles} 超过数组硬上限 ${TRAIL_MAX_PARTICLES}`);
+    }
+    if (p.trailParticles < p.trailEmitRate * TRAIL_LIFE_MAX) {
+      probs.push(
+        `${name}档尾迹池子装不下一条命：${p.trailParticles} < ${p.trailEmitRate}×${TRAIL_LIFE_MAX}`,
+      );
+    }
+    if (p.trailParticles <= 0) probs.push(`${name}档把尾迹整个关掉了——分级是分级，不是删除`);
+  }
+
   // 分档表必须正好三档，UI 的按钮是按这个数量摆的
   asserts++;
   if (Object.keys(PRESETS).length !== 3) probs.push(`画质预设 ${Object.keys(PRESETS).length} 档，应为 3`);
 
-  return expect(probs.length === 0, probs.length ? probs.join('；') : `低 ${lo.renderScale}× / 高 ${hi.renderScale}×`, asserts);
+  return expect(
+    probs.length === 0,
+    probs.length ? probs.join('；') : `低 ${lo.renderScale}× / 高 ${hi.renderScale}×，尾迹 ${lo.trailParticles}→${hi.trailParticles}`,
+    asserts,
+  );
 });
 
 }

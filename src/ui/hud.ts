@@ -237,6 +237,13 @@ export class Hud {
   private beatRing: HTMLDivElement;
   private beatKey: HTMLDivElement;
   private beatDots: HTMLSpanElement[] = [];
+  /**
+   * 碎片栏的组头（「碎片」两个字）。
+   *
+   * 它和 `offRoadEl` / `beatKey` 一样是构造时写死的静态文案——
+   * 不留在字段里的话，`sync()` 翻不到它，切完语言顶栏下面是旧语言。
+   */
+  private fragsTitleEl: HTMLSpanElement;
   /** 路边躲避挑战的进度条。`setDodge()` 逐帧只改一个自定义属性。 */
   private dodgeEl: HTMLDivElement;
   private dodgeFill: HTMLSpanElement;
@@ -337,7 +344,8 @@ export class Hud {
     // ---------------- 碎片栏 ----------------
     const fb = el('div', 'g-frags');
     const fh = el('div', 'g-frags-h');
-    fh.appendChild(el('span', 'g-frags-title', t('glossary_fragment')));
+    this.fragsTitleEl = el('span', 'g-frags-title', t('glossary_fragment'));
+    fh.appendChild(this.fragsTitleEl);
     this.fragCountEl = el('span', 'g-frags-n');
     fh.appendChild(this.fragCountEl);
     fb.appendChild(fh);
@@ -754,6 +762,12 @@ parent.appendChild(this.root);
 
   /** 从 game 重新读一遍所有显示。读档、买东西、打完卡、切语言之后调。 */
   sync(): void {
+    // 构造时写死的三处静态文案：离路提示、碎片栏组头、节拍键帽。
+    // 不在这里重贴的话，切完语言它们是旧语言——而「碎片」两个字
+    // 在顶栏下面挂一整趟，是最容易被看出"只翻了一半"的一处。
+    setText(this.offRoadEl, t('hud_road_no'));
+    setText(this.fragsTitleEl, t('glossary_fragment'));
+    setText(this.beatKey, t('key_relic'));
     this.syncTop(nextFragmentTarget(this.world, this.game));
     setText(this.fragCountEl, t('fragments', { 0: this.game.getCollectedCount() }));
     for (let s = 0; s < this.cells.length; s++) {
@@ -768,9 +782,11 @@ parent.appendChild(this.root);
         setFlag(c.pips[k], 'is-on', k < cnt);
       }
     }
-    // 这里**不**去 `minimap.sync()`：小地图自己按状态签名比对
-    // （见 minimap.ts 的 signature()），而 `syncFromState()` 是每公里
-    // 调一次的——在这儿强制重画，等于每 40 秒白画一次 961 段路径。
+    // 小地图只重贴**无障碍名**（`aria-label`），不重画静态层：
+    // `minimap.sync()` 只写一个属性，而 `syncFromState()` 是每公里
+    // 调一次的——在这儿强制重画那 961 段路径才是浪费（见 minimap.ts
+    // 的 signature()：它自己按状态签名决定什么时候重画）。
+    this.minimap.sync();
   }
 
   setTouchMode(on: boolean): void {

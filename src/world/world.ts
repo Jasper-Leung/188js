@@ -28,6 +28,7 @@ import {
 import { BambooBeats, type BeatEvent } from '../game/beat';
 import { Sky } from './sky';
 import { Ride, roadSpawnPose, roadHeadingAtArc, type RideInput, MOMENT } from './ride';
+import { SkateTrail } from './skateTrail';
 import { loadModel, modelUrl } from './assets';
 import { collectClips } from './vehicle';
 import { CENTERLINE, TOTAL_ARCLENGTH, STATIONS, pointAtArcLength, nearestArcParam } from '../data/route';
@@ -102,6 +103,8 @@ export class World {
   readonly sky: Sky;
   readonly rural: Rural;
   readonly ride: Ride;
+  /** 滑板尾迹。预算跟着画质档走（`QualityPreset.trailParticles`），见 skateTrail.ts */
+  readonly skateTrail = new SkateTrail();
   readonly camera: PerspectiveCamera;
 
   /**
@@ -316,6 +319,16 @@ export class World {
 
     this.ride = new Ride(this.terrain, this.road, this.stations, camera);
     this.scene.add(this.ride.root);
+
+    // 滑板尾迹。预算从档位表来，切画质时由 `applyPreset()` 转发。
+    // `points` 直接挂场景：粒子坐标就是世界坐标，没有父变换要反算。
+    this.skateTrail.setPreset(preset);
+    this.scene.add(this.skateTrail.points);
+    // 点尺寸是按**像素**算的，而缓冲区高度会随窗口/竖屏/自适应分辨率变。
+    // 这里先按当前高度初始化一次，之后的变化由 resize 回调接走。
+    this.skateTrail.setViewport(this.renderer.size.bufferH);
+    this.renderer.onResize(() => this.skateTrail.setViewport(this.renderer.size.bufferH));
+    step('尾迹');
     console.log(`[gift188] 建世界合计 ${(performance.now() - t0).toFixed(0)}ms`);
 
     // 出发点：0 号驿站旁的路面
@@ -404,6 +417,11 @@ export class World {
   // ---------------------------------------------------------------- 每帧
   render(dt: number, driveCamera = true) {
     this.ride.render(dt, driveCamera);
+    // 尾迹必须排在 `ride.render()` 之后：那一步才把这一帧的位置与朝向
+    // 积分完，而尾迹要的是**这一帧**的板尾。排在前面会拿到上一帧的位子，
+    // 而滑板极速 17m/s 下一个 16ms 的帧就是 27cm——尾巴会与板子脱节，
+    // 症状是"火星从板子旁边一个身位的地方冒出来"。
+    this.skateTrail.update(dt, this.ride.vehicleKind, this.ride);
     this.sky.attachTo(this.ride.camera);
     this.fogColor.copy(this.sky.state.fogColor);
     this.rural.update(this.sky.night, this.ride.pos.x, this.ride.pos.z);
@@ -1152,6 +1170,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
     this.stations.setPreset(preset);
     this.rural.setPreset(preset);
     this.water.setDetail(preset.waterDetail);
+    this.skateTrail.setPreset(preset);
   }
 
   /** 把玩家放到某座驿站旁（调试/演示用） */
@@ -1349,6 +1368,7 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
   }
 
   dispose() {
+    this.skateTrail.dispose();
     this.water.dispose();
     this.veg.dispose();
     this.renderer.dispose();

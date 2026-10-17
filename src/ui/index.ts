@@ -444,6 +444,11 @@ readonly touch: {
       // 湖边读数也要跟着换语言：它不在 `syncFromState()` 的管辖范围内
       // （`lakeside` 不在 `isInWorld()` 里），所以这里单独点一次。
       this.lakeside.setLang();
+      // toast 的清空也**只该在这里**：`clear()` 的注释写着"切语言、重开、
+      // 读档之后"，而 `syncFromState()` 是每公里跑一次的——把 clear() 放进
+      // 去的话，每过一公里玩家就没提示看了。toast 的寿命只有 1.8 秒，
+      // 切语言时清掉它们是可接受的代价（总比留着一句旧语言的强）。
+      this.toast.clear();
       this.syncFromState();
     });
     this.syncFromState();
@@ -920,7 +925,10 @@ readonly touch: {
    *     文本写入，代价约等于零；
    *   · 面板类的一律**先看它是不是开着**。引导页的 `sync()` 会
    *     `replaceWith()` 重建整份操作说明，小地图的静态层要重画 961 段
-   *     路径——为一块 `display:none` 的东西做这些，纯粹是浪费。
+   *     路径——为一块 `display:none` 的东西做这些，纯粹是浪费；
+   *   · 自己管显隐的浮动层（故事卡 / 结算卡）看**自己的状态**：
+   *     屏上有几张卡、结算卡还有没有寿命。它们的 `sync()` 内部也带缓存，
+   *     但门还是要有的——没卡的时候那是几十次白跑的 `querySelector`。
    */
   /**
    * 对白自动推进（演示模式用）。0 = 靠玩家按键。
@@ -948,6 +956,11 @@ readonly touch: {
     if (isShown(this.endCard.root)) this.endCard.sync();
     if (isShown(this.title.root)) this.title.sync();
     if (isShown(this.onboarding.root)) this.onboarding.sync();
+    // 故事卡与结算卡不是"开着才同步"的那一族：它们是**自己管显隐**的
+    // 浮动层（自动推进、到点自己收）。所以门用的是它们自己的状态——
+    // 屏上有卡才重贴外壳，见各自 `sync()` 的注释。
+    if (this.storyCards.count > 0) this.storyCards.sync();
+    if (isShown(this.resultCard.root)) this.resultCard.sync();
     this.dialogue.sync();
     this.itemBar.sync();
   }

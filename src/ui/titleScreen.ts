@@ -102,6 +102,28 @@ export class TitleScreen {
   private demoNote!: HTMLDivElement;
 
   /**
+   * 构造时写死、切语言时要重贴的静态文案。
+   *
+   * ## 为什么必须逐个留元素
+   *
+   * 这一整批原来全是 `el(..., t('...'))` 建完就不管了，而 `sync()` 只翻
+   * 画质那一组。症状是**在标题页按「语言」**——那颗按钮就在工具行里，
+   * 按下去之后标题、副标题、主张、开始按钮全是旧语言，只有画质三档
+   * 变了。玩家看到的是"这个游戏只翻了一半"。
+   *
+   * 新增一个要贴字的控件，就必须同时登记到这里和 `sync()`——
+   * 暂停面板的无障碍块记着同一个教训（见那边 `a11yTitle` 的注释）。
+   */
+  private titleH1!: HTMLHeadingElement;
+  private subtitleEl!: HTMLDivElement;
+  private guideEl!: HTMLDivElement;
+  private startBtn!: HTMLButtonElement;
+  private langBtn!: HTMLButtonElement;
+  private controlsBtn!: HTMLButtonElement;
+  private helpTitle!: HTMLDivElement;
+  private helpClose!: HTMLDivElement;
+
+  /**
    * 画质组默认**折叠**。
    *
    * 折叠之前，那一屏从上到下是：标题 → 副标题 → 一句主张 → 两颗按钮 →
@@ -128,16 +150,20 @@ export class TitleScreen {
     // ---- 抬头 ----
     const head = el('div', 'g-title-head');
     head.appendChild(el('div', 'g-title-mark', '188'));
-    head.appendChild(el('h1', 'g-title-h1', t('game_title')));
-    head.appendChild(el('div', 'g-title-sub', t('subtitle')));
-    head.appendChild(el('div', 'g-title-guide', t('guide')));
+    this.titleH1 = el('h1', 'g-title-h1', t('game_title'));
+    head.appendChild(this.titleH1);
+    this.subtitleEl = el('div', 'g-title-sub', t('subtitle'));
+    head.appendChild(this.subtitleEl);
+    this.guideEl = el('div', 'g-title-guide', t('guide'));
+    head.appendChild(this.guideEl);
     card.appendChild(head);
 
     // ---- 主按钮 ----
     // 顺序是刻意的：先「开启旅程」，再「演示」。演示是给评审看的，
     // 放在第二颗——它不该和主行动同一个视觉权重。
     const acts = el('div', 'g-acts');
-    acts.appendChild(button(t('start'), { cls: 'g-btn-major', onClick: () => this.hooks.onStart() }));
+    this.startBtn = button(t('start'), { cls: 'g-btn-major', onClick: () => this.hooks.onStart() });
+    acts.appendChild(this.startBtn);
     this.demoBtn = button(t('demo_loading'), {
       cls: 'g-btn-major',
       onClick: () => this.hooks.onStartDemo(),
@@ -165,10 +191,13 @@ export class TitleScreen {
 
     // ---- 工具行 ----
     const tools = el('div', 'g-tools');
-    tools.appendChild(button(t('language'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onLangToggle() }));
-    tools.appendChild(
-      button(t('controls_title'), { cls: 'g-btn-quiet', onClick: () => this.setHelpOpen(true) }),
-    );
+    this.langBtn = button(t('language'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onLangToggle() });
+    tools.appendChild(this.langBtn);
+    this.controlsBtn = button(t('controls_title'), {
+      cls: 'g-btn-quiet',
+      onClick: () => this.setHelpOpen(true),
+    });
+    tools.appendChild(this.controlsBtn);
     card.appendChild(tools);
 
     card.appendChild(rule());
@@ -333,12 +362,14 @@ export class TitleScreen {
   private buildHelp(): HTMLDivElement {
     const box = el('div', 'g-help g-hidden');
     const card = el('div', 'g-card g-card-help');
-    card.appendChild(el('div', 'g-group-h', t('controls_title')));
+    this.helpTitle = el('div', 'g-group-h', t('controls_title'));
+    card.appendChild(this.helpTitle);
     // help_overlay 是一整段带 \n 的速查表。保留换行，不拆成列表——
     // 拆成列表要多写一份 key，而这一条文案本来就按速查表的形状排过版。
     this.helpBody = el('pre', 'g-help-body', t('help_overlay'));
     card.appendChild(this.helpBody);
-    card.appendChild(note(t('help_close'), 'g-note-dim'));
+    this.helpClose = note(t('help_close'), 'g-note-dim');
+    card.appendChild(this.helpClose);
     box.appendChild(card);
     box.addEventListener('click', () => this.setHelpOpen(false));
     this.helpBox = box;
@@ -373,6 +404,16 @@ export class TitleScreen {
 
   /** 切语言 / 宿主改档之后。 */
   sync(): void {
+    // 抬头与主按钮：构造时写死的那一批，见字段定义处的注释。
+    // `setText` 自带"没变就不写"的缓存，所以每次 sync 全量重贴是零成本的。
+    setText(this.titleH1, t('game_title'));
+    setText(this.subtitleEl, t('subtitle'));
+    setText(this.guideEl, t('guide'));
+    setText(this.startBtn, t('start'));
+    setText(this.langBtn, t('language'));
+    setText(this.controlsBtn, t('controls_title'));
+    setText(this.helpTitle, t('controls_title'));
+    setText(this.helpClose, t('help_close'));
     for (let i = 0; i < this.tierBtns.length; i++) {
       setText(this.tierBtns[i], t(TIER_KEYS[i]));
       setFlag(this.tierBtns[i], 'is-on', (i as Tier) === this.picked);

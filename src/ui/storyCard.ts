@@ -404,6 +404,26 @@ export class StoryCards {
     return this.cards.length;
   }
 
+  /**
+   * 切语言：把屏上这些卡的**外壳**重贴一遍。
+   *
+   * 正文不重贴：调用方传进来的是已经翻好的文本（`t(key)` 的结果，
+   * 源 key 在这一层早就丢了），而一张卡的寿命只有 2.4~22 秒，
+   * 它自己会走完。真正会"半英半中"的是那几颗 chrome——
+   * 「下一张 / 跳到最后一句 / 点一下跳过」，它们在这里生成，
+   * 所以在这里重贴。`setText` 带缓存，屏上没有卡时这是三次空循环。
+   */
+  sync(): void {
+    for (const c of this.cards) {
+      const next = c.root.querySelector('.g-card-next');
+      if (next) setText(next, t('storycard_next'));
+      const skip = c.root.querySelector('.g-card-skip');
+      if (skip) setText(skip, t('storycard_skip'));
+      const hint = c.root.querySelector('.g-card-hint');
+      if (hint) setText(hint, t('storycard_dismiss_hint'));
+    }
+  }
+
   /** 队列里还没演的条数。回归用。 */
   get pending(): number {
     return this.queue.length;
@@ -431,6 +451,16 @@ export class ResultCard {
   /** 输了之后的那句安慰 / 超时说明。只有 lose 才有 */
   private note: HTMLDivElement;
   private onDone: (() => void) | null = null;
+  /**
+   * 上一次 `show()` 的参数。切语言时按它重贴文字——
+   * 不留的话 `sync()` 无从知道该写什么，而这一屏的字
+   * 全部是在 `show()` 里一次性写进去的。
+   */
+  private last: {
+    outcome: SettleOutcome;
+    slot: number;
+    o: { gain?: number; timedOut?: boolean };
+  } | null = null;
 
   constructor(parent: HTMLElement) {
     this.root = el('div', 'g-result g-hidden');
@@ -471,6 +501,21 @@ export class ResultCard {
     onDone?: () => void,
     o: { gain?: number; timedOut?: boolean } = {},
   ): void {
+    this.last = { outcome, slot, o };
+    this.paint(outcome, slot, o);
+    setShown(this.root, true);
+    this.life = ms / 1000;
+    this.onDone = onDone ?? null;
+  }
+
+  /**
+   * 只写文字，不碰寿命与显隐——`show()` 和 `sync()` 共用这一份。
+   *
+   * 拆开的理由是切语言：`sync()` 要能重贴，而它**不能**顺手把
+   * `this.life` 续上（那会让玩家切一次语言就多看好几秒），
+   * 也不能把已经落幕的卡重新 `setShown(true)`。
+   */
+  private paint(outcome: SettleOutcome, slot: number, o: { gain?: number; timedOut?: boolean }): void {
     setText(this.big, t(settleTextKey(outcome)));
     // 副标题：赢了给乐事名，输了给「这一件：X」——
     // 输的时候玩家同样需要知道自己刚才是哪一件没做成，
@@ -489,9 +534,11 @@ export class ResultCard {
     setShown(this.note, note !== '');
 
     this.root.classList.toggle('is-win', outcome === 'win');
-    setShown(this.root, true);
-    this.life = ms / 1000;
-    this.onDone = onDone ?? null;
+  }
+
+  /** 切语言。只在还活着的时候重贴，别把已经落幕的卡又写一遍。 */
+  sync(): void {
+    if (this.last && this.life > 0) this.paint(this.last.outcome, this.last.slot, this.last.o);
   }
 
   update(dt: number): void {

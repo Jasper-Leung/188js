@@ -10,36 +10,87 @@
  * 格式化用 `printf` 风格（%d / %s），和源项目一致，替换规则也一致：
  * 命名参数优先，位置参数兜底。
  *
- * ## 默认语言是英语（`DEFAULT_LANG`）
+ * ## 首次访问按系统语言，之后记住玩家的选择
  *
- * 原来是"按 `navigator.language` 猜一次"。看着更贴心，实际有害：
- * 中文机器上默认中文，于是**任何一处漏翻的中文都不会被发现**——
- * 开发的人看自己那一份，永远是对的；玩家拿到英文版才发现。
- * 而漏翻恰恰是这类项目最容易出的错（界面上的一句硬编码、
- * 数据里的一个 `def.name`、启动屏骨架里的一行静态字）。
+ * 历史上这里改过三次，每次的理由都值得留着：
  *
- * 改成固定英语之后，本地化成了**默认会被看见的那一种**：
- * 每一句没翻的地方都会当场露出来，而不是等到发版。
- * 中文玩家点一次标题页上的语言按钮就好，代价是一次点击。
+ * 1. **按 `navigator.language` 猜一次**（最初）。贴心，但有害：
+ *    中文机器上默认中文，于是**任何一处漏翻的中文都不会被发现**——
+ *    开发的人看自己那一份，永远是对的；玩家拿到英文版才发现。
+ * 2. **固定英语**（第二代）。本地化成了默认会被看见的那一种，
+ *    每一句没翻的地方都当场露出来。代价是中文玩家要点一次按钮。
+ * 3. **按系统语言 + 存档优先**（现在）。第二代挡漏翻的职责并没有丢，
+ *    它被上面两条判据接手了：`npm run verify` 的 `verify_i18n` 查
+ *    **中英键集严格一致** + **英文表里一个汉字都不许有**。漏翻在两种
+ *    默认语言下都会红，于是"按系统语言"不再有代价——而中文玩家
+ *    第一次进来自动就是中文，不用先点一次按钮。
+ *
+ * 优先级只有一条：**localStorage 里存过的选择 > 系统语言 > 'en'**。
+ * 存过的永远赢——玩家在标题页或暂停面板切过一次，那份选择就要一直算数，
+ * 哪怕他随后把系统语言改成了别的。
  */
 import { I18N, type Lang, type StationDef } from '../data/raw';
 
 export type { Lang };
 
 /**
- * 首次访问用的语言。
+ * 最后兜底的语言：系统语言也读不到时（无头回归、隐私模式空串）用它。
  *
- * 刻意**不**读 `navigator.language`——理由见文件头。
- * 想要"按系统语言"的玩家，存一次选择即可（`setLang()` 会落盘）。
+ * 它是**回退**而不是默认——正常路径上首次访问走 `systemLang()`。
+ * 选 'en' 的两个理由：英文是源文案的基准侧（`I18N.zh` 缺键时回退的
+ * 也是它），而一个汉字都不认识的玩家比看不懂英文的玩家更少见。
  */
 export const DEFAULT_LANG: Lang = 'en';
 
 let current: Lang = DEFAULT_LANG;
 const listeners = new Set<(lang: Lang) => void>();
 
-const STORAGE_KEY = 'gift188.lang';
+/**
+ * 存档的键。导出是为了回归能直接读写它——
+ * 测试里用 `setLang()` 造假存档是靠不住的：`setLang` 在语言没变时
+ * 会早退，**根本不落盘**（无头回归里上一个检查可能正好留着同一个语言）。
+ */
+export const STORAGE_KEY = 'gift188.lang';
+
+/**
+ * 把一条 BCP-47 语言标签映射到支持的语言。
+ *
+ * 纯函数，不碰任何全局——回归里直接拿各种标签喂它（见 `verify_i18n`）。
+ * 规则只有一条：`zh` 开头（`zh` / `zh-CN` / `zh-Hans` / `zh-Hant`）→ 中文，
+ * 其余一律英文。**不做更细的映射**：全部文案只有两份，
+ * 而 `zh-Hant` 与 `zh-Hans` 共用一份中文表（要繁简转换是另一个项目）。
+ *
+ * 大小写不敏感（`ZH-cn` 也是中文），前后空白要容忍——某些安卓 WebView
+ * 报上来的 `navigator.language` 是带空格的。
+ */
+export function langOf(tag: string): Lang {
+  return /^zh/i.test(tag.trim()) ? 'zh' : 'en';
+}
+
+/**
+ * 系统语言。读 `navigator.languages[0] || navigator.language`。
+ *
+ * 两条防御：Node（无头回归）里没有 `navigator`，某些隐私模式下
+ * `navigator.language` 是空串——两种都回退到 `DEFAULT_LANG`。
+ *
+ * 探测走 `globalThis` 间接取，**不能写裸 `navigator`**：esbuild 打包时
+ * 看见 bundle 里没有这个全局标识符，会把 `typeof navigator !== 'undefined'`
+ * 折叠成常量，而折叠方向猜不得（`verify/entry.ts` 的 `document` 桩
+ * 同一个理由，那边记着一次"桩被跳过然后抛 document is not defined"）。
+ */
+export function systemLang(): Lang {
+  try {
+    const nav = (globalThis as { navigator?: { languages?: readonly string[]; language?: string } }).navigator;
+    const tag = (nav && nav.languages && nav.languages[0]) || (nav && nav.language) || '';
+    if (!tag) return DEFAULT_LANG;
+    return langOf(tag);
+  } catch {
+    return DEFAULT_LANG;
+  }
+}
 
 export function initLang(): Lang {
+  // 1. 玩家自己选过——最高优先。`setLang()` 会落盘，所以这里读得到。
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === 'zh' || saved === 'en') {
@@ -47,9 +98,11 @@ export function initLang(): Lang {
       return current;
     }
   } catch {
-    /* 忽略 */
+    /* 忽略：无头环境或隐私模式下没有 localStorage，走下面两条 */
   }
-  current = DEFAULT_LANG;
+  // 2. 系统语言：中文机器进来自动中文，不用先点一次按钮。
+  //    读不到时 `systemLang()` 自己回退到 `DEFAULT_LANG`。
+  current = systemLang();
   return current;
 }
 

@@ -1,4 +1,6 @@
 import { registerQualityChecks } from './quality';
+import { registerSkateTrailChecks } from './skateTrail';
+import { registerAudioChecks } from './audio';
 import { registerExperienceChecks } from './experience';
 /**
  * 回归自检 —— 移植后这些数必须仍然成立。
@@ -63,7 +65,7 @@ import { registerInteractionChecks } from './interaction';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS } from '../core/settings';
-import { DEFAULT_LANG, getLang, isEnglish, setLang, t, stationNameOf } from '../i18n';
+import { DEFAULT_LANG, getLang, initLang, isEnglish, langOf, setLang, STORAGE_KEY, systemLang, t, stationNameOf } from '../i18n';
 import { spaceKeyOwnedHere, setSpaceKeyOwner } from '../ui/hud';
 import { EndCard } from '../ui/endCard';
 import type { UIHooks } from '../ui';
@@ -877,14 +879,141 @@ check('verify_i18n', () => {
   const cjkInEn = en.filter((k) => CJK.test(I18N.en[k]));
   if (cjkInEn.length) probs.push(`en 侧含中文：${cjkInEn.slice(0, 5).join(', ')}`);
 
-  // 默认语言必须是英语。
+  // 首次访问的语言契约：**存档 > 系统语言 > 'en'**。
   //
-  // 这不是"偏好"，是**可见性**：默认中文时，任何一处漏翻的中文
-  // 在开发者自己机器上都不会露出来（他看的是自己那一份），
-  // 于是漏翻能活到发版。默认英语之后，它在本地就现形。
+  // 这条替代了原来的"默认语言必须是英语"。那条断言服务的目的
+  // （漏翻的中文要在开发机上露出来）现在由上面两条判据接手：
+  // 中英键集严格一致 + 英文表里一个汉字都不许有——漏翻在两种
+  // 默认语言下都会红，于是"按系统语言"不再有代价。
+  //
+  // 会红的方式：`initLang()` 改回固定英语（中文机器上不再自动中文），
+  // 或者把系统探测挪到存档之前（玩家选过英文，重开又变中文）。
+  //
+  // `setLang` 在这里被真的调用（会写盘、会通知监听器）。本检查注册在
+  // 所有构造 UI 的检查之前（833 行 vs 6201/9166 行），而唯一会挂
+  // `onLangChange` 的 `HudVisibility` 也在自己的检查里 dispose 掉了，
+  // 所以没有监听器会在这里被吵醒；收尾照样 `setLang('en')` 复原。
+  {
+    const g2 = globalThis as {
+      navigator?: { languages?: readonly string[]; language?: string };
+      localStorage?: Storage;
+    };
+    // Node 22+ 自带 `navigator`，而且它是**只有 getter 的访问器属性**，
+    // 直接赋值会静默失败（严格模式下抛 TypeError）。所以一律走
+    // `defineProperty`，并把原描述符留好，finally 里还原。
+    // 它的值还随机器变（这台开发机是 zh-SG）——所以必须显式打桩，
+    // 否则这条判据在中文开发机上绿、在英文 CI 上红。
+    const navDesc = Object.getOwnPropertyDescriptor(g2, 'navigator');
+    const setNav = (v: { languages?: readonly string[]; language?: string } | undefined) => {
+      Object.defineProperty(g2, 'navigator', {
+        get: () => v,
+        configurable: true,
+      });
+    };
+    const hadStorage2 = g2.localStorage !== undefined;
+    const mem2 = new Map<string, string>();
+    if (!hadStorage2) {
+      g2.localStorage = {
+        getItem: (k: string) => mem2.get(k) ?? null,
+        setItem: (k: string, v: string) => void mem2.set(k, v),
+        removeItem: (k: string) => void mem2.delete(k),
+        clear: () => mem2.clear(),
+        key: (i: number) => [...mem2.keys()][i] ?? null,
+        get length() {
+          return mem2.size;
+        },
+      } as Storage;
+    }
+    try {
+      // `langOf` 是纯函数，先把映射规则钉死：zh* → 中文，其余 → 英文。
+      asserts++;
+      if (langOf('zh') !== 'zh' || langOf('zh-CN') !== 'zh' || langOf('ZH-Hant') !== 'zh' || langOf(' zh ') !== 'zh') {
+        probs.push('langOf 不再把 zh 开头的标签映射成中文');
+      }
+      asserts++;
+      if (langOf('en') !== 'en' || langOf('en-US') !== 'en' || langOf('ja') !== 'en' || langOf('') !== 'en') {
+        probs.push('langOf 把非中文标签的映射弄丢了');
+      }
+
+      // 系统语言探测：两种语言 + 读不到时的回退。
+      setNav({ languages: ['zh-CN', 'en'], language: 'zh-CN' });
+      asserts++;
+      if (systemLang() !== 'zh') probs.push('navigator.languages[0] 是 zh-CN 时系统语言不是中文');
+      setNav({ languages: ['en-US'], language: 'en-US' });
+      asserts++;
+      if (systemLang() !== 'en') probs.push('navigator.language 是 en-US 时系统语言不是英文');
+      setNav(undefined);
+      asserts++;
+      if (systemLang() !== 'en') probs.push('没有 navigator 时系统语言没有回退到 en');
+
+      // `initLang()` 三级回退。存档那一级**直接写存储键**：
+      // 用 `setLang('zh')` 造假存档是靠不住的——语言没变时它会早退、
+      // 根本不落盘，而本检查的上一个（站名那条）正好把 `current` 留在 'zh'。
+      setNav({ languages: ['en-US'], language: 'en-US' });
+      g2.localStorage!.setItem(STORAGE_KEY, 'zh');
+      asserts++;
+      if (initLang() !== 'zh') {
+        probs.push('存过 zh 之后系统语言是 en 也该是 zh——存档不再优先于系统探测');
+      }
+      g2.localStorage!.removeItem(STORAGE_KEY);
+      setNav({ languages: ['zh-CN'], language: 'zh-CN' });
+      asserts++;
+      if (initLang() !== 'zh') probs.push('没有存档、系统是中文时没有自动加载中文');
+      g2.localStorage!.removeItem(STORAGE_KEY);
+      setNav(undefined);
+      asserts++;
+      if (initLang() !== 'en') probs.push('没有任何语言信号时没有回退到 en');
+    } finally {
+      if (navDesc) Object.defineProperty(g2, 'navigator', navDesc);
+      else delete (g2 as { navigator?: unknown }).navigator;
+      if (hadStorage2) g2.localStorage!.removeItem(STORAGE_KEY);
+      else delete (g2 as { localStorage?: Storage }).localStorage;
+      // 复原模块语言：下面还有 t() 的英文侧断言，别让它吃到中文。
+      setLang('en');
+    }
+  }
+
+  // 首屏镜像副本（index.html 里那段内联 JSON）必须和表严格一致。
+  //
+  // 它存在的理由是首绘：模块脚本要等整份 HTML 解析完才跑，而启动屏在
+  // 那之前就 paints 了——不先在 `<body>` 开头把字换掉，中文玩家会看到
+  // 一瞬英语占位再跳成中文。代价是这 5 个键在表外有了**第二份副本**，
+  // 而副本是会腐烂的，所以这里逐键比着表守。
+  //
+  // 会红的方式：改了 `i18n.json` 的 game_title / boot_sub 而没改
+  // index.html——症状是首屏一闪旧文案，测试里直接可判。
   asserts++;
-  if (DEFAULT_LANG !== 'en') {
-    probs.push(`默认语言是 ${DEFAULT_LANG}，漏翻的中文在开发机上不会露出来`);
+  {
+    let html = '';
+    try {
+      html = readFileSync('index.html', 'utf8');
+    } catch {
+      probs.push('读不到 index.html，首屏语言镜像无从校验');
+    }
+    const m = /\/\*BOOT-I18N-BEGIN\*\/([\s\S]*?)\/\*BOOT-I18N-END\*\//.exec(html);
+    if (!m) {
+      probs.push('index.html 里找不到 BOOT-I18N 标记——首屏语言探测被删了，中文玩家会先看到一瞬英语');
+    } else {
+      let mirror: Record<string, Record<string, string>> = {};
+      try {
+        // 标记里包着的是 `window.__bootI18n = {...};`——把赋值头尾去掉再 parse。
+        // 哪天那段改成了别的写法，parse 会带着原文抛出来，不会静默空转。
+        const body = m[1].trim().replace(/^window\.__bootI18n\s*=\s*/, '').replace(/;\s*$/, '');
+        mirror = JSON.parse(body);
+      } catch (e) {
+        probs.push(`首屏镜像 JSON 解析不了：${String((e as Error)?.message ?? e)}`);
+      }
+      for (const lang of ['zh', 'en'] as const) {
+        for (const key of ['game_title', 'boot_title_head', 'boot_title_mark', 'boot_title_tail', 'boot_sub']) {
+          asserts++;
+          if (mirror[lang]?.[key] !== I18N[lang][key]) {
+            probs.push(
+              `首屏镜像 ${lang}.${key} 是「${mirror[lang]?.[key]}」，表里是「${I18N[lang][key]}」——首屏会闪一下旧文案`,
+            );
+          }
+        }
+      }
+    }
   }
 
   // `t(key, 数组)` 这条路径：档位判定理由的参数是在 `decideTier()` 里
@@ -2681,6 +2810,11 @@ check('verify_mini_game', () => {
 
 // ---------------------------------------------------------------- 画质分档
 registerQualityChecks(check);
+
+// ---------------------------------------------------------------- 滑板尾迹
+// 挨着画质族注册：它的预算就在 `QualityPreset` 里，两族问的是同一张表
+// 的两面（quality 问"三档单调且不超上限"，这里问"引擎真的按表跑"）。
+registerSkateTrailChecks(check);
 
 // ---------------------------------------------------------------- 心神
 check('verify_mood', () => {
@@ -9164,6 +9298,15 @@ registerDeliveryChecks(check);
 registerSceneryChecks(check);
 registerExperienceChecks(check);
 registerInteractionChecks(check, () => ensureStubDom().parent());
+
+// ---------------------------------------------------------------- 音频（引擎）
+// 要的是 `window` 桩本身：`AudioSystem.unlock()` 从 `window.AudioContext`
+// 取构造器，而判据把自己的假 ctx 挂上去再摘掉。挨着 interaction 注册——
+// 两族都吃 DOM/window 桩，且音频族自己管挂摘，不依赖别族先跑。
+registerAudioChecks(check, () => {
+  ensureStubDom();
+  return (globalThis as { window?: { AudioContext?: unknown } }).window ?? null;
+});
 
 /**
  * 第一次玩的人撞得到、而回归套件一条都问不到的那一族：

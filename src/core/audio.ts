@@ -57,6 +57,48 @@ const QIN_FREE_NOTES = QIN_STRINGS * 3;
 /** 宫商角徵羽变宫 + 高八度的宫。见 `noteFree` 的说明。 */
 const QIN_SCALE = [0, 2, 4, 7, 9, 11, 12] as const;
 
+// ---------------------------------------------------------------- 引擎
+//
+// 摩托车引擎是**合成**的，一个采样文件都没有。三个理由，第三个是决定性的：
+//
+//   1. 资产。一条能用的引擎声要覆盖 怠速→断油 × 负荷三四个刻度，
+//      循环缝还得听不出来，那是十几份音频，而这个项目连 17MB 的模型都在压。
+//   2. 连续量。车速是连续的，而采样是离散的：两个循环之间一交叉就是
+//      "换挡"式的跳变，玩家听到的是"音乐在换曲子"不是"转速在变"。
+//   3. **只有合成能跟着 `rpm01` 连续走**。这条是这个特性存在的全部理由——
+//      其余一切（电音味、没有进气声）都是可以接受的代价。
+//
+// 节点链：`osc(锯齿, 基频) ┐`
+//          `osc(方波, ½基频) ┼→ 低通(油门+转速) → 引擎增益 → SFX 总线`
+//          `白噪声 → 带通 → 噪声增益 ┘`
+//
+// 方波压半档音量（`osc2Gain`）：它是为低频"肉感"服务的，盖过主音就噪了。
+// LFO 拧 detune 见 `buildEngine()`。
+
+/** 怠速基频（Hz）。低于它听不出"发动机"，高于它像割草机。 */
+export const ENGINE_HZ_MIN = 40;
+/** 断油基频（Hz）。 */
+export const ENGINE_HZ_MAX = 190;
+/** 骑手站着不动时引擎也该有的怠速（rpm 比例），不是 0——熄了火就不是摩托车。 */
+export const ENGINE_IDLE_RPM = 0.12;
+/** 频率平滑时间常数（秒）。0.06 足够跟上加速度，又听不出阶跃的"咔"。 */
+const ENGINE_FREQ_TAU = 0.06;
+/** 熄火淡出时长（秒）。用 `stop(when)` 排进 WebAudio 时间轴，不挂 JS 定时器。 */
+export const ENGINE_TEARDOWN_S = 0.5;
+
+interface EngineNodes {
+  osc1: OscillatorNode;
+  osc2: OscillatorNode;
+  lfo: OscillatorNode;
+  lfoGain: GainNode;
+  osc2Gain: GainNode;
+  noise: AudioBufferSourceNode;
+  band: BiquadFilterNode;
+  noiseGain: GainNode;
+  lp: BiquadFilterNode;
+  gain: GainNode;
+}
+
 interface Layer {
   buf: AudioBuffer;
   gain: GainNode;
@@ -98,6 +140,11 @@ export class AudioSystem {
   private bgmFilter: BiquadFilterNode | null = null;
   private bgmTone: BiquadFilterNode | null = null;
   private bgmIn: GainNode | null = null;
+
+  // ---- 引擎（摩托车）。整条链惰性建，见 buildEngine() ----
+  private engine: EngineNodes | null = null;
+  /** 白噪声 buffer 缓存：切一次载具不该重新随机一遍 2 秒噪声 */
+  private noiseBuf: AudioBuffer | null = null;
 
   private prefetched = false;
 
@@ -325,6 +372,161 @@ export class AudioSystem {
     this.ramp(layer, volume);
   }
 
+  // ---------------------------------------------------------------- 引擎
+  /**
+   * 摩托车引擎。**每帧调，参数全是 0..1 的比例量。**
+   *
+   * @param active false = 熄火（淡出后收节点）；true = 点火/继续烧
+   * @param rpm01  转速比例。0 = 怠速、1 = 断油。指数映射到 40~190Hz
+   * @param load01 油门/负荷。掀低通、抬带通、加一点音量——"拧下去声音变亮"
+   *
+   * ## 为什么没有离合器与挡位
+   *
+   * 车速推到转速只有一条路：`rpm = idle + (1-idle)·speed01`。真实机器上
+   * 每个挡位是一条斜线，而合成器里做挡位要解决"什么时候该升挡"——
+   * 那需要一整个驾驶模型，只为一段背景音。单条映射在耳朵里的损失是
+   * "转速只跟车速走"，而玩家本来就只操作车速。
+   *
+   * ## 为什么熄火走 `stop(when)` 而不是 `setTimeout`
+   *
+   * 排进 WebAudio 自己的时间轴：停止时刻与淡出结束**采样级对齐**，
+   * 不依赖 JS 定时器的漂移，也不在无头回归里变成一条等 520ms 的测试。
+   */
+  setEngine(active: boolean, rpm01: number, load01: number) {
+    if (!this.ready) return;
+    const rpm = Math.min(Math.max(rpm01, 0), 1);
+    const load = Math.min(Math.max(load01, 0), 1);
+    if (!active) {
+      this.teardownEngine();
+      return;
+    }
+    const e = this.engine ?? this.buildEngine();
+    if (!e || !this.ctx) return;
+    const t = this.ctx.currentTime;
+
+    // 转速 → 基频，**指数**映射。线性的话低转区间糊成一片
+    // （40→80Hz 听不出差别），而高转的每一赫兹都比低转值钱——
+    // 耳朵对频率本来就是对数的，映射照此。
+    const hz = ENGINE_HZ_MIN * Math.pow(ENGINE_HZ_MAX / ENGINE_HZ_MIN, rpm);
+    e.osc1.frequency.setTargetAtTime(hz, t, ENGINE_FREQ_TAU);
+    e.osc2.frequency.setTargetAtTime(hz * 0.5, t, ENGINE_FREQ_TAU);
+
+    // 油门 → 亮度。负荷重 = 混合气浓 = 谐音多，低通随之一起张开。
+    e.lp.frequency.setTargetAtTime(420 + rpm * 900 + load * 1500, t, 0.09);
+    // 路噪的带通也随油门抬：拧下去，轮胎与风的那条频带往上走。
+    e.band.frequency.setTargetAtTime(620 + load * 900, t, 0.12);
+
+    // 音量：怠速轻、断油最响。但断音量封了顶——一直嗷嗷叫的背景音
+    // 是这条音效被玩家关掉的最短路径。
+    e.gain.gain.setTargetAtTime(0.15 + rpm * 0.17 + load * 0.05, t, 0.12);
+    // 噪声只在转起来之后才有：怠速时它是"嗡"里混的一声"沙"，反而脏。
+    e.noiseGain.gain.setTargetAtTime(0.04 + rpm * 0.09, t, 0.15);
+  }
+
+  /** 建整条引擎链。返回 null = 上下文没了（不该发生，但别为它炸掉一帧）。 */
+  private buildEngine(): EngineNodes | null {
+    if (!this.ctx || !this.buses) return null;
+    const ctx = this.ctx;
+
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    // 直连 SFX 总线：音量滑块与静音因此自动罩住引擎，不用另接一套。
+    gain.connect(this.buses.sfx);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 900;
+    lp.Q.value = 0.9;
+    lp.connect(gain);
+
+    const osc1 = ctx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc1.frequency.value = ENGINE_HZ_MIN;
+    osc1.connect(lp);
+
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'square';
+    osc2.frequency.value = ENGINE_HZ_MIN / 2;
+    const osc2Gain = ctx.createGain();
+    osc2Gain.gain.value = 0.42;
+    osc2.connect(osc2Gain);
+    osc2Gain.connect(lp);
+
+    // 怠速抖动：7.3Hz 的 LFO 拧两个振荡器的 detune（±9 音分）。
+    // 没有它，两个纯振荡器叠出来的是一个**测试音**——稳定得不像任何机械，
+    // 而发动机从来不是稳定的。频率取 7.3 而不是整数：与 60fps 的帧率
+    // 及其谐波错开，免得在某些机器上听出周期性的"嘀嗒"。
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 7.3;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 9;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc1.detune);
+    lfoGain.connect(osc2.detune);
+
+    // 路噪：2 秒白噪声循环，带通挖出轮胎与风的那条频带。
+    const noise = ctx.createBufferSource();
+    noise.buffer = this.getNoiseBuffer();
+    noise.loop = true;
+    const band = ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.value = 900;
+    band.Q.value = 0.6;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.value = 0;
+    noise.connect(band);
+    band.connect(noiseGain);
+    noiseGain.connect(gain);
+
+    osc1.start();
+    osc2.start();
+    lfo.start();
+    noise.start();
+
+    const e: EngineNodes = { osc1, osc2, lfo, lfoGain, osc2Gain, noise, band, noiseGain, lp, gain };
+    this.engine = e;
+    return e;
+  }
+
+  /** 2 秒白噪声，缓存一份。全幅值会被带通与增益治服，不再额外衰减。 */
+  private getNoiseBuffer(): AudioBuffer | null {
+    if (!this.ctx) return null;
+    if (this.noiseBuf) return this.noiseBuf;
+    const ctx = this.ctx;
+    const len = Math.max(1, Math.floor(ctx.sampleRate * 2));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.noiseBuf = buf;
+    return buf;
+  }
+
+  /** 熄火：淡出 + 排一个采样级对齐的停止。整条链从 `this.engine` 摘掉。 */
+  private teardownEngine() {
+    const e = this.engine;
+    if (!e || !this.ctx) return;
+    this.engine = null;
+    const t = this.ctx.currentTime;
+    e.gain.gain.setTargetAtTime(0, t, 0.16);
+    const stopAt = t + ENGINE_TEARDOWN_S;
+    // 淡出（tau 0.16s）到 95% 约需 0.48s，停止排在 0.5s：先轻下去再断，
+    // 直接 `stop()` 会留下一下"咔"，而切载具与暂停都会走到这里。
+    try {
+      e.osc1.stop(stopAt);
+      e.osc2.stop(stopAt);
+      e.lfo.stop(stopAt);
+      e.noise.stop(stopAt);
+    } catch {
+      /* 已经停了 */
+    }
+  }
+
+  /** 引擎是否在烧（回归与调试读它）。 */
+  get engineOn() {
+    return this.engine !== null;
+  }
+
   // ---------------------------------------------------------------- 音效
   sfx(name: string, volume = 0.9) {
     this.sfxRate(name, volume, 1);
@@ -494,6 +696,7 @@ export class AudioSystem {
   }
 
   stopAll() {
+    this.teardownEngine();
     for (const key of [...this.layers.keys()]) this.fadeOut(key);
   }
 

@@ -117,6 +117,23 @@ export class EndCard {
   private endKeep: HTMLButtonElement;
   private endBreak: HTMLButtonElement;
   private closeBtn: HTMLButtonElement;
+  /** 「复制分享文本」与「重新开始」——工具行里那两颗，原来没留元素。 */
+  private shareBtn!: HTMLButtonElement;
+  private restartBtn!: HTMLButtonElement;
+  /**
+   * 构造时写死、`sync()` 要重贴的静态文案。
+   *
+   * 这一批原来全部是"建一次就不管"，而结算页是**可以在面板里被
+   * 停留最久的一屏**（明信片要一张张看）。玩家在这里不会去按语言按钮，
+   * 但从暂停面板切过语言再进结算页时，`show()` 里的 `sync()` 会用
+   * 当前语言重建——留这些字段是为了让 `sync()` 有能力重贴它们，
+   * 而不是只贴那一半"恰好已经有字段"的。
+   */
+  private editorHead!: HTMLDivElement;
+  private joysHead!: HTMLDivElement;
+  private endingHead!: HTMLDivElement;
+  private endingHint!: HTMLDivElement;
+  private disclaimerEl!: HTMLDivElement;
   /** Esc 监听是否已挂上。见 `bindEsc()`。 */
   private escBound = false;
 
@@ -161,7 +178,8 @@ export class EndCard {
 
     // ================= 背面编辑器 =================
     this.editor = el('div', 'g-editor');
-    this.editor.appendChild(el('div', 'g-group-h', t('back_editor_title')));
+    this.editorHead = el('div', 'g-group-h', t('back_editor_title'));
+    this.editor.appendChild(this.editorHead);
     this.ta = el('textarea', 'g-ta');
     this.ta.rows = 5;
     this.ta.placeholder = t('back_placeholder');
@@ -220,10 +238,10 @@ export class EndCard {
     paperRow.appendChild(this.tierEl);
     right.appendChild(paperRow);
 
-    right.appendChild(el('div', 'g-group-h', t('postcard_joys_title')));
+    this.joysHead = el('div', 'g-group-h', t('postcard_joys_title'));
+    right.appendChild(this.joysHead);
     this.joyBox = el('div', 'g-joys');
     right.appendChild(this.joyBox);
-
     right.appendChild(rule());
     this.writeBtn = button(t('write_back'), { cls: 'g-btn-wide', onClick: () => this.openEditor() });
     right.appendChild(this.writeBtn);
@@ -236,15 +254,20 @@ export class EndCard {
     right.appendChild(exRow);
 
     const shareRow = el('div', 'g-tools');
-    shareRow.appendChild(button(t('share'), { cls: 'g-btn-quiet', onClick: () => void this.copyShare() }));
-    shareRow.appendChild(
-      button(t('restart_end'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onRestart() }),
-    );
+    this.shareBtn = button(t('share'), { cls: 'g-btn-quiet', onClick: () => void this.copyShare() });
+    shareRow.appendChild(this.shareBtn);
+    this.restartBtn = button(t('restart_end'), {
+      cls: 'g-btn-quiet',
+      onClick: () => this.hooks.onRestart(),
+    });
+    shareRow.appendChild(this.restartBtn);
     right.appendChild(shareRow);
 
     right.appendChild(rule());
-    right.appendChild(el('div', 'g-group-h', t('ending_title')));
-    right.appendChild(note(t('ending_hint'), 'g-note-dim'));
+    this.endingHead = el('div', 'g-group-h', t('ending_title'));
+    right.appendChild(this.endingHead);
+    this.endingHint = note(t('ending_hint'), 'g-note-dim');
+    right.appendChild(this.endingHint);
     // 选了之后的**结语**。两支各一句，写在抉择按钮正下方。
     //
     // `back_break` 此前是死字：源项目里它是「放手」那一支的收束，
@@ -271,7 +294,8 @@ export class EndCard {
 
     this.recapBox = el('div', 'g-recap');
     right.appendChild(this.recapBox);
-    right.appendChild(note(t('disclaimer'), 'g-note-dis'));
+    this.disclaimerEl = note(t('disclaimer'), 'g-note-dis');
+    right.appendChild(this.disclaimerEl);
     this.root.appendChild(right);
 
     // 禁用态的按钮不该被空格激活——灰按钮按下去没反应是对的，
@@ -558,6 +582,18 @@ export class EndCard {
     setText(this.confirmBtn, t('back_confirm'));
     setText(this.skipBtn, t('back_skip'));
     setText(this.frontBtn, t('back_to_front'));
+
+    // 构造时写死的那一批静态文案——字段定义处的注释列了为什么要留它们。
+    setText(this.editorHead, t('back_editor_title'));
+    this.ta.placeholder = t('back_placeholder');
+    setText(this.joysHead, t('postcard_joys_title'));
+    setText(this.shareBtn, t('share'));
+    setText(this.restartBtn, t('restart_end'));
+    setText(this.endingHead, t('ending_title'));
+    setText(this.endingHint, t('ending_hint'));
+    setText(this.disclaimerEl, t('disclaimer'));
+    // 过期那句：显隐在下面按状态判，文字在这里贴。
+    setText(this.overdueEl, t('ending_overdue_full'));
 
     // 评级行：「此刻的明信片：朝圣者（第 3 档 / 共 5 档）· 完满还差 9 次」。
     // 判定走 `tierLine()`，和合成屏、导出 PNG 同一份；输入用本屏的

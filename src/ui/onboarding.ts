@@ -47,6 +47,15 @@ export class Onboarding {
   private hintEl: HTMLDivElement;
   private startBtn: HTMLButtonElement;
   private isTouch: boolean;
+  /**
+   * 两个组头：名词表与操作说明。
+   *
+   * 原来 `sync()` 里是 `this.root.querySelector('.g-group-h')` 取**第一个**，
+   * 于是「操作说明」那个组头永远是构造时的语言——切完语言这一页
+   * 上面一半新、下面一半旧。两个都留元素，重贴时各贴各的。
+   */
+  private glossaryHead!: HTMLDivElement;
+  private controlsHead!: HTMLDivElement;
 
   constructor(o: OnboardingOpts) {
     this.isTouch = o.touch;
@@ -58,7 +67,8 @@ export class Onboarding {
     card.appendChild(rule());
 
     // ---- 四个词 ----
-    card.appendChild(el('div', 'g-group-h', t('glossary_title')));
+    this.glossaryHead = el('div', 'g-group-h', t('glossary_title'));
+    card.appendChild(this.glossaryHead);
     const grid = el('div', 'g-gloss');
     const words: [string, string][] = [
       ['glossary_lvbi', 'glossary_lvbi_desc'],
@@ -79,7 +89,8 @@ export class Onboarding {
     // ---- 操作说明（两套都建，切的时候换显隐）----
     this.deskBox = this.buildDesk();
     this.touchBox = this.buildTouch();
-    card.appendChild(el('div', 'g-group-h', t('controls_title')));
+    this.controlsHead = el('div', 'g-group-h', t('controls_title'));
+    card.appendChild(this.controlsHead);
     card.appendChild(this.deskBox);
     card.appendChild(this.touchBox);
 
@@ -201,8 +212,10 @@ export class Onboarding {
     else this.deskBox = fresh;
     setText(this.hintEl, this.isTouch ? t('touch_hint') : t('desktop_hint'));
     setText(this.startBtn, t('start_ride'));
-    const gh = this.root.querySelector('.g-group-h');
-    if (gh) setText(gh, t('glossary_title'));
+    // **两个组头都要贴**：只贴第一个的话，「操作说明」那头留着旧语言
+    // （见 `glossaryHead` 字段处的注释）。
+    setText(this.glossaryHead, t('glossary_title'));
+    setText(this.controlsHead, t('controls_title'));
   }
 
   dispose(): void {

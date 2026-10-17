@@ -58,6 +58,17 @@ export interface QualityPreset {
   windInterval: number;
   /** 环境声层数：风 / 水 / 鸟 */
   ambientLayers: number;
+  /**
+   * 滑板尾迹的同时存活粒子上限（个）。0 = 完全关掉这个特效。
+   *
+   * 它和阴影/植被那些旋钮是同一族：**按硬件分级，而不是按"想不想要"分级**。
+   * 尾迹是填充率买家——一个加色混合的圆点就是一次 overdraw，而低配档
+   * 刚刚把 renderScale 砍到 0.6 省下来的像素，不该被一把火花重新吃回去。
+   * 所以三档之间差 5 倍：高档的火更密、活得更久，低档只剩"看得见在滑"。
+   */
+  trailParticles: number;
+  /** 满速时每秒发射的尾迹粒子数（个/秒）。熄火时按速度比例缩水 */
+  trailEmitRate: number;
   /** 纹理各向异性 */
   anisotropy: number;
   /** 远处地标是否降级成剪影（用简单的 box 代替 GLB） */
@@ -90,6 +101,11 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     waterDetail: 0,
     windInterval: 4,
     ambientLayers: 1,
+    // 尾迹三档里最省的一档：90 个点、每秒 30 发。滑板极速 17m/s 下
+    // 一条尾迹约 3 秒就拖完 90 个的预算——读起来是"轮子后面有火星"，
+    // 而不是一条连续的光带。**低配要的是这个信号存在，不是它密。**
+    trailParticles: 90,
+    trailEmitRate: 30,
     anisotropy: 1,
     stationSilhouette: true,
   },
@@ -110,6 +126,8 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     waterDetail: 1,
     windInterval: 2,
     ambientLayers: 2,
+    trailParticles: 240,
+    trailEmitRate: 96,
     anisotropy: 2,
     stationSilhouette: false,
   },
@@ -129,6 +147,10 @@ export const PRESETS: Record<Tier, QualityPreset> = {
     waterDetail: 2,
     windInterval: 1,
     ambientLayers: 3,
+    // 高档：480 个点、每秒 180 发。17m/s 下约 2.7 秒注满池子，
+    // 之后是最旧的粒子被挤掉——尾迹因此有了长度上限，不会无限拖。
+    trailParticles: 480,
+    trailEmitRate: 180,
     anisotropy: 4,
     stationSilhouette: false,
   },

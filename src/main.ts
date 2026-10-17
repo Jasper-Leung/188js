@@ -18,7 +18,7 @@ import { worldClock } from './core/dayClock';
 import { detectCapability, type Capability, type Tier } from './core/capability';
 import { PRESETS, loadSettings, saveSettings, clampTier, type SettingsData } from './core/settings';
 import { GameLoop } from './core/loop';
-import { audio } from './core/audio';
+import { audio, ENGINE_IDLE_RPM } from './core/audio';
 import { initLang, setLang, getLang, t, onLangChange } from './i18n';
 import { World, type WorldEvent } from './world/world';
 import { Lakeside, type LakesideFrame } from './world/lakeside';
@@ -598,6 +598,13 @@ class App {
   private relicNamed = new Set<string>();
   private business!: BusinessPanel;
   private touchMode = false;
+  /**
+   * 本帧定步长的输入。**只为引擎音效留一份**：
+   * `render()` 阶段的 `syncPerf()` 要知道油门开度，而 `readInput()`
+   * 不能在那里重调——它会跑 `demoDrive()`，而那个函数记着演示的弧长，
+   * 一帧调两遍就漂。所以在 `fixed()` 里存一份，渲染阶段读存档。
+   */
+  private lastInput: RideInput = { throttle: 0, steer: 0 };
   private demoActive = false;
   /** 演示模式不碰玩家的存档位置（演示只是放一段给人看）。 */
   private demoSuppressPose = false;
@@ -2870,7 +2877,9 @@ private onConfirm() {
       narrativeBusy: this.world.narrativeBusy,
       checkInStage: this.world.checkInStage,
     });
-    this.world.fixedUpdate(dt, this.readInput(), canRide);
+    const input = this.readInput();
+    this.lastInput = input;
+    this.world.fixedUpdate(dt, input, canRide);
     this.ui.touch.checkInPressed = false;
     // 小游戏的状态机也按固定步长走。漏掉这一句，`step()` 永远不被调用：
     // 茶的注水不走、竹的引子不放、琴的示范不响、禽的倒计时不动，
@@ -3153,6 +3162,21 @@ private onConfirm() {
       nearWater = Math.max(nearWater, clamp(1 - (d - b.radius) / 40, 0, 1));
     }
     audio.setAmbient(nearWater, this.world.sky.state.dusk, clamp(this.world.ride.speedValue / 15, 0, 1));
+
+    // 摩托车引擎。转速 = 怠速 + (1−怠速)×车速比例（没有挡位模型，
+    // 理由见 `audio.setEngine`）；油门取上面存的那份定步长输入。
+    // **只在 roaming 相位烧**：对白、暂停、小游戏期间一台怠速运转的
+    // 引擎是纯噪音——而那几段恰恰是玩家唯一想听清人声的时候。
+    const ride = this.world.ride;
+    const moto = ride.vehicleKind === 'motorcycle';
+    const speed01 = clamp(Math.abs(ride.speedValue) / MODE_TUNE.motorcycle.maxSpeed, 0, 1);
+    const rpm = moto ? ENGINE_IDLE_RPM + (1 - ENGINE_IDLE_RPM) * speed01 : 0;
+    audio.setEngine(
+      moto && this.phase === 'roaming',
+      rpm,
+      // `readInput()` 里前进是负油门，翻个面才是 0..1 的开度
+      moto ? clamp(-this.lastInput.throttle, 0, 1) : 0,
+    );
   }
 }
 

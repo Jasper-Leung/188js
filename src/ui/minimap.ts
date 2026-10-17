@@ -219,6 +219,17 @@ export class Minimap {
   }
 
   /**
+   * 切语言：把无障碍名重贴一遍。
+   *
+   * 全类只有这一处 `t()`，而它原来只写在 `applySize()` 里——
+   * 于是不 resize 就永远不更新，读屏用户切完语言听到的还是旧语言的那句。
+   * 只写一个属性，不碰静态层（重画的判据是 `signature()`，见上）。
+   */
+  sync(): void {
+    this.canvas.setAttribute('aria-label', t('postcard_map_title'));
+  }
+
+  /**
    * 每帧调。`targetIdx` 由 hud 传进来 —— **不自己找**。
    *
    * 「下一处」在顶栏、脚下提示圈、小地图三处都要指向同一座驿站，

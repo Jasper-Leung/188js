@@ -557,3 +557,64 @@ void main() {
 }
 `;
 
+// ---------------------------------------------------------------- 滑板尾迹
+//
+// 一支**点精灵**材质。尾迹的积分全部在 CPU（见 `world/skateTrail.ts`），
+// 着色器只负责把一个方点画圆、按寿命渐变色、按距离埋进雾里。
+// 拆开而不是用 `PointsMaterial` 的原因有三条，每条都实测过：
+//   1. `PointsMaterial` 没有**每粒子**的寿命/颜色通道，渐变得起全局作用；
+//   2. 它不给 `gl_PointCoord` 之后的颜色控制，暖白→橙红的老化渐变写不了；
+//   3. 它不接自定义雾，远处的亮点会挂在灰蒙蒙的景上。
+export const SKATE_TRAIL_VERT = /* glsl */ `
+attribute vec2 aLife;   // x = 剩余寿命（秒），y = 总寿命（秒）
+attribute float aSize;  // 世界尺度下的直径（米）
+attribute float aSeed;  // 每粒子一个 0..1 的随机数，给余烬闪烁错开相位
+uniform float uHalfH;   // 0.5 × 绘图缓冲区高度（像素）
+varying float vAge;     // 1 = 刚出生，0 = 将死
+varying float vSeed;
+varying float vDepth;   // 视深（米），给雾用
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  vAge = aLife.x / max(aLife.y, 1e-4);
+  vSeed = aSeed;
+  vDepth = -mv.z;
+  // 与 three 的 PointsMaterial 同一把尺子：同世界尺寸的点，距离越远像素越少，
+  // 于是尾迹在远处自然收细。下限 1px 是防闪烁——亚像素的点会在
+  // 覆盖测试的边缘上逐帧跳，读作一整片的噪点。
+  gl_PointSize = max(aSize * uHalfH / max(vDepth, 0.1), 1.0);
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
+export const SKATE_TRAIL_FRAG = /* glsl */ `
+precision highp float;
+uniform vec3 uHot;    // 新生：暖白
+uniform vec3 uCool;   // 将死：橙红
+uniform float uOpacity;
+uniform vec3 fogColor;
+uniform float fogNear;
+uniform float fogFar;
+varying float vAge;
+varying float vSeed;
+varying float vDepth;
+void main() {
+  // 圆形遮罩。方点在加色混合下会读成马赛克，必须裁圆。
+  vec2 d = gl_PointCoord - 0.5;
+  float r2 = dot(d, d);
+  if (r2 > 0.25) discard;
+  // 中心亮、边缘软。上界取 0.02 而不是 0：硬边在加色下会现出锯齿。
+  float core = smoothstep(0.25, 0.02, r2);
+  // 余烬闪烁：种子错开相位，频率取非整数避免成群同步。
+  float tw = 0.82 + 0.18 * sin(vSeed * 43.0 + vAge * 90.0);
+  vec3 col = mix(uCool, uHot, vAge * vAge);
+  // 远处的火星要埋进雾里，否则一团亮斑挂在灰蒙蒙的远景上。
+  float fogFactor = smoothstep(fogNear, fogFar, vDepth);
+  float a = core * vAge * tw * uOpacity * (1.0 - fogFactor);
+  // 加色混合是 SrcAlpha × One，rgb 会被 alpha 再乘一次。这里预乘一点
+  // "越年轻越亮"，于是同一次淡出里同时有变暗——单靠 alpha 的话，
+  // 死前的粒子只是变透明，颜色不变，读作"淡出的圆"而不是"冷却的火"。
+  gl_FragColor = vec4(col * (0.6 + 0.4 * vAge), a);
+  #include <colorspace_fragment>
+}
+`;
+
