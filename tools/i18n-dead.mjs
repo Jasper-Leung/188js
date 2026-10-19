@@ -193,14 +193,76 @@ function hardcodeTargets() {
 }
 
 /**
+ * 首屏镜像：`index.html` 里 `/*BOOT-I18N-BEGIN*\/ … /*BOOT-I18N-END*\/` 围住的那段。
+ *
+ * 它是 `data/generated/i18n.json` 的**一份拷贝**，不是界面上的字：
+ * 内联脚本按当前语言从这份拷贝里取（`__bootI18n[lang]`），
+ * 所以中文玩家拿到 `zh` 那半、英文玩家拿到 `en` 那半——切语言切得掉。
+ * 这一门治的病是"中文写死在代码里，切语言也切不掉"，
+ * 而这一段是**随表走的**，不该被判死。
+ *
+ * 但也不能无条件放过：围栏里要是塞了表里没有的中文，那就是真的写死。
+ * 所以口径是**逐键对着表核**：zh/en 两侧的每个键都要在表里、值都要一样，
+ * 全对得上才把它从扫描里摘掉；有对不上的留在原地，照常报出来。
+ *
+ * 两侧都核是必须的：只核 zh 的话，en 那半被换成写死的中文就漏了。
+ * 核的是"这一段是表的忠实拷贝"这个**事实**，不是"这段有中文"这件事——
+ * 方向搞反了就成了给硬编码开后门。
+ */
+const BOOT_MIRROR_RE = /\/\*BOOT-I18N-BEGIN\*\/([\s\S]*?)\/\*BOOT-I18N-END\*\//;
+
+/** 表（`src/data/generated/i18n.json`）。死字那边和硬编码这边共用同一份。 */
+function loadI18nTable() {
+  return JSON.parse(readFileSync(join(ROOT, 'src/data/generated/i18n.json'), 'utf8'));
+}
+
+/** 把一段文本里的非换行字符全换成空格：行数不变，位置不变，报错的行号才对得上。 */
+const blankOut = (s) => s.replace(/[^\n]/g, ' ');
+
+/** 这段 HTML 里的首屏镜像，是不是表的一份忠实拷贝。 */
+function bootMirrorIsTableCopy(raw, table) {
+  const m = BOOT_MIRROR_RE.exec(raw);
+  if (!m) return false;
+  let mirror;
+  try {
+    const body = m[1].trim().replace(/^window\.__bootI18n\s*=\s*/, '').replace(/;\s*$/, '');
+    mirror = JSON.parse(body);
+  } catch {
+    // 解析不了：说明这段已经不是"表的一份拷贝"了，按写死处理
+    return false;
+  }
+  const zh = table.zh || table;
+  const en = table.en || {};
+  for (const side of ['zh', 'en']) {
+    const got = mirror?.[side];
+    if (!got || typeof got !== 'object') return false;
+    for (const [k, v] of Object.entries(got)) {
+      const want = side === 'zh' ? zh[k] : en[k];
+      // 键不在表里（want 是 undefined）同样算"对不上"——
+      // 那是一个表里根本没有的键，正是硬编码要治的东西。
+      if (want !== v) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * 白名单与死字那边同一个形状：只登记**确实不面向玩家**的中文串，
  * 每条带 `why`；白名单之外出现任何新的硬编码中文 → FAIL。
  * 同样只减不增，附一条"已经不再是硬编码"的提示。
  */
-function scanHardcoded() {
+export function scanHardcoded() {
   const hits = [];
+  const table = loadI18nTable();
+  let mirrorNote = null;
   for (const rel of hardcodeTargets()) {
-    const raw = readFileSync(join(ROOT, rel), 'utf8');
+    let raw = readFileSync(join(ROOT, rel), 'utf8');
+    // 首屏镜像是表的一份拷贝（逐键核过），随表走、不是写死的中文，
+    // 所以不参与这一门。核不上就照常扫——宁可多报，不可漏报。
+    if (rel.endsWith('.html') && bootMirrorIsTableCopy(raw, table)) {
+      raw = raw.replace(BOOT_MIRROR_RE, (m) => blankOut(m));
+      mirrorNote = rel;
+    }
     // index.html 里的说明是 `<!-- -->` 而不是 `/* */`。
     // 不剥的话那几段解释代码的注释会变成"界面硬编码中文"上报——
     // 而它们根本不在界面上（注释掉的节点不渲染）。
@@ -213,7 +275,7 @@ function scanHardcoded() {
   const isAllowed = (h) => allow.some((a) => a.file === h.file && a.text === h.text);
   const unexpected = hits.filter((h) => !isAllowed(h));
   const stale = allow.filter((a) => !hits.some((h) => h.file === a.file && h.text === a.text));
-  return { hits, allow, unexpected, stale };
+  return { hits, allow, unexpected, stale, mirrorNote };
 }
 
 /**
@@ -308,7 +370,7 @@ function findMissingRefs(blob, table) {
 }
 
 export function scanDead() {
-  const i18n = JSON.parse(readFileSync(join(ROOT, 'src/data/generated/i18n.json'), 'utf8'));
+  const i18n = loadI18nTable();
   const zh = i18n.zh || i18n;
   const en = i18n.en || {};
   const files = collect(join(ROOT, 'src')).filter((f) => !f.includes(`${'verify'}\\`) && !f.includes('/verify/'));
@@ -404,6 +466,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   console.log('');
   console.log('=== 界面硬编码中文（英文界面里会原样露出来的那种）===');
   console.log(`  扫描 ${hardcodeTargets().length} 个文件 · 命中 ${h.hits.length} 处 · 白名单 ${h.allow.length} 条`);
+  if (h.mirrorNote) {
+    console.log(`  ${DIM}${h.mirrorNote} 的首屏镜像（__bootI18n）逐键核对过表，视为表副本不参与本门${OFF}`);
+  }
   if (h.stale.length) {
     for (const a of h.stale) {
       console.log(`  ${YELLOW}白名单里的「${a.text}」已经不在 ${a.file} 里了（改成 t() 了？）—— 可以从 tools/i18n-hardcode-allow.json 划掉${OFF}`);
