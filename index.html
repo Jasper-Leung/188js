@@ -57,7 +57,19 @@
       模块脚本还没跑，拿不到那张表。它只有 5 个键，而 `verify_i18n`
       逐键比着表守着（改表忘了改这里会红）。
     -->
-    <script>
+    <!--
+      `nonce="__TAURI_SCRIPT_NONCE__"` 是给 **Tauri 桌面端** 看的。
+
+      桌面包带 CSP（`src-tauri/tauri.conf.json`），而这段是**内联脚本**——
+      `script-src 'self'` 会把它拦掉，于是首屏语言探测不跑，
+      标题页会先闪一屏没有翻译的字。Tauri v2 的做法是把这段占位符
+      换成随机 nonce、并把 `'nonce-...'` 自动加进它的 `script-src`
+      （`tauri::manager::set_csp` → `replace_csp_nonce`）。
+
+      网页版（GitHub Pages / `npm run dev`）不设 CSP，这个属性是惰性的，
+      脚本照跑——所以两边行为一致。
+    -->
+    <script nonce="__TAURI_SCRIPT_NONCE__">
       /*BOOT-I18N-BEGIN*/
       window.__bootI18n = {"zh":{"game_title":"188号礼物","boot_title_head":"188","boot_title_mark":"号","boot_title_tail":"礼物","boot_sub":"正在铺路…"},"en":{"game_title":"Gift No.188","boot_title_head":"Gift","boot_title_mark":"No.","boot_title_tail":"188","boot_sub":"Paving the road..."}};
       /*BOOT-I18N-END*/
