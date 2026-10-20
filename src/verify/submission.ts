@@ -13,9 +13,11 @@
  *
  * ## 口径
  *
- * 只判**提交页自己的东西**（`submission/**`），不碰 `dist/`：
- * CI 的顺序是 typecheck → verify → build，verify 跑的时候产物还不存在。
- * 产物对不对由 `tools/build-submission.mjs` 自己负责（它找不到媒体就报警并降级）。
+ * 主要判**提交页自己的东西**（`submission/**`）。
+ * 产物（`dist/`）那部分**顺带**判一下：CI 的顺序已经是
+ * typecheck → build → verify（`AGENTS.md` §4），所以 verify 跑的时候
+ * 产物**已经在了**，而页面上那几个体积正是构建时填进去的——
+ * 不看产物，就等于只判了"源码里的占位符没写错"，而那不是真正要紧的事。
  *
  * ## 为什么不复用构建脚本里的解析
  *
@@ -23,8 +25,9 @@
  * 共用同一套解析的后果是：解析器写错了，两边一起绿——而这条判据的全部意义
  * 就是抓构建脚本抓不到的东西。判据要能独立地红。
  */
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 export function assertSubmission(): { ok: boolean; detail: string; asserts: number } {
   let asserts = 0;
@@ -102,9 +105,25 @@ export function assertSubmission(): { ok: boolean; detail: string; asserts: numb
   }
 
   // ---------------------------------------------------------------- 单一数据源
-  // HTML 里每个 data-cfg 都要在 site.json 里有对应键。videoSize 例外：
-  // 它是构建时量的文件大小，不进配置。
-  const computed = new Set(['videoSize']);
+  // HTML 里每个 data-cfg 都要在 site.json 里有对应键。**例外是构建时量出来的那几个**：
+  // 它们不进配置，因为它们是**事实**而不是**设定**——
+  // 录屏多大、产物多大、回归多少条，都是量出来的，写进配置就等于允许它过期。
+  //
+  // 这一组以前是手抄进 HTML 的，而手抄的那一版已经过期过：
+  // 页面写着 21.41 MB / 17.47 MB / 279 KB，实际是 22.94 MB / 18.21 MB / 339 KB。
+  // 现在这些位置在源码里是占位，由 `tools/build-submission.mjs` 在构建时填。
+  const computed = new Set([
+    'videoSize',
+    'payloadSize',
+    'modelsSize',
+    'modelsShare',
+    'firstScreenSize',
+    'jsGzipSize',
+    'fileCount',
+    'checksCount',
+    'assertsCount',
+    'i18nKeys',
+  ]);
 
   const attrOf = (tag: string, name: string): string | undefined => {
     const m = tag.match(new RegExp(`\\b${name}="([^"]*)"`));
@@ -251,6 +270,91 @@ export function assertSubmission(): { ok: boolean; detail: string; asserts: numb
     const shown = [...html.matchAll(/data-cfg="videoSize"[^>]*>([^<]*)</g)].map((m) => unescape(m[1]));
     for (const s of shown) {
       if (s !== real) probs.push(`页面写着录屏 ${s}，实际是 ${real}`);
+    }
+  }
+
+  // **产物**里那几个体积必须等于这一轮量出来的值。
+  //
+  // 源码里那些位置写的是占位（`—`），构建时才填——所以要看的是**产物**。
+  // 而 CI 的顺序是 typecheck → build → verify（`AGENTS.md` §4），
+  // 于是 verify 跑的时候产物**已经在了**：这条判据因此能真正抓到
+  // 「构建填错了」或「产物是旧的」。
+  //
+  // 口径与 `tools/build-submission.mjs` 的 `measureBuild()` 一致，
+  // 但**这里重算一遍**：共用同一段逻辑的话，逻辑写错了两边一起绿，
+  // 而这条判据的全部意义就是抓构建脚本抓不到的东西。
+  asserts++;
+  {
+    const built = join(ROOT, 'dist', 'submission', 'index.html');
+    if (existsSync(built)) {
+      const builtHtml = readFileSync(built, 'utf8');
+      const dist = join(ROOT, 'dist');
+      // **走一遍、顶层跳过 `submission`**，而不是「总大小减去 submission」。
+      // 相减看着等价，实际上不是：它依赖 `dist/submission` 此刻的体积，
+      // 而那个目录可能是上一次 build 留下的——于是数字随重建顺序漂移。
+      const dirBytes = (dir: string, top: boolean): number => {
+        if (!existsSync(dir)) return 0;
+        let total = 0;
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          if (top && e.name === 'submission') continue;
+          const p = join(dir, e.name);
+          total += e.isDirectory() ? dirBytes(p, false) : statSync(p).size;
+        }
+        return total;
+      };
+      const assets = join(dist, 'assets');
+      const names = existsSync(assets) ? readdirSync(assets) : [];
+      const jsName = names.find((f) => f.endsWith('.js'));
+      const cssName = names.find((f) => f.endsWith('.css'));
+      const payload = dirBytes(dist, true);
+      const models = dirBytes(join(dist, 'models'), true);
+      const firstScreen = ['index.html', 'fonts/ui.woff2'].reduce((sum, rel) => {
+        const p = join(dist, rel);
+        return sum + (existsSync(p) ? statSync(p).size : 0);
+      }, 0)
+        + (jsName ? statSync(join(assets, jsName)).size : 0)
+        + (cssName ? statSync(join(assets, cssName)).size : 0);
+      const want: [string, string][] = [
+        ['payloadSize', mib(payload)],
+        ['modelsSize', mib(models)],
+        ['firstScreenSize', mib(firstScreen)],
+      ];
+      if (jsName) {
+        want.push(['jsGzipSize', `${Math.round(gzipSync(readFileSync(join(assets, jsName))).length / 1024)} KB`]);
+      }
+      for (const [key, real] of want) {
+        const shown = [...builtHtml.matchAll(new RegExp(`data-cfg="${key}"[^>]*>([^<]*)<`, 'g'))]
+          .map((m) => unescape(m[1]));
+        if (!shown.length) {
+          probs.push(`产物里没有 data-cfg="${key}" —— 页面上的那一格是空的`);
+          continue;
+        }
+        for (const s of shown) {
+          if (s !== real) probs.push(`产物页面写着 ${key} = ${s}，实际是 ${real}`);
+        }
+      }
+
+      // 回归条数那两个数：页面上的必须和**唯一那一份**一样。
+      //
+      // 它们是构建时从 `docs/release-facts.md` 读的，所以这条判据量的是
+      // 「页面有没有抄错唯一那一份」——而 [DOC] 门管的是
+      // 「那一份本身对不对」。两件事，少一件就留了个后门。
+      const factsPath = join(ROOT, 'docs', 'release-facts.md');
+      if (existsSync(factsPath)) {
+        const factsText = readFileSync(factsPath, 'utf8');
+        for (const key of ['checks', 'asserts']) {
+          const m = new RegExp(`^\\|\\s*\`${key}\`\\s*\\|[^|]*\\|\\s*\`([^\`]*)\`` , 'm').exec(factsText);
+          if (!m) {
+            probs.push(`docs/release-facts.md 里没有 ${key} 那一行`);
+            continue;
+          }
+          const shown = [...builtHtml.matchAll(new RegExp(`data-cfg="${key}Count"[^>]*>([^<]*)<`, 'g'))]
+            .map((x) => unescape(x[1]));
+          for (const s of shown) {
+            if (s !== m[1]) probs.push(`产物页面写着 ${key} = ${s}，唯一那一份是 ${m[1]}`);
+          }
+        }
+      }
     }
   }
 

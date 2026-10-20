@@ -8,16 +8,17 @@
 - 人物脚与踏板使用同一相位和节奏，覆盖慢速至加速。
 - 固定种子生成路灯、路肩反光桩和田垄；默认五分钟完成一天，支持现实同步、倍率、偏移、暂停和固定时刻。视觉时间不消耗原主线天数。
 - 湖边支持普通全景与钓鱼；设备支持 WebXR 时可请求沉浸 VR，拒绝或不支持时保留普通交互。
+- **头显里钓鱼不需要键盘**：扳机走现有键位通道，而咬钩提示与张力条改为场景内的几何（DOM 不会进头显）。
 
 ## Changes
 
 Seven existing locations now support a complete business loop: gather, craft, serve orders, earn coins and reputation, upgrade and unlock four story milestones. Existing v3 saves carry over.
 
-Touch controls add vehicle switching, mirrored layouts, safe-area spacing and a landscape prompt. Qin Grove offers both practice and free play at the correct location, with proportional scenery. Bicycle pedals and feet share their animation clock. Seeded roadside lamps, reflectors and fields accompany a configurable five-minute day/night cycle. The lakeside remains playable as a panorama when immersive WebXR is unavailable.
+Touch controls add vehicle switching, mirrored layouts, safe-area spacing and a landscape prompt. Qin Grove offers both practice and free play at the correct location, with proportional scenery. Bicycle pedals and feet share their animation clock. Seeded roadside lamps, reflectors and fields accompany a configurable five-minute day/night cycle. The lakeside remains playable as a panorama when immersive WebXR is unavailable, and inside a headset the whole fishing loop runs on the controller trigger alone — the bite prompt and the tension bar become geometry in the world, because DOM does not reach a headset.
 
 ## Validation / 验证边界
 
-TypeScript, production build and the full regression entry were run locally: **116 checks / 3774 assertions, no failures or checks without assertions**. The business loop, upgrades and reload persistence were also operated in Chrome. Responsive desktop Chrome checks do not replace physical iOS/Android, VR headset or desktop installer testing; see `docs/v1.0.2-validation.md` for the exact coverage and remaining checklist.
+TypeScript, production build and the full regression entry were run locally: **all checks green, no failures and no checks without assertions** — the current counts are in [`docs/release-facts.md`](https://github.com/Jasper-Leung/188js/blob/main/docs/release-facts.md), which is the only file that holds them. The business loop, upgrades and reload persistence were also operated in Chrome. Responsive desktop Chrome checks do not replace physical iOS/Android, VR headset or desktop installer testing; see `docs/v1.0.2-validation.md` for the exact coverage and remaining checklist.
 
 本机没有完成手机真机、头显或三系统安装包实玩。各平台构建状态以本次 Release 对应的 GitHub Actions 为准。经营资源免费补给，经营收入会放宽原玩法的旅币预算。
 

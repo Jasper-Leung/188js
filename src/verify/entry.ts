@@ -2207,79 +2207,31 @@ check('verify_skip_and_affordance', () => {
 });
 
 /**
- * 文档里的数字不许漂。
+ * 公开文档不许指回旧落地页。
  *
  * ## 它挡的是什么
  *
- * 文案表的条数在四份文件里各写了一遍：README 两处、中文 README 两处、提交页两处。
- * 实跑 `verify_i18n` 一直把真数（416）打在屏幕上，而**没有一条判据去对文档**——
- * 于是文档从 234 一路漂到 401 再漂到 416，中间跨了好几轮改动，谁也没响。
+ * `no188-gift-web` 是**旧版**的落地页地址，而游戏本体在 `/188js/`。
+ * 两个地址都还活着，指向的却是两个不同的东西——
+ * 而页面上、README 里、Release 说明里都曾经写着旧的那个。
  *
- * 这不是"忘了改"。`416` 这个数是**跟着某一次补白一起长出来的**，
- * 也就是说漂移是跟着改动产生的，而那次改动本身完全正确。
- * 手改四个数字只能保证今天是对的；这条判据才保证明天也是对的。
+ * 症状是**安静**的：链接点得开，页面也像那么回事，
+ * 没有人会因为一个地址长得很像就报出来。
  *
- * ## 为什么只钉文案条数，不钉「N 条判据 / M 条断言」
+ * ## 为什么这里只查地址，不查数字
  *
- * 那两个数是**自指的**：加一条判据就会同时改变它们，于是判据会立刻把自己判红。
- * 钉它就得每次加判据都去改两处文档，而那正是它本来的毛病。
- * 提交页已经写着「每次 `npm run build` 会把当次实测值打印出来」——
- * 那一行是诚实的处置，这里不重复发明。
- *
- * 各自会红的做法：
- *   · 给文案表补一条新键而没改文档 → 红。
- *   · 把根 README 的在线地址改回 `no188-gift-web`（那指向旧版落地页，不是游戏）→ 第 3 条红。
- *   · 把四处里删掉一处 → 第 2 条红（口径是「至少四处都写着同一个数」，不是「某处写着」）。
+ * 这一族原来还管"文案表条数在四份文件里对得上"。
+ * 那一部分**已经被取代**了：条数现在只存在一份
+ * （`docs/release-facts.md`），由 `npm run facts` 生成，
+ * 而 `tools/verify-all.mjs` 里的 [DOC] 门拿它和真实表对账。
+ * 在这里再查一遍就是**抄第二份**——而抄第二份正是那个毛病本身。
  */
-check('verify_docs_numbers', () => {
+check('verify_docs_stale_link', () => {
   let asserts = 0;
   const probs: string[] = [];
   const ROOT = process.cwd();
 
-  // 真值：从产物表里数，不从任何文档里抄。
-  const i18n = JSON.parse(
-    readFileSync(join(ROOT, 'src', 'data', 'generated', 'i18n.json'), 'utf8'),
-  ) as { zh: Record<string, unknown>; en: Record<string, unknown> };
-  const real = Object.keys(i18n.zh).length;
-  asserts++;
-  if (real !== Object.keys(i18n.en).length) {
-    probs.push(`中英条数不等（中 ${real} / 英 ${Object.keys(i18n.en).length}）——真值本身就不可信`);
-  }
-
-  /** 四种写法，中英各一种。全部只吃"数字紧挨着关键词"的那一段。 */
-  const PATTERNS: [RegExp, string][] = [
-    [/(\d+)[- ]key string table/, 'key string table'],
-    [/文案表\s*(\d+)\s*条/, '文案表 N 条'],
-    [/verify_i18n\s+(\d+)\s+strings/, 'verify_i18n N strings'],
-    [/verify_i18n\s+(\d+)\s+条/, 'verify_i18n N 条'],
-    [/(\d+)\s+bilingual strings/, 'N bilingual strings'],
-    [/双语文案[^。]{0,10}?(\d+)\s*条/, '双语文案 N 条'],
-    [/文案补到\s*(\d+)\s*条/, '文案补到 N 条'],
-    [/grown to\s*(\d+)/, 'grown to N'],
-  ];
-
-  const FILES = ['README.md', 'README.zh-CN.md', join('submission', 'index.html')];
-  let hits = 0;
-  for (const rel of FILES) {
-    const text = readFileSync(join(ROOT, rel), 'utf8');
-    for (const [re, label] of PATTERNS) {
-      for (const m of text.matchAll(new RegExp(re.source, 'g'))) {
-        asserts++;
-        hits++;
-        const got = Number(m[1]);
-        if (got !== real) {
-          probs.push(`${rel} 里的「${label}」写的是 ${got}，实际 ${real}`);
-        }
-      }
-    }
-  }
-  asserts++;
-  // 反向门：把四处全删掉会让上面空转，那也是漂移的一种。
-  if (hits < 6) {
-    probs.push(`只找到 ${hits} 处文案条数（应至少 6 处）——口径本身被删掉了，这条判据会变成空转`);
-  }
-
-  // ---- 3. 在线地址不许再指回那个旧落地页 ----
+  // 在线地址不许再指回那个旧落地页。
   asserts++;
   {
     const stale = 'no188-gift-web';
@@ -2300,7 +2252,7 @@ check('verify_docs_numbers', () => {
     probs.length === 0,
     probs.length
       ? probs.join('；')
-      : `文案条数 ${real} 在 ${FILES.length} 份文件里对得上 · 在线地址没有指回旧落地页`,
+      : '公开文档里的在线地址没有指回旧落地页',
     asserts,
   );
 });

@@ -35,7 +35,7 @@ the trailing `?` is a cache-buster, see [GitHub Pages](#github-pages))
 
 | Your system | Which one to take | How to install |
 |:---|:---|:---|
-| Windows 10 / 11 (64-bit) | the `x64-setup.exe` one, ~42 MB | double-click, next-next-finish, **no administrator needed** |
+| Windows 10 / 11 (64-bit) | the `x64-setup.exe` one | double-click, next-next-finish, **no administrator needed** |
 | macOS (universal: Apple Silicon + Intel) | the `universal.dmg` one | drag into Applications |
 | Ubuntu / Debian / Mint family | the `.deb` one | `sudo apt install ./<package>.deb` |
 | Other Linux | the `.AppImage` one | `chmod +x`, then double-click |
@@ -50,7 +50,7 @@ anyway". Building it yourself is covered in [Deployment](#deployment).
 npm install
 npm run data:extract     # mechanically extract data tables from the Godot source project (output is committed, so skippable)
 npm run assets:all       # font subsetting + GLB compression + Tripo building pipeline
-npm run dev              # http://127.0.0.1:5210
+npm run dev              # http://127.0.0.1:5180
 npm run verify           # headless regression suite
 npm run build            # output lands in dist/
 ```
@@ -120,6 +120,34 @@ No combat, no failure screen that ends your run. A full playthrough takes about
 | Relics | **eight**, in two layers — a present-day monologue on the first touch, the object's *own* past on the second |
 | Chapter two | opens after the synthesis screen: three new relics (the teapot at home, the station lamp, a carving knife) at non-fragment stations, plus a past layer for each of the first five |
 
+### The lakeside, and fishing without a keyboard
+
+The southeast end of the loop opens onto a lake: a panoramic photo of the
+shoreline you can turn around in, walk along, and fish from. Fishing is one
+button, and it is the same button everywhere.
+
+| Where | How you cast, strike and reel |
+|:---|:---|
+| Desktop | **Space** (or Enter) — tap to cast, tap again on the bite, hold to reel |
+| Touch | the on-screen control; the hint text changes to match |
+| **VR headset** | **the trigger** — and nothing else. No keyboard is needed, and none is expected |
+
+The VR path is not a second game mode. The trigger is dispatched as a real
+`Space` through the same keymap the keyboard uses, so the fishing state
+machine is literally the same code in the headset as on the desk.
+
+What *did* have to change is the read-out. On a desk the bite prompt and the
+tension bar are **DOM** — and DOM does not go into a headset. So in an
+immersive session they become **geometry in the world**: a ring that breathes
+when you can cast, flashes through the bite window, and turns the colour of the
+outcome; and a tension bar that grows with the line. Same colours as the DOM
+version, so what you learn in the headset still reads on the desk.
+
+> **Verified:** the input wiring, the timing of the strike window and the
+> read-out's state machine are covered by the headless regression.
+> **Not verified:** the look and feel of it in an actual headset — there is no
+> headset on the machine that built this.
+
 ---
 
 ## Three rules for the port
@@ -140,7 +168,8 @@ function call or an expression it errors out and exits: failing is fine, guessin
 is not.
 
 After the move the Chinese model filenames (`station_亭灯.glb`) survive intact,
-and both sides of the 626-key string table match exactly.
+and both sides of the string table match exactly (its current size is in
+[release facts](docs/release-facts.md)).
 
 ### Two: translate geometry point by point
 
@@ -159,7 +188,7 @@ verify_quality     three tiers monotonic / fog distance ≥ vegetation radius / 
 verify_quality_hint  the quality note follows the selected tier, and its radii match PRESETS
 verify_mood        mask 0→0.34 never fills the screen / there is a way back up / sight has a floor
 verify_checkin     "already collected" and "nothing more to do here" are two different things
-verify_i18n        626 strings consistent across languages / no distances in copy / station counts carry no denominator
+verify_i18n        the string table matches across languages / no distances in copy / station counts carry no denominator
 verify_i18n_glossary  the word the onboarding teaches is the word the HUD uses / no pinyin on the English side
 verify_first_run   the demo waits visibly for the bicycle / Escape closes a shop / Composure is named the same way in all three places
 verify_panel_layering  the check-in gate yields while the prologue is on screen / a new panel clears the dialogue under it / clearing it settles the promise
@@ -361,7 +390,7 @@ site exclusion list, or turn off its browser integration.
 
 | | Source | Output | How |
 |:---|:---|:---|:---|
-| 3D models | 22.3 MB | **17.47 MB** ⚠ | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression. All 22 GLBs carry `EXT_meshopt_compression`. ⚠ *Not* the 5.0 MB this table used to promise — see below |
+| 3D models | 22.3 MB | see [release facts](docs/release-facts.md) ⚠ | textures down to 768/1024 + JPEG q76; vertex welding; error-threshold simplification; Meshopt compression. All GLBs carry `EXT_meshopt_compression`. ⚠ *Not* the 5.0 MB this table used to promise — see below |
 | Textures | 3.9 MB | 1.3 MB | as above |
 | Font | 24.4 MB | **181 KB** (first screen) | subset to the 880 characters that actually appear in the game + WOFF2 |
 | Font (handwritten) | 24.4 MB | 404 KB (lazy) | the ~3500 most common Chinese characters, loaded only when the back of the postcard is opened |
@@ -396,7 +425,7 @@ Half the budget sits in three files, and one of them is on the critical path:
 | `motorcycle.glb` | 4.82 MB | optional vehicle, its own loading chain |
 | `bicycle.glb` | **2.79 MB** | **first screen** — the first thing the player looks at |
 | `survivor.glb` | 1.33 MB | the player character |
-| the other 19 | 7.90 MB | |
+| the rest | see [release facts](docs/release-facts.md) | |
 
 **Meshopt rather than Draco**: a 20 KB decoder versus 250 KB, with no hitch on
 first decode. On a low-end machine "the decode stutters for a moment" costs more
@@ -569,19 +598,24 @@ Run against a production build (`vite preview`) on an **AMD Radeon RX 5500 XT /
 |:---|:---|
 | World build (bowl placement + road indexing + vegetation placement + sky) | **77–111 ms** (measured 237–296 ms on the Pages build including asset-chain kickoff) |
 | Time to an interactive title screen | 200–350 ms (with HTTP cache) |
-| JS bundle | 980 KB raw / **~280 KB gzip** |
-| CSS | 27.3 KB raw / 4 KB gzip |
-| Total artifact | **20.78 MB** — of which **16.84 MB is models (81%)**; audio 2.2 MB loads in the background, not on the first-screen path |
+| JS bundle / CSS / total artifact | **[release facts](docs/release-facts.md)** — measured at build time, never hand-written |
+| Headless regression (checks / assertions) | **[release facts](docs/release-facts.md)** — the only place those numbers live |
 | Spawn point to centreline | all 16 stations **0.000 m** |
 | `nearestArcParam` round-trip error | **0.00000** |
-| Headless regression | `PASS 57 / FAIL 0 / 0 not-run`, **829 assertions**, 0 red |
 
-⚠ These artifact numbers are what the repository actually contains, measured
-directly. An earlier revision of this file claimed **8.6 MB** total and a
-**299 KB** bicycle; neither was true (`bicycle.glb` is **2.79 MB**), and the
-error survived because the asset pipeline it described could not run on a clean
-clone and reported success while doing nothing. See the note under
+⚠ The artifact numbers are what the repository actually contains, measured
+directly by `npm run facts`. An earlier revision of this file claimed **8.6 MB**
+total and a **299 KB** bicycle; neither was true (`bicycle.glb` is **2.79 MB**),
+and the error survived because the asset pipeline it described could not run on a
+clean clone and reported success while doing nothing. See the note under
 [Assets](#assets).
+
+Those numbers used to be written out in three places at once — here, in the
+Chinese README, and in the release notes — and they drifted apart silently:
+each file carried its own stale count, while the regression was green the whole
+time. There is now **one** file that holds them
+([docs/release-facts.md](docs/release-facts.md)); everything else points at it,
+and `npm run verify` fails if anyone writes a second copy.
 
 Capability detection on this machine reports `Discrete GPU: AMD Radeon RX 5500
 XT` → high tier, with the reason displayed verbatim on the title screen.
@@ -941,7 +975,8 @@ npm install
 npm run dev        # dev server
 npm run typecheck  # strict + noUnusedLocals + noUnusedParameters
 npm run build      # output into dist/
-npm run verify     # headless regression: 32 suites / 468 assertions + dead-string scan
+npm run verify     # headless regression + dead-string scan
+npm run facts      # regenerate the one file that holds the public numbers
 ```
 
 **One non-obvious trap**: on this machine the first `git push` failed with

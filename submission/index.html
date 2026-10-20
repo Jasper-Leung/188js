@@ -237,9 +237,9 @@
           </p>
 
           <ul class="notes">
-            <li><span class="zh">首屏 3.45 MB，之后按需加载；弱机走最低档也能跑。</span><span class="en">3.45 MB to first playable frame, then on demand — the low tier holds up on weak hardware.</span></li>
+            <li><span class="zh">首屏之后按需加载；弱机走最低档也能跑。</span><span class="en">After the first playable frame everything is on demand — the low tier holds up on weak hardware.</span></li>
             <li><span class="zh">键盘 W/A/S/D + 方向键，触屏有虚拟摇杆；空格是对话键。</span><span class="en">Keyboard W/A/S/D and arrows, touch stick on mobile; space advances dialogue.</span></li>
-            <li><span class="zh">中英双语完整（各 626 条文案，键集合由回归钉住）。</span><span class="en">Fully bilingual — 626 strings per language, key parity held by the regression.</span></li>
+            <li><span class="zh">中英双语完整（键集合由回归钉住）。</span><span class="en">Fully bilingual — key parity held by the regression.</span></li>
             <li><span class="zh">需要 WebGL 2；浏览器若拦截自动播放，点一下画面即可。</span><span class="en">Needs WebGL 2; if the browser blocks autoplay, click once.</span></li>
           </ul>
         </article>
@@ -456,19 +456,19 @@
               <li>
                 <span class="zh"
                   >移植自 Godot 4.6 原型，本届比赛期间重做为 three.js r169 + TypeScript + Vite；
-                  保留原叙事与碎片规则，v1.0.2 加入驿站经营与昼夜系统；双语文案 626 条两侧一致。</span
+                  保留原叙事与碎片规则，v1.0.2 加入驿站经营与昼夜系统；双语文案两侧一致。</span
                 ><span class="en"
                   >The original was Godot 4.6. This build is three.js r169 + TypeScript + Vite — a full port rebuilt
                   during the competition. The original narrative and fragment rules remain, with station businesses
-                  and a day/night cycle added in v1.0.2; all 626 bilingual strings match across both languages.</span
+                  and a day/night cycle added in v1.0.2; the bilingual string table matches across both languages.</span
                 >
               </li>
               <li>
                 <span class="zh"
-                  >几何不变量写成无头回归：<b>88 组 / 1424 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
+                  >几何不变量写成无头回归：<b><span data-cfg="checksCount">—</span> 组 / <span data-cfg="assertsCount">—</span> 条断言</b>，钉住 961 个中线点、1228.8 m、4 处交叉、
                   16 座驿站可达、经济系统总量、水位、双语键集合一致。它是上线的门。</span
                 ><span class="en"
-                  >Geometric invariants live in a headless regression — <b>88 suites / 1424 assertions</b> pinning the 961
+                  >Geometric invariants live in a headless regression — <b><span data-cfg="checksCount">—</span> suites / <span data-cfg="assertsCount">—</span> assertions</b> pinning the 961
                   centreline points, 1228.8 m, 4 crossings, 16 reachable stations, economy totals, water level and
                   bilingual key parity. It gates the deploy.</span
                 >
@@ -499,21 +499,21 @@
           <tbody>
             <tr>
               <th><span class="zh">游戏本体</span><span class="en">Game build</span></th>
-              <td><b>21.41 MB</b><span class="zh"> · 63 个文件</span><span class="en"> · 63 files</span></td>
+              <td><b><span data-cfg="payloadSize">—</span></b><span class="zh"> · <span data-cfg="fileCount">—</span> 个文件</span><span class="en"> · <span data-cfg="fileCount">—</span> files</span></td>
             </tr>
             <tr>
               <th><span class="zh">其中模型</span><span class="en">of which models</span></th>
-              <td>17.47 MB<span class="zh">（82%）</span><span class="en"> (82%)</span></td>
+              <td><span data-cfg="modelsSize">—</span><span class="zh">（<span data-cfg="modelsShare">—</span>）</span><span class="en"> (<span data-cfg="modelsShare">—</span>)</span></td>
             </tr>
             <tr>
               <th><span class="zh">首屏必下</span><span class="en">First playable frame</span></th>
-              <td><b>1.13 MB</b><span class="zh"
-                > · JS gzip 279 KB<br /><span class="dim"
-                  >口径 = index.html + 入口 JS + CSS + 字体子集，<b>不含任何模型</b>；自行车（2.79 MB）
+              <td><b><span data-cfg="firstScreenSize">—</span></b><span class="zh"
+                > · JS gzip <span data-cfg="jsGzipSize">—</span><br /><span class="dim"
+                  >口径 = index.html + 入口 JS + CSS + UI 字体子集，<b>不含任何模型</b>；自行车（2.79 MB）
                   走在同一条启动链上，但没到之前也玩得了——那时是走路。</span
                 ></span
-              ><span class="en"> · 279 KB gzipped JS<br /><span class="dim"
-                  >Counted as index.html + entry JS + CSS + the subset font, <b>no models at all</b>; the bicycle
+              ><span class="en"> · <span data-cfg="jsGzipSize">—</span> gzipped JS<br /><span class="dim"
+                  >Counted as index.html + entry JS + CSS + the UI font subset, <b>no models at all</b>; the bicycle
                   (2.79 MB) rides the same boot chain, but the game is playable before it lands — you are on foot.</span
               ></span>
             </tr>

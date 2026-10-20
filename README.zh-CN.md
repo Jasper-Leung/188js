@@ -28,7 +28,7 @@ Godot 没有可控的内部渲染分辨率，开缩放反而更慢。
 
 | 你的系统 | 认哪个后缀 | 怎么装 |
 |:---|:---|:---|
-| Windows 10 / 11（64 位） | `x64-setup.exe`，约 19MB | 双击，一路下一步，**不需要管理员** |
+| Windows 10 / 11（64 位） | `x64-setup.exe` | 双击，一路下一步，**不需要管理员** |
 | macOS（Apple Silicon + Intel 通用） | `universal.dmg` | 拖进「应用程序」 |
 | Ubuntu / Debian / Mint 系 | `.deb` | `sudo apt install ./<包名>.deb` |
 | 其它 Linux | `.AppImage` | `chmod +x` 之后双击 |
@@ -42,7 +42,7 @@ Windows 点「更多信息 → 仍要运行」。自己打包见[部署](#部署
 npm install
 npm run data:extract     # 从 Godot 源项目机械提取数据表（已提交产物，可跳过）
 npm run assets:all       # 字体子集化 + GLB 压缩 + Tripo 建筑管线
-npm run dev              # http://127.0.0.1:5210
+npm run dev              # http://127.0.0.1:5180
 npm run verify           # 无头回归
 npm run build            # 产物在 dist/
 ```
@@ -118,7 +118,7 @@ npm run package:web        # 打一个可离线分发的网页包（release/）
 遇到函数调用或表达式就报错退出——宁可失败也不能猜。
 
 搬完之后中文模型文件名（`station_亭灯.glb`）也完整保留，
-文案表 626 条 key 中英两侧集合严格一致。
+文案表中英两侧集合严格一致（当前条数见 [发布数字](docs/release-facts.md)）。
 
 ### 二、几何逐点对译
 
@@ -135,7 +135,7 @@ verify_mini_game   15 局每件 3 次 / 首次到访 = 自己那件 / 相邻两�
 verify_quality     三档单调 / 雾远 ≥ 植被半径 / 低档关阴影关草皮
 verify_mood        遮罩 0→0.34 永不满屏 / 有上行口 / 视野有下限
 verify_checkin     "已收过"与"不用再去"是两件事
-verify_i18n        626 条中英一致 / 文案里不许出现里程 / 驿数不带分母
+verify_i18n        文案表中英一致 / 文案里不许出现里程 / 驿数不带分母
 verify_terrain     800m / 128 格 / 6.25m 一格
 ```
 
@@ -283,7 +283,7 @@ IDM → 选项 → 下载 → 站点排除列表，把 `localhost` / `127.0.0.1`
 
 | | 源 | 产出 | 手段 |
 |:---|:---|:---|:---|
-| 3D 模型 | 22.3 MB | **5.0 MB** | 贴图降到 768/1024 + JPEG q76；顶点焊接；按误差阈值简化；Meshopt 压缩 |
+| 3D 模型 | 22.3 MB | 见 [发布数字](docs/release-facts.md) | 贴图降到 768/1024 + JPEG q76；顶点焊接；按误差阈值简化；Meshopt 压缩 |
 | 贴图 | 3.9 MB | 1.3 MB | 同上 |
 | 字体 | 24.4 MB | **181 KB**（首屏） | 子集化到游戏里真正出现过的 880 个字符 + WOFF2 |
 | 字体（手写） | 24.4 MB | 404 KB（懒加载） | 常用 3500 汉字，只在打开明信片背面时加载 |
@@ -299,8 +299,8 @@ libvips 在初始化时按 CPU 数开线程池，而 gltf-transform 与 meshopti
 而**完全相同的字节**从磁盘读就正常。排查方向一旦偏到"这张图有问题"上
 就会一直绕圈。
 
-首屏必下 ≈ 5.5 MB（JS 约 0.5MB + 自行车 0.3MB + 地形路面即时生成 +
-UI 字体 0.18MB + 音频预热），其余按距离进场。
+首屏必下的量见 [发布数字](docs/release-facts.md)（由构建实测），
+其余按距离进场。
 
 ---
 
@@ -418,9 +418,8 @@ git push origin v1.0.0
 |:---|:---|
 | 建世界（碗选址 + 路面索引 + 植被布置 + 天穹） | **77–111 ms** |
 | 到标题页可交互 | 200–350 ms（含 HTTP 缓存） |
-| JS 包 | 820 KB raw / **229 KB gzip** |
-| CSS | 18.7 KB raw / 4 KB gzip |
-| 产物合计 | **8.6 MB**（其中音频 2.2MB 是后台拉，不在首屏路径上） |
+| JS 包 / CSS / 产物合计 | **[发布数字](docs/release-facts.md)** —— 构建时实测，从不手写 |
+| 无头回归（条数 / 断言数） | **[发布数字](docs/release-facts.md)** —— 那些数字只存在这一份文件里 |
 | 出生点离中心线 | 16 座驿站全部 **0.000 m** |
 | `nearestArcParam` 往返误差 | **0.00000** |
 
@@ -702,7 +701,8 @@ npm install
 npm run dev        # 开发服务器
 npm run typecheck  # strict + noUnusedLocals + noUnusedParameters
 npm run build      # 产物进 dist/
-npm run verify     # 无头回归 88 条 / 1424 断言 + 文案死字扫描
+npm run verify     # 无头回归 + 文案死字扫描
+npm run facts      # 重新生成唯一那份公开数字
 ```
 
 **一个不明显的坑**：`git push` 在这台机器上第一次报

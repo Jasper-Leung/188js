@@ -52,6 +52,17 @@ export type FishOutcome = 'none' | 'caught' | 'snapped' | 'missed' | 'escaped';
 export const CAST_SEC = 0.75;
 /** 咬钩窗口时长（秒）。`verify_fishing` 钉住它不小于 0.8 —— 太窄对手感是致命的。 */
 export const BITE_WINDOW_SEC = 1.15;
+/**
+ * 咬钩的**前兆**时长（秒）。
+ *
+ * 浮漂先点一下、这之后才是真正的窗口——这 0.35 秒是给玩家的预告，
+ * 在它里面按下去**不算**。这个数字原来在三处各写一遍（`stepFish` 的
+ * 判定、`holdMeaning` 的提示、湖边那一屏的 `hint()`），
+ * 而三处只要有一处漂了，症状就是「浮漂明明点了、按下去却没中」——
+ * 界面上没有任何提示说这是设计如此。
+ * 所以它只有这一处定义。
+ */
+export const STRIKE_PRELUDE_SEC = 0.35;
 /** 收场停留（秒）。给玩家看清结果，不至于一闪而过。 */
 export const RESULT_SEC = 2.2;
 /**
@@ -189,14 +200,14 @@ export function stepFish(s: FishState, dt: number, hold: boolean): void {
         s.phase = 'bite';
         // 浮漂这一下是"前兆"：它先点一下，真正的窗口才开始。
         // 少这一下的话，咬钩和等待的切换是瞬时的，玩家学不会。
-        s.biteLeft = BITE_WINDOW_SEC + 0.35;
+        s.biteLeft = BITE_WINDOW_SEC + STRIKE_PRELUDE_SEC;
       }
       break;
 
     case 'bite':
       s.biteLeft -= dt;
       // 前兆那 0.35 秒里按了不算 —— 它是给玩家的预告，不是窗口。
-      if (hold && s.biteLeft <= 0.35) {
+      if (hold && s.biteLeft <= STRIKE_PRELUDE_SEC) {
         s.phase = 'reeling';
         s.tension = 0.25;
         s.progress = 0;
@@ -252,10 +263,93 @@ export function stepFish(s: FishState, dt: number, hold: boolean): void {
 export type HoldMeaning = 'nothing' | 'strike' | 'reel' | 'reeling';
 
 export function holdMeaning(s: FishState): HoldMeaning {
-  if (s.phase === 'bite') return s.biteLeft <= 0.35 ? 'strike' : 'nothing';
+  if (s.phase === 'bite') return s.biteLeft <= STRIKE_PRELUDE_SEC ? 'strike' : 'nothing';
   if (s.phase === 'reeling') return 'reel';
   if (s.phase === 'idle') return 'reel';
   return 'nothing';
+}
+
+/**
+ * 头显里那套**世界空间**读数该显示什么。
+ *
+ * ## 它为什么必须存在
+ *
+ * 桌面与手机上，咬钩提示、张力条、收场结果都在 `ui/lakesidePanel.ts` 的
+ * **DOM** 里。DOM 是页面上的东西——**沉浸式 VR 会话里它不会进头显**。
+ * 于是那一屏在头显里的原样是：
+ *
+ *   · 输入是通的（`core/xr.ts` 把扳机派发成真的 `Space`，走的是同一套键位表）；
+ *   · 但**读数是瞎的**——玩家看不见什么时候该点、看不见张力、看不见收场。
+ *
+ * 而钓鱼的全部玩法就是「在那一瞬间点下去」和「张力高了就松手」，
+ * 两条都要**看见**才玩得成。所以头显里那套读数必须是**场景里的几何**，
+ * 不能是 DOM。
+ *
+ * ## 它是纯函数
+ *
+ * 与 `holdMeaning` / `tensionBand` 同一个理由：**判定写在宿主里，无头回归就问不到它。**
+ * 所以"环该显示成什么样""张力条该多长"这些决定放在这里，
+ * `world/lakeside.ts` 只负责把结果画成几何。
+ *
+ * ## 为什么要用几何而不是文字
+ *
+ * 贴一张写着「拉！」的图要新素材、要切语言、还要在头显里对得上透视。
+ * 而这一屏需要的信号只有三个：**现在能不能抛**、**现在该点吗**、**张力到哪了**——
+ * 一个环的明暗、一个环的脉动、一条条的长度就够表达了，
+ * 而且**没有语言**。英文默认、还有中文，文字方案要多一倍的活儿。
+ */
+export type XrHudState = {
+  /**
+   * 状态环。
+   *
+   * · `ready`  —— 空闲，可以抛竿（慢慢呼吸的一圈）
+   * · `strike` —— 咬钩窗口，快闪的一圈
+   * · 其余     —— 收场结果（颜色即结果）
+   * · `none`   —— 这一刻没有什么要提示的（抛投中 / 等待中）
+   */
+  ring: 'none' | 'ready' | 'strike' | 'caught' | 'snapped' | 'escaped' | 'missed';
+  /** 环的脉动 0..1。`ready` 慢、`strike` 快。 */
+  ringPulse: number;
+  /** 环的淡出 0..1。收场时随剩余时间淡掉。 */
+  ringFade: number;
+  /** 张力条是否可见（只在收线时）。 */
+  tensionVisible: boolean;
+  /** 张力条填充比例 0..1。 */
+  tension: number;
+  /** 张力档位，决定配色。 */
+  band: 'calm' | 'tight' | 'danger';
+};
+
+export function xrHudState(s: FishState): XrHudState {
+  const base: XrHudState = {
+    ring: 'none',
+    ringPulse: 0,
+    ringFade: 1,
+    tensionVisible: false,
+    tension: 0,
+    band: tensionBand(s.tension),
+  };
+  switch (s.phase) {
+    case 'idle':
+      // 空闲：慢慢呼吸的一圈，告诉玩家"可以抛了"。
+      return { ...base, ring: 'ready', ringPulse: 0.5 + 0.5 * Math.sin(s.t * 2.2) };
+    case 'bite':
+      // 前兆那 0.35 秒**不算**提示——它还是 `none`，
+      // 和 `holdMeaning` 用的是同一个窗口（见 `STRIKE_PRELUDE_SEC`）。
+      return s.biteLeft <= STRIKE_PRELUDE_SEC
+        ? { ...base, ring: 'strike', ringPulse: 0.5 + 0.5 * Math.sin(s.biteLeft * 18) }
+        : base;
+    case 'reeling':
+      return { ...base, tensionVisible: true, tension: clamp(s.tension, 0, 1) };
+    case 'result':
+      return {
+        ...base,
+        ring: s.outcome === 'none' ? 'none' : s.outcome,
+        ringFade: clamp(s.resultLeft / RESULT_SEC, 0, 1),
+      };
+    default:
+      return base;
+  }
 }
 
 /** 张力档位，给 HUD 上那条读数用。`tension` 是连续量，这里只分三档好做颜色。 */

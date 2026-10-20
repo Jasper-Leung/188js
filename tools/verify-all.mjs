@@ -18,6 +18,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { followSecondsFrom } from './argv-flag.mjs';
+import {
+  FACTS_REL,
+  checkNoDuplicatedFacts,
+  compareFacts,
+  computeFacts,
+  parseFacts,
+  writeFacts as writeFactsFile,
+} from './release-facts.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
@@ -98,21 +106,42 @@ if (deadRes.stderr) process.stderr.write(deadRes.stderr);
 const deadFail = deadRes.status !== 0;
 
 // ---- 文档基线：`AGENTS.md` §1 写的「当前基线」不许过期 ----
+// ---- 公开数字：唯一出处 ----
+//
+// 三道门，各治一件事：
+//
+//   1. `docs/release-facts.md` 里写的 == 这一轮真实跑出来的（治「漂」）
+//   2. 公开文档里**没有**再写一遍那些数（治「抄了三遍所以必然抄不齐」）
+//   3. `AGENTS.md` §6 的 follow 示例真的能被工具接受（治「文档里那条命令是死的」）
 //
 // **为什么放在这里而不是 `src/verify/entry.ts`。**
-// 那两个数只有这里同时有：`results.length` 在包内也能拿到，
+// 那几个数只有这里同时有：`results.length` 在包内也能拿到，
 // 但 `totalAsserts` 要等**全部跑完**才累加得出来，而判据自己是在跑的过程中
 // 被调用的——在 `entry.ts` 里问「断言总数是多少」会拿到自己还没打的那部分。
 // 所以这一道放在 runner：它是唯一不循环的地方。
 //
-// **它已经是过期两次的东西了。** `AGENTS.md` §1 那张表的全部意义就是
-// 「当前基线」，而它连续两轮落后于代码（67→71→79→实际）。
-// 上一轮评审把它记成 P1「更新基线」，那只是治标——不装门，
-// 下一轮还会再漂一次。
+// **为什么是「唯一出处」而不是「记得更新」。**
+// 以前基线写在 `AGENTS.md` 里，而同一对数字还被抄进了 `README.md`、
+// `README.zh-CN.md`、`.github/release-body.md` 和提交页——于是
+// `README.md` 写着 57 条、`README.zh-CN.md` 写着 88 条、release-body
+// 写着 116 条，**三个数都是旧的，而回归全绿**。
+// 抄三遍的东西必然抄不齐，所以治法是只留一份、别处指向它。
 //
-// 三条一起失守的写法：`npm run verify` 只看退出码，于是文档过期
-// 没有任何人会知道。
-const docsFail = checkDocBaseline(results.length, totalAsserts);
+// `--write-facts` 时**跳过门 1**（正在重写它，它当然和现实不一致），
+// 但门 2 照跑——门 2 治的正是文档，而这次跑的目的就是把文档改对。
+
+const writeFacts = process.argv.includes('--write-facts');
+const factsReal = computeFacts(results.length, totalAsserts);
+const docsFail = [];
+if (writeFacts) {
+  writeFactsFile(factsReal);
+  console.log('');
+  console.log(`  已写出 ${FACTS_REL}`);
+} else {
+  docsFail.push(...checkFactsFile(factsReal));
+}
+docsFail.push(...checkNoDuplicatedFacts());
+docsFail.push(...checkFollowExample());
 if (docsFail.length) {
   console.log('');
   for (const p of docsFail) console.log(`  ${RED}[DOC] ${p}${OFF}`);
@@ -122,14 +151,43 @@ if (docsFail.length) {
 process.exit(fail > 0 || noAssert > 0 || deadFail || docsFail.length > 0 ? 1 : 0);
 
 /**
- * `AGENTS.md` 里写着的基线，与这一轮真实跑出来的对不对得上。
+ * 门 1：唯一出处那份文件，与这一轮真实跑出来的对不对得上。
  *
- * 抓的是**三种**过期，各有各的症状：
- *   · §1 的条数 / 断言数落后 → 下一个人照着文档判断「要不要跑」会算错；
- *   · §3 的 `entry.ts` 行数落后 → 拆分进度表说谎，而那张表是用来做决定的；
- *   · 一处都找不到 → 文档被改了形状，这条判据会空转，所以要报。
+ * 抓的是**两种**过期：
+ *   · 某个键的值落后 → 下一个照着它做决定的人会算错；
+ *   · 键不在了 → 这道门会空转，所以要报（"空转的门比没有门更坏"）。
  */
-function checkDocBaseline(checkCount, assertCount) {
+function checkFactsFile(real) {
+  const problems = [];
+  let text;
+  try {
+    text = readFileSync(join(ROOT, FACTS_REL), 'utf8');
+  } catch {
+    return [`读不到 ${FACTS_REL} —— 跑一次 \`npm run facts\` 生成它`];
+  }
+  const written = parseFacts(text);
+  problems.push(...compareFacts(written, real));
+  if (!written.version) {
+    problems.push(`${FACTS_REL} 里一个键都没解析出来 —— 这道门会空转`);
+  }
+  return problems;
+}
+
+/**
+ * 门 3：`AGENTS.md` §6 的 follow 示例必须真的被工具接受。
+ *
+ * 抓的是**第四种过期**：文档里那条命令本身是死的。
+ * 本轮就撞上过——`AGENTS.md` §6 与 `ai-play.mjs` 的用法注释都写着
+ * `--follow --follow 90`，而解析取**第一个** `--follow`，
+ * 于是 `argv[i+1]` 是 `'--follow'` 自己、`Number()` 出 NaN、
+ * **静默跑成默认的 30 秒**；而 30 秒的报告看起来完全合理。
+ *
+ * 放在这道门里而不是 `src/verify/`：它和上面两条一样是
+ * 「文档说的」对「真实跑出来的」，而且用的是**同一个**解析函数
+ * （`tools/argv-flag.mjs`），不是抄一份逻辑来验。
+ * 加在这里还有一个好处：**它不碰 `results.length`，所以不会动基线。**
+ */
+function checkFollowExample() {
   const problems = [];
   let text;
   try {
@@ -137,76 +195,6 @@ function checkDocBaseline(checkCount, assertCount) {
   } catch {
     return ['读不到 AGENTS.md'];
   }
-
-  // §1：`npm run verify     # 无头回归：79 条 / 1274 条断言 …`
-  const headline = /无头回归：\s*(\d+)\s*条\s*\/\s*(\d+)\s*条断言/.exec(text);
-  if (!headline) {
-    problems.push('AGENTS.md §1 里找不到「无头回归：N 条 / N 条断言」那一行——基线的写法变了，这条门会空转');
-  } else {
-    if (Number(headline[1]) !== checkCount) {
-      problems.push(
-        `AGENTS.md §1 写的是 ${headline[1]} 条，实际 ${checkCount} 条（新增/删除判据后要改这里）`,
-      );
-    }
-    if (Number(headline[2]) !== assertCount) {
-      problems.push(
-        `AGENTS.md §1 写的是 ${headline[2]} 条断言，实际 ${assertCount} 条`,
-      );
-    }
-  }
-
-  // §1 第二处：`断言 1274 条、0 条红`
-  const tail = /断言\s*(\d+)\s*条、\s*0\s*条红/.exec(text);
-  if (!tail) {
-    problems.push('AGENTS.md §1 里找不到「断言 N 条、0 条红」那一句');
-  } else if (Number(tail[1]) !== assertCount) {
-    problems.push(`AGENTS.md §1 第二处写的是 ${tail[1]} 条断言，实际 ${assertCount} 条`);
-  }
-
-  // §4 的命令块：`npm run verify      # 87 条 / 1417 断言`
-  //
-  // 为什么要扫**不止 §1**：同一对数字在文里出现了三次（§1 两处 + §4 一处），
-  // 而前两次都过期过一次。只钉住 §1 的话，另两处会安静地烂在那儿。
-  // 代价是得躲开正文里那些**历史**叙述（"67→71→79 那两次"）——
-  // 所以模式要求 `# N 条 / N 断言` 的紧邻写法，正文里那种不带这个形状。
-  const assertsIn = /#\s*(\d+)\s*条\s*\/\s*(\d+)\s*断言/.exec(text);
-  if (!assertsIn) {
-    problems.push('AGENTS.md §4 里找不到「# N 条 / N 断言」那一行');
-  } else {
-    if (Number(assertsIn[1]) !== checkCount) {
-      problems.push(`AGENTS.md §4 写的是 ${assertsIn[1]} 条，实际 ${checkCount} 条`);
-    }
-    if (Number(assertsIn[2]) !== assertCount) {
-      problems.push(`AGENTS.md §4 写的是 ${assertsIn[2]} 条断言，实际 ${assertCount} 条`);
-    }
-  }
-
-  // §3：`entry.ts` 仍有 **9,214 行**
-  // 正则容得下 markdown 粗体——原文写的是 `仍有 **9,214 行**`，
-  // 而 `**` 卡在数字前面会让这条门误报成「写法变了」。
-  const entry = /`entry\.ts`\s*仍有\s*\**\s*([\d,]+)\s*\**\s*行/.exec(text);
-  if (!entry) {
-    problems.push('AGENTS.md §3 里找不到「`entry.ts` 仍有 N 行」——拆分进度表的写法变了');
-  } else {
-    const actual = readFileSync(join(ROOT, 'src', 'verify', 'entry.ts'), 'utf8').split('\n').length;
-    const said = Number(entry[1].replace(/,/g, ''));
-    if (Math.abs(said - actual) > 2) {
-      problems.push(`AGENTS.md §3 写 entry.ts ${said} 行，实际 ${actual} 行`);
-    }
-  }
-
-  // §6：`npm run ai:play -- --follow …` 的示例必须真的被工具接受
-  //
-  // 抓的是**第四种过期**：文档里那条命令本身是死的。
-  // 本轮就撞上过——`AGENTS.md` §6 与 `ai-play.mjs` 的用法注释都写着
-  // `--follow --follow 90`，而解析取**第一个** `--follow`，
-  // 于是 `argv[i+1]` 是 `'--follow'` 自己、`Number()` 出 NaN、
-  // **静默跑成默认的 30 秒**；而 30 秒的报告看起来完全合理。
-  //
-  // 放在这道门里而不是 `src/verify/`：它和上面三条一样是
-  // 「文档说的」对「真实跑出来的」，而且用的是**同一个**解析函数
-  // （`tools/argv-flag.mjs`），不是抄一份逻辑来验。
-  // 加在这里还有一个好处：**它不碰 `results.length`，所以不会动 §1 的基线。**
   const followLines = [...text.matchAll(/npm run ai:play -- --follow[^\n]*/g)];
   if (!followLines.length) {
     problems.push('AGENTS.md §6 里找不到「npm run ai:play -- --follow」的示例——写法变了，这条门会空转');
@@ -216,7 +204,6 @@ function checkDocBaseline(checkCount, assertCount) {
       // **先把行尾注释切掉再取最后一个 token。**
       // 漏掉这一步的话，`--follow 90   # 跟路骑 90 秒` 的最后一个 token 是
       // 「秒」，`Number()` 出 NaN → 整行被跳过 → 这条门从第一天起就是空的。
-      // （写完这条判据后的第一轮自测就撞上了这个形状，见 REVIEW-round11 的返工记录。）
       const body = line.replace(/^.*?ai:play\s+--\s*/, '').split('#')[0].trim();
       const args = body ? body.split(/\s+/) : [];
       const want = Number(args[args.length - 1]);
@@ -226,11 +213,10 @@ function checkDocBaseline(checkCount, assertCount) {
       if (got !== want) {
         problems.push(
           `AGENTS.md §6 的「${line}」写的是 ${want} 秒，工具实际会跑 ${got} 秒` +
-            '（秒数只写一次 `--follow`，重复写会静默回落到默认值）',
+          '（秒数只写一次 `--follow`，重复写会静默回落到默认值）',
         );
       }
     }
   }
-
   return problems;
 }

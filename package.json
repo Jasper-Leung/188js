@@ -32,6 +32,7 @@
     "promo:wt-probe": "node tools/wt-probe.mjs",
     "promo:walkthrough": "node tools/walkthrough.mjs",
     "ai:play": "node tools/ai-play.mjs",
+    "facts": "npm run build && node tools/verify-all.mjs --write-facts && npm run build",
     "verify": "node tools/verify-all.mjs"
   },
   "dependencies": {

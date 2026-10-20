@@ -45,6 +45,7 @@ import {
   SphereGeometry,
   CylinderGeometry,
   TorusGeometry,
+  RingGeometry,
 } from 'three';
 import type { PerspectiveCamera } from 'three';
 import { WATER_VERT, WATER_FRAG } from '../shaders/world';
@@ -54,10 +55,37 @@ import {
   createFishState,
   stepFish,
   tensionBand,
+  xrHudState,
+  STRIKE_PRELUDE_SEC,
   type FishOutcome,
   type FishState,
 } from '../game/fishing';
 import { clamp } from '../core/math';
+
+/**
+ * 头显读数里状态环的配色。
+ *
+ * **和 DOM 那一版用同一套色**（`ui/styles.css` 的
+ * `.g-lakeside-bar-fill[data-band=...]` 与 `[data-state="strike"]`），
+ * 于是同一件事在桌面与头显里长一个样——玩家在头显里学会的
+ * "黄=紧、红=要断"，换到桌面上还是这个意思。
+ */
+const XR_RING_COLORS: Record<string, number> = {
+  none: 0x6f8f88,
+  ready: 0x6f8f88,
+  strike: 0xffd98a,
+  caught: 0x7fc7a8,
+  snapped: 0xe07a5f,
+  escaped: 0x9aa4a0,
+  missed: 0x9aa4a0,
+};
+
+/** 张力档位配色。同样取自 DOM 那一版。 */
+const XR_BAND_COLORS: Record<string, number> = {
+  calm: 0x7fc7a8,
+  tight: 0xe8c46a,
+  danger: 0xe07a5f,
+};
 
 /** 地形模型。**只有这一处**知道它叫什么，改名时不会漏掉第二个字符串。 */
 export const LAKESIDE_MODEL = 'res://models/lakeside.glb';
@@ -254,10 +282,117 @@ export class Lakeside {
   private time = 0;
   private loading: Promise<void> | null = null;
 
+  /**
+   * 头显里那套**世界空间**读数。
+   *
+   * ## 它挂在相机下面，不在场景里
+   *
+   * three 在 XR 会话里会**改写游戏相机的世界变换**——`WebXRManager` 的
+   * `updateUserCamera()` 把相机的 `matrix` 换成头显位姿（见
+   * `node_modules/three/src/renderers/webxr/WebXRManager.js`）。
+   * 所以挂在相机上的东西天然跟着头走，而挂在场景里的会留在原地。
+   *
+   * 挂相机的另一个好处：`World.setWorldVisible()` **特意跳过相机和挂架**
+   * （它要把湖边之外的都藏掉，但相机必须留着），
+   * 所以这块 HUD 不会在退出湖边时被一起藏掉——它自己管自己的 `visible`。
+   *
+   * ## 为什么需要它
+   *
+   * 桌面与手机上的读数在 `ui/lakesidePanel.ts` 的 **DOM** 里，
+   * 而沉浸式 VR 会话里 DOM **不会进头显**。
+   * 扳机的输入是通的（`core/xr.ts` 派发成真的 `Space`），
+   * 但没有这块几何，玩家就看不见该什么时候点、也看不见张力——
+   * 而钓鱼的全部玩法就是这两件事。详见 `game/fishing.ts` 的 `xrHudState()`。
+   */
+  private xrHud = new Group();
+  /** 状态环。咬钩窗口里快闪、空闲时慢呼吸、收场时是结果色。 */
+  private xrRing!: Mesh;
+  private xrRingMat!: MeshBasicMaterial;
+  /** 张力条。轨道 + 填充；填充从左边缘往右长。 */
+  private xrBarTrack!: Mesh;
+  private xrBarFill!: Mesh;
+  private xrBarFillMat!: MeshBasicMaterial;
+
   constructor(camera: PerspectiveCamera) {
     this.camera = camera;
     this.group.name = 'lakeside';
     this.group.visible = false;
+    this.buildXrHud();
+  }
+
+  /**
+   * 搭那块头显读数。
+   *
+   * **全是无光照的平面**（`MeshBasicMaterial`）：头显里那点光线下，
+   * 受光照的材质会暗到看不见，而这块东西必须**永远读得出来**。
+   * 几何也刻意做成最便宜的——两个平面加一个环，没有贴图、没有额外 draw call 负担。
+   */
+  private buildXrHud(): void {
+    this.xrHud.name = 'lakeside-xr-hud';
+    this.xrHud.visible = false;
+    this.xrHud.renderOrder = 10;
+    // 相机是**渲染相机**，而 `setWorldVisible()` 明确跳过它——
+    // 所以挂在它下面不会被"藏掉世界"那一步一起带走。
+    this.camera.add(this.xrHud);
+
+    // 状态环。RingGeometry 躺在 XY 平面、法线朝 +Z，
+    // 而相机朝 -Z 看——所以它**正对着脸**，不需要翻面。
+    this.xrRingMat = new MeshBasicMaterial({ color: 0x6f8f88, transparent: true, opacity: 0.9 });
+    this.xrRing = new Mesh(new RingGeometry(0.095, 0.135, 40), this.xrRingMat);
+    this.xrRing.position.set(0, -0.17, -1.15);
+    this.xrHud.add(this.xrRing);
+
+    // 张力条。轨道是暗的，填充按张力往右长。
+    const BAR_W = 0.42;
+    const BAR_H = 0.03;
+    const trackMat = new MeshBasicMaterial({ color: 0x10181a, transparent: true, opacity: 0.75 });
+    this.xrBarTrack = new Mesh(new PlaneGeometry(BAR_W, BAR_H), trackMat);
+    this.xrBarTrack.position.set(0, -0.34, -1.15);
+    this.xrHud.add(this.xrBarTrack);
+
+    // 填充从**左边缘**往右长，所以它挂在一个锚点下面、
+    // 自己的原点偏在右端——缩放时左边缘不动。
+    const anchor = new Group();
+    anchor.position.set(-BAR_W / 2, -0.34, -1.15);
+    this.xrHud.add(anchor);
+    this.xrBarFillMat = new MeshBasicMaterial({ color: 0x7fc7a8, transparent: true, opacity: 0.95 });
+    this.xrBarFill = new Mesh(new PlaneGeometry(BAR_W, BAR_H), this.xrBarFillMat);
+    this.xrBarFill.position.set(BAR_W / 2, 0, 0);
+    anchor.add(this.xrBarFill);
+  }
+
+  /**
+   * 把这一帧的读数刷到那块几何上。
+   *
+   * **只有 XR 会话里才可见**：桌面上有 DOM 那一版，
+   * 两套同时出现会变成"同一个东西画了两遍"。
+   */
+  private updateXrHud(inXR: boolean): void {
+    if (!inXR) {
+      this.xrHud.visible = false;
+      return;
+    }
+    const st = xrHudState(this.fish);
+    const showRing = st.ring !== 'none';
+    this.xrRing.visible = showRing;
+    this.xrBarTrack.visible = st.tensionVisible;
+    this.xrBarFill.visible = st.tensionVisible;
+    this.xrHud.visible = showRing || st.tensionVisible;
+    if (!this.xrHud.visible) return;
+
+    if (showRing) {
+      this.xrRingMat.color.setHex(XR_RING_COLORS[st.ring]);
+      // 脉动只做**缩放**：改颜色会让"亮=该点"这条语义在呼吸时被冲淡。
+      const amp = st.ring === 'strike' ? 0.18 : 0.05;
+      const s = 1 + amp * st.ringPulse;
+      this.xrRing.scale.set(s, s, 1);
+      this.xrRingMat.opacity = st.ringFade * (st.ring === 'strike' ? 0.55 + 0.45 * st.ringPulse : 0.9);
+    }
+    if (st.tensionVisible) {
+      this.xrBarFillMat.color.setHex(XR_BAND_COLORS[st.band]);
+      // 填充从左边缘往右长：缩放的是**宽度**。
+      this.xrBarFill.scale.x = Math.max(0.0001, st.tension);
+    }
   }
 
   /**
@@ -590,6 +725,9 @@ export class Lakeside {
 
   exit(): void {
     this.group.visible = false;
+    // 头显读数挂在**相机**下面，不在 `group` 里——
+    // 所以退出这一屏时必须自己收起来，否则它会跟着相机留在主世界里。
+    this.xrHud.visible = false;
     this.bobber?.parent?.remove(this.bobber ?? new Object3D());
     if (this.bobber) this.group.add(this.bobber);
     this.bobber && (this.bobber.visible = false);
@@ -681,6 +819,7 @@ export class Lakeside {
 
     this.updateBobber(dt, before);
     this.applyPanoToCamera();
+    this.updateXrHud(inXR);
 
     return {
       fish: this.fish,
@@ -695,7 +834,7 @@ export class Lakeside {
       return f.outcome === 'caught' ? 'caught' : f.outcome === 'snapped' ? 'snapped'
         : f.outcome === 'escaped' ? 'escaped' : 'missed';
     }
-    if (f.phase === 'bite') return f.biteLeft <= 0.35 ? 'strike' : 'idle';
+    if (f.phase === 'bite') return f.biteLeft <= STRIKE_PRELUDE_SEC ? 'strike' : 'idle';
     if (f.phase === 'reeling') return 'tension';
     return 'idle';
   }

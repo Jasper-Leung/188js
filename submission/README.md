@@ -103,7 +103,8 @@ ffmpeg -i promo/footage/07-walkthrough-vo.mp4 -vf scale=1280:-2,fps=30 \
 2. **不说「零贴图」。** 准确说法是：路面/地形/草皮/水面不下载任何贴图文件（着色器算），
    13 个驿站模型里 7 座代码生成、0 图片字节，5 座碎片驿站是 Tripo 模型、自带贴图。
    全项目共 258 张内嵌贴图，说成「零贴图」被人数一遍就穿了（表单 §0.3）。
-3. **包体数字用实测值**：游戏本体 20.77 MB / 首屏 3.45 MB / JS 280 KB gzip，
+3. **包体数字不手写**：页面上的体积由 `tools/build-submission.mjs` 在构建时量出来填进去，
+   回归条数从唯一那份 [`docs/release-facts.md`](../docs/release-facts.md) 读。
    不写 press kit 里那个 12.8 MB，也不写 README 里过期的 8.6 MB（表单 §0.2）。
 
 ## 本地预览

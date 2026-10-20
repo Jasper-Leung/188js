@@ -30,6 +30,8 @@
 import { existsSync, mkdirSync, readFileSync, statSync, copyFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
+import { FACTS_REL, parseFacts } from './release-facts.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'submission');
@@ -209,12 +211,80 @@ function bake(html, values) {
 }
 
 function dirSize(dir) {
+  // `dist/submission` 在这一行被调用时**还不存在**（它后面才建），
+  // 所以这里必须容错——否则量体积的那一步先把构建自己弄崩了。
+  if (!existsSync(dir)) return 0;
   let total = 0;
   for (const e of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, e.name);
     total += e.isDirectory() ? dirSize(p) : statSync(p).size;
   }
   return total;
+}
+
+/**
+ * 构建时**实测**的那些数。
+ *
+ * ## 为什么页面上不写死
+ *
+ * 这一页原来把体积抄在 HTML 里，而抄进去的那一版已经过期过：
+ * 页面写着 21.41 MB、17.47 MB、279 KB，而实际是 22.94 MB、18.21 MB、339 KB。
+ * 更糟的是它**自己说不清口径**——「首屏必下 1.13 MB」下面写的口径是
+ * 「index.html + 入口 JS + CSS + 字体子集」，可那四项加起来是 1.31 MB。
+ * 数字和口径各说各的，而没人会去算。
+ *
+ * 所以：**数字量出来，口径也写清，页面自己填。**
+ *
+ * ## 口径（三个数，别混）
+ *
+ * · `payloadSize`  游戏本体 = 整个 `dist/` 去掉 `dist/submission/`（这一页的素材）
+ * · `modelsSize`   其中模型 = `dist/models/`
+ * · `firstScreen`  首屏必下 = `index.html` + 入口 JS + CSS + **UI 字体子集**
+ *   （手写体是懒加载的，不在里面；任何模型都不在里面）
+ */
+function measureBuild() {
+  const dist = join(ROOT, 'dist');
+  if (!existsSync(dist)) return {};
+  const assets = join(dist, 'assets');
+  const jsFile = existsSync(assets) ? readdirSync(assets).find((f) => f.endsWith('.js')) : null;
+  const cssFile = existsSync(assets) ? readdirSync(assets).find((f) => f.endsWith('.css')) : null;
+  // **走一遍而不是相减。**
+  //
+  // 相减（`总大小 - submission 的大小`）看着等价，实际上不是：
+  // 这一行跑的时候 `dist/submission` 还是**上一次**build 留下的，
+  // 它的体积可能已经变了（换了录屏、换了海报），
+  // 于是减掉一个旧值、留一个新值——数字随重建顺序漂移。
+  //
+  // 走一遍、顶层直接跳过 `submission`，就与它存不存在无关。
+  let payload = 0;
+  let fileCount = 0;
+  const walk = (dir, top) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (top && e.name === 'submission') continue;
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p, false);
+      else {
+        payload += statSync(p).size;
+        fileCount++;
+      }
+    }
+  };
+  walk(dist, true);
+  const models = dirSize(join(dist, 'models'));
+  const firstScreen = ['index.html', 'fonts/ui.woff2'].reduce((sum, rel) => {
+    const p = join(dist, rel);
+    return sum + (existsSync(p) ? statSync(p).size : 0);
+  }, 0)
+    + (jsFile ? statSync(join(assets, jsFile)).size : 0)
+    + (cssFile ? statSync(join(assets, cssFile)).size : 0);
+  return {
+    payloadSize: mb(payload),
+    modelsSize: mb(models),
+    modelsShare: `${Math.round((models / payload) * 100)}%`,
+    firstScreenSize: mb(firstScreen),
+    jsGzipSize: jsFile ? `${Math.round(gzipSync(readFileSync(join(assets, jsFile))).length / 1024)} KB` : '—',
+    fileCount: String(fileCount),
+  };
 }
 
 const cfg = readConfig();
@@ -244,6 +314,26 @@ const poster = resolveMedia('videoPoster');
 
 // 片长写在 site.json 里（没装 ffprobe，脚本不去猜），体积是**量出来的**
 values.videoSize = video && !video.remote ? mb(video.size) : (cfg.videoSize ?? '—');
+
+// 页面上那几个体积：**量出来的**，不是抄进去的（见 `measureBuild()`）。
+Object.assign(values, measureBuild());
+
+// 回归条数 / 断言数只有**跑过回归**才知道，所以那两个数从唯一那一份读：
+// `docs/release-facts.md`。而 `npm run verify` 的 [DOC] 门保证它和现实一致——
+// 于是这一页显示的条数不可能是旧的。
+//
+// 读不到时写「—」而不是猜一个：那是"还没量"，不是"是 0"。
+const factsPath = join(ROOT, FACTS_REL);
+if (existsSync(factsPath)) {
+  const facts = parseFacts(readFileSync(factsPath, 'utf8'));
+  values.checksCount = facts.checks ?? '—';
+  values.assertsCount = facts.asserts ?? '—';
+  values.i18nKeys = facts.i18n_keys ?? '—';
+} else {
+  values.checksCount = '—';
+  values.assertsCount = '—';
+  values.i18nKeys = '—';
+}
 
 // 视频不在的时候把页面标成缺媒体，CSS 会收起播放器、换成一句说明，
 // 而不是给评委一个点了没反应的播放器。

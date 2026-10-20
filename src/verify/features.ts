@@ -88,6 +88,8 @@ import {
   holdMeaning,
   stepFish,
   tensionBand,
+  xrHudState,
+  STRIKE_PRELUDE_SEC,
   type FishPhase,
 } from '../game/fishing';
 import { areaRectInto } from '../game/minigames/cloud';
@@ -1372,7 +1374,7 @@ function registerFishingChecks(check: CheckFn): void {
         let saidStrikeTooEarly = false;
         for (let i = 0; i < 200 && s.phase === 'bite'; i++) {
           const m = holdMeaning(s);
-          const inWindow = s.biteLeft <= 0.35;
+          const inWindow = s.biteLeft <= STRIKE_PRELUDE_SEC;
           if ((m === 'strike') !== inWindow) saidStrikeTooEarly = true;
           stepFish(s, 1 / 60, false);
         }
@@ -1394,6 +1396,143 @@ function registerFishingChecks(check: CheckFn): void {
         ? probs.join('；')
         : `可赢(${win.outcome}) · 一直按住 ${hold.outcome} · 一直松手 ${loose.outcome}`
           + ` · 咬钩窗 ${BITE_WINDOW_SEC}s · 24 个 seed 落出 ${ranges.size} 个距离 / ${kinds.size} 种鱼`,
+      asserts,
+    );
+  });
+
+  /**
+   * 头显里能不能**不按键盘**把一局鱼钓完。
+   *
+   * ## 它量的不是「VR 支不支持」，是三件具体的事
+   *
+   * 1. **输入通不通** —— 扳机被派发成真 `Space`（`core/xr.ts`），
+   *    而钓鱼那台机器的唯一输入就是「确认键按住中」。
+   *    这两段要是没接上，症状是「按扳机什么也没发生」。
+   * 2. **读数看不看得见** —— 桌面那套读数在 DOM 里，而 **DOM 不进头显**。
+   *    所以必须有一套**场景里的几何**，而且得挂在**相机**下面：
+   *    three 在 XR 会话里会改写相机的世界变换，挂在相机上的东西才跟着头走。
+   * 3. **时机对不对** —— 咬钩提示环只在**真正的窗口**里亮，
+   *    前兆那 0.35 秒不亮（和 `holdMeaning` 用同一个窗口常量）。
+   *
+   * 这三件事任何一件断了，症状都是同一句「按了没反应」——
+   * 而头显里没有任何提示告诉玩家键被换掉了。
+   */
+  check('verify_xr_fishing', () => {
+    let asserts = 0;
+    const probs: string[] = [];
+
+    // 1. 空闲：环是「可以抛了」，而张力条不该在。
+    asserts++;
+    {
+      const s = createFishState(11);
+      const st = xrHudState(s);
+      if (st.ring !== 'ready') probs.push(`空闲时环是 ${st.ring}，不是 ready —— 玩家不知道可以抛竿`);
+      if (st.tensionVisible) probs.push('空闲时张力条是可见的 —— 没有鱼在拉，多出来一条空条');
+    }
+
+    // 2. 前兆不算提示；真正的窗口里必须亮。
+    asserts++;
+    {
+      const s = createFishState(11);
+      castFish(s);
+      for (let i = 0; i < 600 && s.phase !== 'bite'; i++) stepFish(s, 1 / 60, false);
+      if (s.phase !== 'bite') {
+        probs.push('走不到 bite 相位');
+      } else {
+        const prelude = xrHudState(s);
+        if (prelude.ring !== 'none') {
+          probs.push(`前兆里环就亮了（${prelude.ring}）—— 提示比窗口早，玩家会空按`);
+        }
+        let guard = 0;
+        while (s.biteLeft > STRIKE_PRELUDE_SEC && guard++ < 600) stepFish(s, 1 / 60, false);
+        const inWindow = xrHudState(s);
+        if (inWindow.ring !== 'strike') {
+          probs.push(`窗口里环是 ${inWindow.ring}，不是 strike —— 玩家看不到“现在按”`);
+        }
+      }
+    }
+
+    // 3. 收线：条跟着张力走，档位跟着档位走。
+    asserts++;
+    {
+      const s = createFishState(11);
+      castFish(s);
+      for (let i = 0; i < 600 && s.phase !== 'bite'; i++) stepFish(s, 1 / 60, false);
+      let guard = 0;
+      while (s.biteLeft > STRIKE_PRELUDE_SEC && guard++ < 600) stepFish(s, 1 / 60, false);
+      stepFish(s, 1 / 60, true);
+      if (s.phase !== 'reeling') {
+        probs.push(`窗口里点了一下却没上钩（停在 ${s.phase}）`);
+      } else {
+        const st = xrHudState(s);
+        if (!st.tensionVisible) probs.push('收线时张力条不可见 —— 玩家看不见张力，只能盲按');
+        if (Math.abs(st.tension - s.tension) > 1e-6) {
+          probs.push(`张力条长度 ${st.tension} 与实际张力 ${s.tension} 不一致`);
+        }
+        if (st.band !== tensionBand(s.tension)) {
+          probs.push(`张力档位 ${st.band} 与 tensionBand() 不一致 —— 颜色会骗人`);
+        }
+      }
+    }
+
+    // 4. 收场：环变成结果色，并且随时间淡出。
+    asserts++;
+    {
+      const s = createFishState(11);
+      castFish(s);
+      let guard = 0;
+      while (s.phase !== 'result' && guard++ < 6000) {
+        stepFish(s, 1 / 60, s.phase === 'bite' && s.biteLeft <= STRIKE_PRELUDE_SEC * 0.9);
+      }
+      if (s.phase !== 'result') {
+        probs.push('走不到收场相位');
+      } else {
+        const st = xrHudState(s);
+        if (st.ring !== s.outcome) {
+          probs.push(`收场时环是 ${st.ring}，结果是 ${s.outcome} —— 玩家不知道钓上来没有`);
+        }
+        const fade = st.ringFade;
+        stepFish(s, 1 / 60, false);
+        if (!(xrHudState(s).ringFade < fade)) probs.push('收场环没有随时间淡出');
+      }
+    }
+
+    // 5. 输入通不通：扳机 → 确认键 → 钓鱼那台机器的唯一输入。
+    asserts++;
+    {
+      const xrSrc = stripComments(readFileSync(join(process.cwd(), 'src', 'core', 'xr.ts'), 'utf8'));
+      const mainSrc = stripComments(readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8'));
+      if (!/trigger:\s*'confirm'/.test(xrSrc)) {
+        probs.push("core/xr.ts 里扳机不再映射到 'confirm' —— 头显里按了没反应");
+      }
+      if (!/selectstart/.test(xrSrc) || !/selectend/.test(xrSrc)) {
+        probs.push('core/xr.ts 里没有 selectstart/selectend —— 松手没接上，收线时按住不起来');
+      }
+      if (!/held\('confirm'\)/.test(mainSrc)) {
+        probs.push("main.ts 的湖边输入不再读 held('confirm') —— 头显里那条按住的路断了");
+      }
+    }
+
+    // 6. 读数看得见：必须是**场景里的几何**，而且挂在相机下面。
+    asserts++;
+    {
+      const lakeSrc = stripComments(readFileSync(join(process.cwd(), 'src', 'world', 'lakeside.ts'), 'utf8'));
+      if (!/camera\.add\(this\.xrHud\)/.test(lakeSrc)) {
+        probs.push('头显读数没有挂在相机下面 —— 它会留在世界里，不跟着头走');
+      }
+      if (!/updateXrHud\(inXR\)/.test(lakeSrc)) {
+        probs.push('update() 没有把 inXR 传进头显读数 —— 桌面与头显会同时显示两套读数');
+      }
+      if (!/xrHudState\(/.test(lakeSrc)) {
+        probs.push('头显读数没有走 xrHudState() —— 判定被搬进了宿主，无头回归就问不到它');
+      }
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.length
+        ? probs.join('；')
+        : '扳机→确认键通 · 前兆不亮/窗口亮 · 张力条跟着张力走 · 收场变结果色 · 读数挂在相机下',
       asserts,
     );
   });
