@@ -213,6 +213,17 @@ export function renderFacts(facts) {
   release-body、AGENTS.md 和提交页里，加一个功能要改五处，
   而漏改任何一处都不会有人知道。改成**只留这一份**之后，
   改一个功能只需要重新生成这一个文件。
+
+  **两类数，两种判法**（[DOC] 门照这个判）：
+
+  · 语义值 —— 版本、回归条数、断言条数、键数、模型个数。
+    **逐字校对**：代码变了它们就得跟着变，一个字都不能差。
+
+  · 测量值 —— 体积类（带 KB / MB 的那些）。
+    允许一点**构建环境噪声**：同一份源码在不同机器上构建，
+    字节数可能差几 KB（压缩库版本、本地工作区里多出来的未跟踪文件）。
+    容差是 ±0.02MB / ±2KB —— 比真实改动小两三个数量级，
+    又比已知噪声大一倍以上。
 -->
 
 | 键 | 含义 | 值 |
@@ -240,6 +251,23 @@ export function parseFacts(text) {
 /**
  * 对账：文件里写的 vs 这一轮真实跑出来的。
  *
+ * ## 两类数，两种判法
+ *
+ * · **语义值**（`version` / `checks` / `asserts` / `entry_lines` / `i18n_keys` /
+ *   `model_count`）—— **逐字校对**。这些是"抄错就会算错"的数：
+ *   回归从 125 条变成 124 条，是代码变了，文件必须跟着变，一个字都不能差。
+ *
+ * · **测量值**（体积类）—— 允许一个**窄容差**。
+ *   理由是它们量的不是"仓库里写了什么"，而是"构建出来是多少字节"，
+ *   而后者在同一份源码上**不一定逐字节相同**：
+ *   压缩库版本不同、本地工作区里多出来几个未跟踪文件（2026-10-20 那次
+ *   就是 17 个 Godot 的 `.import` 桩，6,698 字节），都会让结果差几 KB。
+ *   一道会被几 KB 噪声打红的门，久了就只会被绕过——那比没有门更坏。
+ *
+ * 容差取 `*_mb` 差 ≤ 0.02MB（≈21KB）、`*_kb` 差 ≤ 2KB：
+ * 都比"真实改动"小两三个数量级（加一个功能是 MB 级），
+ * 又比已知的环境噪声大一倍以上。
+ *
  * @returns {string[]} 不一致的地方。空数组 = 对得上。
  */
 export function compareFacts(written, real) {
@@ -251,11 +279,39 @@ export function compareFacts(written, real) {
       continue;
     }
     const got = real[k];
-    if (said !== got) {
+    if (said === got) continue;
+    if (!isMeasured(k)) {
       probs.push(`\`${k}\`（${label}）写的是 ${said}，实际 ${got}`);
+      continue;
     }
+    // 测量值：先分清"没量到"和"量歪了"。
+    if (got === '—') {
+      probs.push(
+        `\`${k}\`（${label}）写的是 ${said}，这一轮**没量到**`
+        + '（dist/ 不存在？先 npm run build）',
+      );
+      continue;
+    }
+    const a = Number(said);
+    const b = Number(got);
+    const tol = toleranceOf(k);
+    if (Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= tol) continue;
+    probs.push(
+      `\`${k}\`（${label}）写的是 ${said}，实际 ${got}`
+      + `（差 ${(Math.abs(a - b) ?? 0).toFixed(3)}，容差 ${tol}）`,
+    );
   }
   return probs;
+}
+
+/** 这个键是测量值吗（体积类）。语义值一律逐字校对。 */
+function isMeasured(key) {
+  return key.endsWith('_mb') || key.endsWith('_kb');
+}
+
+/** 测量值的容差。 */
+function toleranceOf(key) {
+  return key.endsWith('_mb') ? 0.02 : 2;
 }
 
 // ---------------------------------------------------------------- 公开文档不许再写一遍

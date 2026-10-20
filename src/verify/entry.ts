@@ -52,6 +52,7 @@ import { registerVehicleChecks } from './vehicle';
 import { registerAiApiChecks } from './ai';
 import { registerUiRegressionChecks } from './ui_regressions';
 import { registerDeliveryChecks } from './delivery';
+import { registerDistChecks } from './dist';
 import { registerSceneryChecks } from './scenery';
 import { GameStateManager } from '../game/state';
 import { endingOf, prefilledBackKey, backCaptionKey } from '../game/postcard/types';
@@ -9247,6 +9248,10 @@ function ensureStubDom(): StubDom {
 // 交付族（提交页 / 资产源 / 编码）在 delivery.ts 里，**在原位调用**
 // 以保住注册顺序——理由见那个文件的头。
 registerDeliveryChecks(check);
+// 产物洁净度（dist 里不许有本地垃圾）紧跟交付族：它量的也是**发出去的东西**。
+// 2026-10-20 那次 CI 红的就是它治的病——工作区里的 Godot `.import` 桩
+// 被 vite 拷进了产物，把唯一那一份公开数字的基线污染了。
+registerDistChecks(check);
 registerSceneryChecks(check);
 registerExperienceChecks(check);
 registerInteractionChecks(check, () => ensureStubDom().parent());
