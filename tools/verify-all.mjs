@@ -52,7 +52,51 @@ await build({
   loader: { '.json': 'json' },
 });
 
-const mod = await import(pathToFileURL(outFile).href);
+/**
+ * 把失败原因写进 GitHub Actions 的 **annotation**。
+ *
+ * ## 为什么需要它
+ *
+ * Actions 的日志页**未登录时是打不开的**（404），
+ * 而「CI 红了」本身不说明红在哪：GitHub 只会给一句
+ * `Process completed with exit code 1`。
+ * 于是排查一次跨平台的失败，只能靠猜。
+ *
+ * annotation 是**公开 API 就能读到**的那一份
+ * （`/commits/{sha}/check-runs` → `annotations`），
+ * 所以 CI 一红，原因不用登录就能看见。
+ *
+ * 格式是 GitHub 的 workflow command：`::error title=...::消息`。
+ * 消息里的 `%` 要写成 `%25`，换行要写成 `%0A`——
+ * 这里先把换行换成 ` | `，所以只剩 `%` 要转义。
+ */
+function annotate(level, title, message) {
+  const one = String(message ?? '')
+    .replace(/\r?\n/g, ' | ')
+    .replace(/%/g, '%25')
+    .slice(0, 900);
+  console.log(`::${level} title=${title}::${one}`);
+}
+
+/** 异常的可读形状：首行消息 + 前几行栈。 */
+function describeError(e) {
+  const err = e instanceof Error ? e : new Error(String(e));
+  const stack = (err.stack ?? '').split('\n').slice(0, 6).join(' | ');
+  return `${err.message} || ${stack}`;
+}
+
+// 打包产物在**导入阶段**就炸掉，是一种特殊失败：
+// `entry.ts` 顶层有 `await`（读真素材那几段），那里抛异常会把整份回归一起带走，
+// 控制台一个字都不打，CI 只有一个 exit code 1——**连哪条判据红的都看不到**。
+// 所以这里自己接住，并且把它写成 annotation。
+let mod;
+try {
+  mod = await import(pathToFileURL(outFile).href);
+} catch (e) {
+  annotate('error', '回归没跑起来（模块加载期抛异常）', describeError(e));
+  console.error(e);
+  process.exit(1);
+}
 const results = mod.runAll();
 
 const GREEN = '\x1b[32m';
@@ -73,12 +117,14 @@ for (const r of results) {
   if (r.asserts === 0) {
     status = `${YELLOW}NO-ASSERT${OFF}`;
     noAssert++;
+    annotate('error', `没跑成：${r.name}`, '一条断言都没打出来 —— 这条不算通过');
   } else if (r.ok) {
     status = `${GREEN}PASS${OFF}          `;
     pass++;
   } else {
     status = `${RED}FAIL${OFF}          `;
     fail++;
+    annotate('error', `判据未通过：${r.name}`, r.detail);
   }
   totalAsserts += r.asserts;
   console.log(`  ${r.name.padEnd(20)} ${status}  ${r.asserts} 条   ${DIM}${r.detail}${OFF}`);
@@ -144,7 +190,10 @@ docsFail.push(...checkNoDuplicatedFacts());
 docsFail.push(...checkFollowExample());
 if (docsFail.length) {
   console.log('');
-  for (const p of docsFail) console.log(`  ${RED}[DOC] ${p}${OFF}`);
+  for (const p of docsFail) {
+    console.log(`  ${RED}[DOC] ${p}${OFF}`);
+    annotate('error', '[DOC] 公开数字对不上', p);
+  }
 }
 
 // 退出码只作为"CI 能不能红"的信号，**不作为通过与否的判据**
