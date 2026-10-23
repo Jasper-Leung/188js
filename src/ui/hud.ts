@@ -34,6 +34,17 @@
  * 圆的大小按距离缩放，但**缩放走 transform 而不是 width/height**：
  * 改 width 会让浏览器每帧重排这个元素的子树，而 transform 由合成器
  * 直接处理，代价为零。位置同理，用 translate3d。
+ *
+ * ## 圈上的字与屏幕下方那颗提示：**字只留一份**
+ *
+ * 圈上那行「空格 · 进入小铺」与下方那颗交互提示说的是同一件事。
+ * 两处同时指着同一个动作，而其中一个还多带一个键帽——
+ * 那不叫"多一条信息"，那叫"界面吵"。
+ *
+ * 规则是：**圈负责指位置（空间），提示负责说动作（文字 + 键帽）**。
+ * 指向同一个动作时（同一个 `kind`），圈上那行**可见文字**让位给提示；
+ * 提示说的是别的东西时，圈上的字照旧。
+ * 无障碍名**留在圈上**——读屏器照常念得到，而它不占视觉位置。
  */
 import { Vector3 } from 'three';
 import { STATIONS } from '../data/route';
@@ -42,6 +53,8 @@ import { t, stationNameOf } from '../i18n';
 import { Minimap } from './minimap';
 import { button, el, setAttr, setFlag, setShown, setStyle, setText } from './dom';
 import { fragmentColors } from './theme';
+import { QuestTracker } from './questTracker';
+import { icon } from './icons';
 import type { World } from '../world/world';
 import { GameStateManager } from '../game/state';
 import { interactAt, STATION_REACH, type InteractKind } from '../game/phase';
@@ -66,6 +79,36 @@ export function stationName(i: number): string {
 export interface NextTarget {
   idx: number;
   dist: number;
+}
+
+/**
+ * 圈上那行**可见文字**要不要让位给屏幕下方那颗提示。
+ *
+ * ## 规则
+ *
+ * **圈负责指位置（空间），提示负责说动作（文字 + 键帽）。**
+ * 两处指向**同一个动作**时，圈上的字让位——否则同一个动作在屏上被念两遍。
+ *
+ * ## 为什么比的是 `kind` 而不是文字
+ *
+ * 文字是拼出来的（`空格 · 进入小铺`、`Space · 进入小铺`、触屏那套又是另一句），
+ * 而提示那侧的文案也随语言与触屏模式变。
+ * 比字符串的话，**两边文案一改就可能不再相等**，于是「字只留一份」这条悄悄失效，
+ * 而屏上还是两处都在说话。
+ * `kind` 是**动作本身**（shop / home / checkin / relic / qin / sign），
+ * 两边都从同一族判据出来（`interactAt()` 与 `world.roadsideCandidates()`），
+ * 所以它不随语言变，也不会各自漂。
+ *
+ * @param label 圈上原本要写的那行字
+ * @param ringKind 这一圈说的是哪一族动作（`interactAt()` 的结果）
+ * @param promptKind 提示正在说的是哪一族动作；null = 提示没亮
+ */
+export function ringLabelText(
+  label: string,
+  ringKind: InteractKind,
+  promptKind: string | null,
+): string {
+  return promptKind === ringKind ? '' : label;
 }
 
 /**
@@ -165,6 +208,11 @@ export interface HudOpts {
 export class Hud {
   readonly root: HTMLDivElement;
   readonly minimap: Minimap;
+  /**
+   * 主线追踪器。它**挂在碎片卡里面**（构造时传进去的是那张卡），
+   * 所以它不需要自己算位置——理由见 `questTracker.ts` 的文件头。
+   */
+  readonly quest: QuestTracker;
 
   private world: World;
   private game: GameStateManager;
@@ -219,7 +267,6 @@ export class Hud {
   }
 
   // 碎片栏
-  private fragCountEl: HTMLSpanElement;
   private cells: FragCell[] = [];
   /** 色觉友好配色。写进行内 `--sw`，所以切换时要重画而不只是挂 class。 */
   private colorblind = false;
@@ -244,6 +291,8 @@ export class Hud {
    * 不留在字段里的话，`sync()` 翻不到它，切完语言顶栏下面是旧语言。
    */
   private fragsTitleEl: HTMLSpanElement;
+  /** 组头前面那枚碎片图标。留着一个引用好让切语言时不必重建。 */
+  private fragsIconEl!: HTMLSpanElement;
   /** 路边躲避挑战的进度条。`setDodge()` 逐帧只改一个自定义属性。 */
   private dodgeEl: HTMLDivElement;
   private dodgeFill: HTMLSpanElement;
@@ -251,6 +300,14 @@ export class Hud {
   private ringX = NaN;
   private ringY = NaN;
   private ringScale = NaN;
+  /**
+   * 屏幕下方那颗提示正在说的是哪一族动作。null = 提示没亮。
+   *
+   * ★ 它决定**圈上那行可见文字要不要让位**（规则见 `ringLabelText()`）。
+   *   由 UI 层每帧推过来（提示与圈是同一个 UI 里的两件东西，
+   *   它们之间只靠这一个值说话）。
+   */
+  private promptKind: string | null = null;
 
   private touchMode = false;
   private tmp = new Vector3();
@@ -343,11 +400,25 @@ export class Hud {
 
     // ---------------- 碎片栏 ----------------
     const fb = el('div', 'g-frags');
+    /**
+     * 主线追踪器是这张卡的**头一行**。
+     *
+     * 它排在「碎片」那个组头**上面**：组头是下面那五个格子的标题，
+     * 而追踪器答的是更上位的那个问题——「这一章还差多少」。
+     *
+     * 计数（「2/5」）原来在组头右边，现在归追踪器：
+     * 它本来就是**主线**的进度（收齐五枚），放在主线那一行里才对得上；
+     * 而「碎片」这个词留给下面那五格，它说的是那五件乐事。
+     */
+    this.quest = new QuestTracker(fb, this.game);
     const fh = el('div', 'g-frags-h');
+    // 组头前面挂一枚碎片图标：这一组是「五件乐事」，
+    // 而图标比「碎片」两个字更快认出来（颜色先到，字后到）。
+    this.fragsIconEl = el('span', 'g-frags-ic');
+    this.fragsIconEl.appendChild(icon('shard'));
+    fh.appendChild(this.fragsIconEl);
     this.fragsTitleEl = el('span', 'g-frags-title', t('glossary_fragment'));
     fh.appendChild(this.fragsTitleEl);
-    this.fragCountEl = el('span', 'g-frags-n');
-    fh.appendChild(this.fragCountEl);
     fb.appendChild(fh);
 
     const strip = el('div', 'g-frags-row');
@@ -668,10 +739,26 @@ parent.appendChild(this.root);
 
     // 键位提示。铺子与回家各一套，**不复用打卡那套**——
     // 「打卡」和「进入小铺」是不同的事，标签含糊就等于没提示。
+    //
+    // ★ 可见文字**可能让位给屏幕下方那颗提示**：两者指向同一个动作时，
+    //   同一件事在屏上只留一份字（圈指位置，提示说动作）。
+    //   无障碍名照旧写全——读屏器念得到，而它不占视觉位置。
     const label = this.ringLabelFor(kind);
-    setText(this.ringLabel, label);
+    const visible = ringLabelText(label, kind, this.promptKind);
+    setText(this.ringLabel, visible);
+    setShown(this.ringLabel, !!visible);
     // 圈内那个圆是纯装饰（它是 div 不是文字），所以按钮的可访问名走 aria
     setAttr(this.ringBtn, 'aria-label', label);
+  }
+
+  /**
+   * 屏幕下方那颗提示正在说的是哪一族动作。
+   *
+   * 由 UI 层推过来（提示与圈都在 UI 里，UI 是唯一同时看得见两者的那一层）。
+   * null = 提示没亮 → 圈上的字照旧。
+   */
+  setPromptKind(k: string | null): void {
+    this.promptKind = k;
   }
 
   private hideRing(): void {
@@ -769,12 +856,14 @@ parent.appendChild(this.root);
     setText(this.fragsTitleEl, t('glossary_fragment'));
     setText(this.beatKey, t('key_relic'));
     this.syncTop(nextFragmentTarget(this.world, this.game));
-    setText(this.fragCountEl, t('fragments', { 0: this.game.getCollectedCount() }));
+    // 主线追踪器自己读 `game`（进度 / 完成 / 接没接），
+    // 所以它只需要被告知"状态可能变了"。
+    this.quest.sync();
     for (let s = 0; s < this.cells.length; s++) {
       const c = this.cells[s];
       const cnt = this.game.getStationCount(SLOT_TO_STATION[s]);
       setText(c.name, t(`fragment_${s}`));
-      setText(c.cnt, t('postcard_visit_n', { 0: cnt }));
+      setText(c.cnt, t('frag_visit_count', [cnt, ECON.MAX_VISITS_PER_STATION]));
       c.box.title = t(`fragment_tip_${s}`);
       setFlag(c.box, 'is-got', this.game.isFragmentCollected(s));
       setFlag(c.box, 'is-full', cnt >= ECON.MAX_VISITS_PER_STATION);

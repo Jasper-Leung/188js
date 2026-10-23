@@ -76,10 +76,15 @@ function contrast(a: [number, number, number], b: [number, number, number]): num
  *
  * 只有两种写法，判据只需要认这两种：
  * · `--paper:  rgb(var(--pw) var(--pg) var(--pb))`        → 原值
- * · `--paper-6: rgb(calc(var(--pw) - 40) calc(...) …)`   → 每通道减一个数
+ * · `--paper-6: rgb(calc(var(--pw) + 20) calc(...) …)`   → 每通道加/减一个数
+ *
+ * ⚠ **加号也必须认**：深底色板下「选中态」是**提亮**而不是压深
+ * （深底上「更深」等于看不见），而 `--paper-6` 写的就是 `+ 20`。
+ * 只认减号的话，这条判据会把 `--paper-6` 还原成和 `--paper` 一样的颜色，
+ * 于是对比度算成 1.00 —— **判据自己算错，还报"绿"**。
  */
 function paperTokenRgb(token: string): [number, number, number] | null {
-  // `--pw: calc(236 - var(--dusk) * 78);` —— 第一个数就是 dusk=0 的值。
+  // `--pw: calc(28 - var(--dusk) * 13);` —— 第一个数就是 dusk=0 的值。
   const base: number[] = [];
   for (const n of ['pw', 'pg', 'pb']) {
     const m = new RegExp(`--${n}:\\s*calc\\(\\s*(\\d+(?:\\.\\d+)?)`).exec(styles);
@@ -87,15 +92,18 @@ function paperTokenRgb(token: string): [number, number, number] | null {
     base.push(Number(m[1]));
   }
   // **按分号取整条声明，不能用 `rgb\\(([^)]*)\\)`。**
-  // 声明里是 `rgb(calc(var(--pw) - 40) …)` —— 括号是**嵌套**的，
+  // 声明里是 `rgb(calc(var(--pw) - 9) …)` —— 括号是**嵌套**的，
   // `[^)]*` 会在 `calc(` 那个右括号处停下，拿到半截 `calc(var(--pw`。
   const decl = new RegExp(`${token}:[^;]*;`).exec(styles);
   if (!decl) return null;
-  // 三通道各自减掉的那个数；`--paper` 没有减法，就是原值。
-  const subs = [...decl[0].matchAll(/-\s*(\d+(?:\.\d+)?)\s*\)/g)].map((m) => Number(m[1]));
+  // 三通道各自加/减掉的那个数；`--paper` 没有加减，就是原值。
+  // 符号单独抓：`+ 20` 与 `- 9` 走同一支。
+  const subs = [...decl[0].matchAll(/([+-])\s*(\d+(?:\.\d+)?)\s*\)/g)].map((m) =>
+    m[1] === '-' ? -Number(m[2]) : Number(m[2]),
+  );
   if (subs.length === 0) return base as [number, number, number];
   if (subs.length !== 3) return null;
-  return subs.map((v, i) => base[i] - v) as [number, number, number];
+  return subs.map((v, i) => base[i] + v) as [number, number, number];
 }
 
 /** 由 `entry.ts` 在原位调用一次，见文件头。 */
@@ -182,12 +190,14 @@ export function registerUiRegressionChecks(check: CheckFn): void {
    *
    * 证**激活态与面板底色之间的对比度够高**——这一条是可以算的，
    * 而原来的 bug 正是一个**可算却没算**的东西：
-   * `--paper-3` 比 `--paper` 只深 16/18/20，而卡片底色就是 `--paper`，
+   * `--paper-3` 与 `--paper` 只差一档很小的数，而卡片底色就是 `--paper`，
    * 所以「选中」这个状态全靠一个约 7% 的底色差扛着。
-   * 按 WCAG 相对亮度算下来，对比度只有 **1.19**；
-   * 换成 `--paper-6`（深 40/44/48）之后是 **1.59**。
    *
-   * 阈值取 **1.30**：它落在 1.19 与 1.59 中间。
+   * 换到深青蓝底色板之后，方向**反了过来**：深底上「压得更深」等于看不见，
+   * 所以选中态必须是**提亮**（`--paper-6` = 底色 + 20/24/28）。
+   * 按 WCAG 相对亮度算下来，与卡片底色的对比度是 **1.42**。
+   *
+   * 阈值取 **1.30**：再低就回到"读起来像透明"的那一档。
    * 这条**对改动前的实现是红的**——实测过（把 `.g-tab.is-on` 改回
    * `--paper-3`，这一条立刻 FAIL），不是事后补的一段注释。
    */

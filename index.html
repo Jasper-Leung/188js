@@ -24,6 +24,13 @@
     <title>Gift No.188</title>
 
     <!--
+      站点图标。没有它，浏览器每次都会自动去要一次 `/favicon.ico` 并拿回 404。
+      用 SVG 而不是 PNG/ICO：16px 下「188」仍然清楚，而一个文件顶三个尺寸。
+      路径是相对的（`vite.config.ts` 的 `base: './'`），GitHub Pages 的子路径部署也对。
+    -->
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+
+    <!--
       字体。24MB 的全量字库被子集成了两份：
         ui          181KB，只含游戏里真正出现过的字符，首屏加载
         handwriting 404KB，常用 3500 字，只在打开明信片背面手写时加载

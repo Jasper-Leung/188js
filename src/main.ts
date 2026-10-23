@@ -36,6 +36,8 @@ import { MiniGameHost } from './game/minigameHost';
 import { STATIONS, CENTERLINE, TOTAL_ARCLENGTH, nearestArcParam } from './data/route';
 import { ECON, SHOPS, RIDE, ROAD as ROAD_RAW } from './data/raw';
 import { UI } from './ui';
+import { promptLabelOf, type PromptState } from './ui/interactPrompt';
+import type { RadialItem } from './ui/radialMenu';
 import { setSpaceKeyOwner, stationName } from './ui/hud';
 import { clamp } from './core/math';
 import { perf } from './core/perf';
@@ -51,7 +53,7 @@ import { createLiveApi, type LiveApiHost } from './game/api';
 import type { AiObservation } from './game/api';
 import type { BeatEvent } from './game/beat';
 import { roadSpawnPose, type RideInput } from './world/ride';
-import { actionOf, codeOf, setKeymap, type GameAction } from './core/keymap';
+import { actionOf, codeLabel, codeOf, setKeymap, type GameAction } from './core/keymap';
 import { MODE_TUNE } from './world/vehicle';
 
 const bootEl = document.getElementById('boot') as HTMLElement;
@@ -622,6 +624,14 @@ class App {
    */
   private prologueBusy = false;
   /**
+   * 序章那一句「按空格接着念」提醒过了没有。
+   *
+   * 它是**每次序章一句**，不是每次按键一句——
+   * 七张卡，玩家要按七下，每一下都飘同一条 toast 就是噪音。
+   * 跟 `prologueBusy` 一起复位：重开一趟，序章重播，提醒也要重来一次。
+   */
+  private prologueHintSaid = false;
+  /**
    * 玩家自己按过 `E` 没有。
    *
    * 它是「车到货时自动换成自行车」的唯一安全阀（`onAssetLoaded()`）：
@@ -1083,6 +1093,19 @@ class App {
         arc: +nearestArcParam(p.x, p.z).toFixed(4),
       },
       chapter: { n: game.chapter, oneDone: game.chapter1Done, objective: game.objective },
+      /**
+       * 载具现状。摩托车那一项带着**零件位姿快照**——
+       * 「前轮转的时候哪些零件跟着转」这一族问题在画面上只是"看着别扭"，
+       * 而代码里没有任何东西能问"到底哪些零件在动"。
+       * 转一圈前后各取一次快照，差集就是跟着转了的零件。
+       */
+      vehicle: {
+        mode: w.ride.vehicleKind,
+        motoPose: w.ride.vehicle.motoPoseSnapshot(),
+        motoSpin: w.ride.vehicle.motoSpinMembers,
+        motoBoxes: w.ride.vehicle.motoPartBoxes(),
+        motoFrames: w.ride.vehicle.motoWheelFrames(),
+      },
       perf: { ...perf },
       nearby: { ...w.nearby },
       phase: this.phase,
@@ -1133,6 +1156,30 @@ class App {
       // 云的光标一次挪两格。宿主在跑就整段让位。
       if (this.mg.isRunning) return;
       if (this.phase === 'minigame') return;
+
+      // ---- Tab 转盘 ----
+      //
+      // 它在 `this.keys.add()` **之前**处理，有两个原因：
+      //
+      // 1. **方向键与 Esc 在骑行相位是别人的**：方向键是转向，Esc 是暂停。
+      //    转盘开着时它们归转盘，所以这一次按键根本不该进 `this.keys`
+      //    ——进了就会在同一次按键里既转向又换菜单项。
+      // 2. **Tab 在这个游戏里本来就没有任何绑定**（`keymap.ts` 的 `ACTIONS`
+      //    与 `RESERVED_CODES` 里都没有它），所以拿它不撞任何已有快捷键。
+      //
+      // ⚠ **Shift+Tab 永远不拦**：那是浏览器"往回移动焦点"的那一下，
+      //   键盘玩家靠它从界面里退出来（见 `radialMenu.ts` 的文件头）。
+      if (this.phase === 'roaming' && !e.shiftKey) {
+        if (!this.ui.radialOpen && e.code === 'Tab') {
+          e.preventDefault();
+          this.openRadial();
+          return;
+        }
+        if (this.ui.radialOpen && this.ui.handleRadialKey(e.code, e.shiftKey)) {
+          e.preventDefault();
+          return;
+        }
+      }
 
       this.keys.add(e.code);
 
@@ -1287,14 +1334,12 @@ class App {
    */
 private touchRoadside(): boolean {
   const w = this.world;
-  const cands: { kind: 'relic' | 'qin' | 'sign'; d: number }[] = [];
-  if (w.relicNearby >= 0 && w.relics.pending(w.relicNearby)) {
-    cands.push({ kind: 'relic', d: w.relicDistance });
-  }
-  if (w.qinInReach) cands.push({ kind: 'qin', d: w.qinDistance });
-  if (w.signInReach) cands.push({ kind: 'sign', d: w.signDistance });
+  // **候选表在世界那边**（`world.roadsideCandidates()`），
+  // 而界面上那颗「按 F」提示读的是同一份——
+  // 两处各列一次的话，迟早有一处先改、另一处没改，
+  // 症状是"提示说按 F，按下去却是另一件"。
+  const cands = w.roadsideCandidates();
   if (cands.length === 0) return false;
-  cands.sort((a, b) => a.d - b.d);
 
   switch (cands[0].kind) {
     case 'relic': {
@@ -1803,6 +1848,22 @@ private onConfirm() {
   }
 
   private enterWorld() {
+    /**
+     * **主线在这里接下。**
+     *
+     * 触发条件就是「刚进入游戏」——玩家第一次踏进这个世界的那一刻，
+     * 主线（收集五枚乐事）就挂在他头顶的追踪器上。
+     *
+     * `acceptMainQuest()` **自己防重入**（一次性闩锁），
+     * 所以这里两条分支都调它没有副作用：
+     * `enterWorld()` 会被走两次（序章那条路与续档那条路，
+     * 而 UI 的 `enterWorld()` 也会转到宿主这一条），
+     * 而主线只该被接下一次。
+     *
+     * 达成之后**不清掉它**：第一章的收尾仍然是回十八驿，
+     * 而"还能继续探索"要明确告诉玩家（追踪器的达成态就是这么说的）。
+     */
+    game.acceptMainQuest();
     // 幂等：UI 的 enterWorld() 也会走到这里（它只负责画 HUD），
     // 而 hook 是从 UI 内部发出来的，所以这条路径可能被走两次
     if (this.phase === 'roaming') {
@@ -1916,6 +1977,7 @@ private onConfirm() {
       // 而序章一进世界就起了播，中间没有玩家能插手的时间窗。
       // 它自己落下的地方在 `tryCheckIn()` —— 叙事段落一空就落，不靠轮询。
       this.prologueBusy = true;
+      this.prologueHintSaid = false;
       this.ui.showStorySequence(
         [
           t('prologue_0_1'),
@@ -2150,6 +2212,211 @@ private onConfirm() {
   toggleLang() {
     setLang(getLang() === 'zh' ? 'en' : 'zh');
     this.ui.syncFromState();
+    // 转盘上的名字是**函数**，所以 UI 自己会重画；
+    // 但**图标**与**键帽**是宿主给的，得重新给一遍
+    // （切语言不影响它们，可条目表要跟着当前的静音状态走）。
+    this.refreshRadialItems();
+  }
+
+  // ---------------------------------------------------------------- Tab 转盘
+
+  /**
+   * 打开 Tab 转盘。
+   *
+   * 方向键不能继续拿去转向：开着转盘时它们归转盘。
+   * 而 `this.keys` 里可能还留着**按着**的方向键（玩家是骑到一半按 Tab 的），
+   * 所以这里要把那四个码摘掉——不清的话车会一直往那个方向拐，
+   * 而玩家正忙着看菜单。
+   */
+  private openRadial() {
+    this.ui.setRadialItems(this.buildRadialItems());
+    this.ui.toggleRadial();
+    this.keys.delete('ArrowUp');
+    this.keys.delete('ArrowDown');
+    this.keys.delete('ArrowLeft');
+    this.keys.delete('ArrowRight');
+  }
+
+  /** 转盘开着的时候，把条目重画一遍（静音图标之类会变）。 */
+  private refreshRadialItems(): void {
+    if (!this.ui.radialOpen) return;
+    this.ui.setRadialItems(this.buildRadialItems());
+  }
+
+  /**
+   * 转盘上那一圈条目。
+   *
+   * ## 每一项的动作都走既有的键码
+   *
+   * 视角、载具、声音、暂停都不在这里直接实现，而是**合成一次真的按键**，
+   * 让游戏自己那个键盘监听器去消费（`AGENTS.md` §6：「动作走现有键码与
+   * KeyboardEvent，不开平行输入」）。
+   *
+   * 这么做有两个具体的好处：
+   * · 玩家改了键位，转盘上的键帽跟着变（键帽读的是 `codeOf()`）。
+   * · 两处各写一份动作的话，迟早有一处先改、另一处没改——
+   *   而症状是"转盘上的载具图标换了，可按下去还是原来那辆"。
+   */
+  private buildRadialItems(): RadialItem[] {
+    const vehicleIcon = (): RadialItem['icon'] => {
+      switch (this.world.ride.vehicleKind) {
+        case 'bike': return 'bike';
+        case 'motorcycle': return 'motorcycle';
+        case 'skate': return 'skate';
+        default: return 'walk';
+      }
+    };
+    return [
+      {
+        id: 'quest',
+        icon: 'compass',
+        label: () => t('radial_quest'),
+        run: () => this.ui.showToast(this.questSummary(), 2400),
+      },
+      {
+        id: 'items',
+        icon: 'bag',
+        label: () => t('radial_items'),
+        run: () => this.ui.items.togglePanel(),
+      },
+      {
+        id: 'camera',
+        icon: 'camera',
+        label: () => t('radial_camera'),
+        key: codeLabel(codeOf('camera')),
+        run: () => this.pressAction(codeOf('camera')),
+      },
+      {
+        id: 'vehicle',
+        icon: vehicleIcon(),
+        label: () => t('radial_vehicle'),
+        key: codeLabel(codeOf('vehicle')),
+        run: () => this.pressAction(codeOf('vehicle')),
+      },
+      {
+        id: 'sound',
+        icon: audio.fullyMuted ? 'mute' : 'sound',
+        label: () => t('radial_sound'),
+        key: codeLabel(codeOf('mute')),
+        run: () => this.pressAction(codeOf('mute')),
+      },
+      {
+        id: 'pause',
+        icon: 'pause',
+        label: () => t('radial_pause'),
+        key: codeLabel(codeOf('pause')),
+        run: () => this.pressAction(codeOf('pause')),
+      },
+    ];
+  }
+
+  /**
+   * 合成一次完整的按键（按下 + 松开），**派给 window**。
+   *
+   * 为什么不是 `dispatchKey()`（它派给焦点所在的那个元素）：
+   * 那是为了让 AI 与手柄的按键能激活**按钮**。
+   * 而这里派发的是「游戏动作」，而提示那颗按钮**自己还拿着焦点**
+   * （玩家刚点过它）——事件派到它身上，会被它自己的
+   * `wireKeyActivate` 截住（`stopPropagation`），
+   * 于是宿主那个监听器根本收不到这一次空格，
+   * 症状是"点了提示上的按钮，什么也没发生"。
+   *
+   * 派给 window 就绕开了这一层：宿主那个监听器收得到，
+   * 而按钮自己的原生激活被 `preventDefault()` 挡掉，不会双发。
+   */
+  private pressAction(code: string): void {
+    for (const type of ['keydown', 'keyup']) {
+      window.dispatchEvent(new KeyboardEvent(type, {
+        code,
+        key: code,
+        bubbles: true,
+        cancelable: true,
+        repeat: false,
+      }));
+    }
+  }
+
+  /** 主线那一行，用一句 toast 说清楚。 */
+  private questSummary(): string {
+    if (game.mainQuestDone) return `${t('quest_done')} · ${t('quest_keep_exploring')}`;
+    return `${t('quest_main_title')} · ${t('fragments', { 0: game.mainQuestProgress })}`;
+  }
+
+  // ---------------------------------------------------------------- 交互提示
+
+  /**
+   * 界面上那颗交互提示现在该显示什么。
+   *
+   * **判据全在 `world.roadsideCandidates()` 里**——那是宿主按下 F 时
+   * 走的那一份（`touchRoadside()`）。
+   *
+   * 两处各判一次的话，迟早有一处先改、另一处没改，而症状是
+   * 「提示说按 F，按下去却是另一件」——玩家不会怀疑提示，只会怀疑游戏。
+   */
+  private currentPrompt(): PromptState | null {
+    const cands = this.world.roadsideCandidates();
+    if (cands.length) {
+      // 旧物 / 琴 / 木牌：按 **F**。近的那一个吃掉这一次按键，
+      // 而排序在世界那边（`roadsideCandidates()`）。
+      const kind = cands[0].kind;
+      const ic: PromptState['icon'] = kind === 'relic' ? 'hand' : kind === 'qin' ? 'star' : 'map';
+      return {
+        icon: ic,
+        label: promptLabelOf(kind),
+        key: codeOf('interact'),
+        kind,
+        onPick: () => this.pressAction(codeOf('interact')),
+      };
+    }
+    // 驿站那一族：铺子 / 回家 / 打卡。判据是 `interactAt()`——
+    // 和脚下提示圈、宿主那一次「空格」走的是**同一个函数**。
+    //
+    // 它排在旧物后面：那一族在世界里只有一个世界坐标上的圈，
+    // 而旧物这一族**连那个都没有**——F 从来没有出现在屏幕上。
+    //
+    // ★ `kind` 一起给出去：脚下那一圈与这颗提示指向同一个动作时，
+    //   **字只留一份**（圈指位置，提示说动作）。规则见 `hud.ts` 的 `ringLabelText()`。
+    const nb = this.world.nearby;
+    const kind = interactAt({
+      shopName: nb.shopName,
+      isHome: nb.isHome,
+      objectiveReturn: game.objective === 'return',
+      hasFragment: nb.hasFragment,
+      needsVisit: nb.needsVisit,
+      distance: nb.distance,
+      reach: STATION_REACH,
+      busy: this.world.checkInStage !== 'none',
+    });
+    if (kind === 'none') return null;
+    const ic: PromptState['icon'] = kind === 'shop' ? 'shop' : kind === 'home' ? 'home' : 'check';
+    return {
+      icon: ic,
+      label: promptLabelOf(kind === 'checkin' ? 'checkin' : kind),
+      key: codeOf('confirm'),
+      kind: kind === 'checkin' ? 'checkin' : kind,
+      onPick: () => this.pressAction(codeOf('confirm')),
+    };
+  }
+
+  /**
+   * 每帧同步那颗提示。
+   *
+   * **够得着才亮，够不着就整个收掉**——不是"亮着但按了没反应"。
+   * 那一族东西最忌讳的就是后者：玩家会以为是坏了。
+   *
+   * ★ **叙事卡在前时，提示让路。**
+   *   叙事卡那一屏有自己的按钮（「继续 / 提前关闭」「跳到最后一句」），
+   *   而提示的药丸就摆在屏幕下方中线——手机横屏时两者**重叠**，
+   *   于是那一块既被字压住，点下去还会打到提示上（它会触发一次确认动作）。
+   *   叙事是前景，提示是背景：**前景在前，背景让路。**
+   *
+   *   而这条闸门**不在这里**：它在提示组件自己身上
+   *   （`InteractPrompt` 的 `blocked`，见 `interactPrompt.ts` 的文件头）——
+   *   那里同时握着提示与叙事卡，是唯一拿得到两者的那一层。
+   *   所以这里照常把状态推过去，亮不亮由组件自己判。
+   */
+  private syncPrompt(): void {
+    this.ui.setPrompt(this.phase === 'roaming' ? this.currentPrompt() : null);
   }
 
   // ---------------------------------------------------------------- 打卡
@@ -2165,7 +2432,31 @@ private onConfirm() {
 
   tryCheckIn() {
     if (this.phase !== 'roaming') return;
-    // 序章那七张叙事段落还在屏上时，**打卡让路**。
+    // ---- 屏上有叙事段落时，这一下空格先归它 ----
+    //
+    // 故事卡是**定时卡**：它自己读满就退场，**不吃按键**
+    // （吃按键的是对白框，见 `dialogue.ts` 的捕获阶段）。
+    // 所以序章那七张摆在屏上的时候，玩家按空格**什么都不会发生**：
+    // 打卡在这里让开，故事卡又不理按键。
+    // 玩家按了七八下，屏幕上只有一张自己慢慢走完的卡——
+    // 而空格在这个游戏里别处都是「推进」，不该是唯一一个按了没反应的键。
+    //
+    // 现在这一下有去处了：推进那张**可关闭**的卡。
+    // 关不掉的那张（路边那块碑文，它是「骑过去顺便读」的）不吃空格，
+    // 照旧留在屏上——那句话是给停下来的人读的。
+    //
+    // 「推进叙事」与「打卡」**不会**在同一下同时发生：推进了就 return。
+    // 这正是原来那个 bug 的解法（那时是反过来：吞掉这一下，两件事都不发生）。
+    if (this.ui.storyBusy && this.ui.advanceStoryCard()) {
+      // **只提醒一次。** 第一次按才告诉玩家"空格在这一段是有用的"，
+      // 之后每一下都飘同一条 toast 只会变成噪音。
+      if (!this.prologueHintSaid) {
+        this.prologueHintSaid = true;
+        this.ui.showToast(t('hint_prologue_busy'), 1800, 'reply');
+      }
+      return;
+    }
+    // 序章那七张叙事段落还在排队时，**打卡让路**。
     //
     // 实机撞到的：序章跑在 `roaming` 相位上，而故事卡是**故意不锁操作**的
     // （`narrativeBusy` 全程为假、`canRide` 也放行——那些判断都是对的），
@@ -2179,6 +2470,10 @@ private onConfirm() {
     // 为什么不清标志而是每次重新判：标志只保证"序章刚起播"这一次让路，
     // 而叙事段落随时可能被点掉或自动走完。挂在 tryCheckIn 里自查，
     // 就不会出现"序章早结束了、闸门还关着"这种僵尸状态，也不需要每帧去轮询。
+    //
+    // ⚠ 走到这里说明屏上那张**关不掉**（路边那块碑文）。
+    // 它不吃空格，但闸门照样守着：序章还在排队，
+    // 放行打卡就会让"律师函 + 一屏买不起的商品"那道屏再出现一次。
     if (this.prologueBusy) {
       if (this.ui.storyBusy) return;
       this.prologueBusy = false;
@@ -2436,11 +2731,16 @@ private onConfirm() {
     // 于是取消那一局就不会显示 "+0 coins"。
     const lvbiBefore = game.lvbi;
     game.checkIn(stationIdx);
-    // ⚠️ 取消与失败在这里仍然同价（`LVBI_MINI_LOSE`）。这是**刻意**的：
+    // **心神那一格只量这一局**：碎片第一次到访时扣的那一格是
+    // 「深度余响的代价」，它属于打卡不属于这一局，混进来会让
+    // 「我赢了，屏上却写着 −1」这种自相矛盾的话出现。
+    const moodBefore = game.mood;
+    // ⚠️ 取消与失败在**旅币**上仍然同价（`LVBI_MINI_LOSE`）。这是**刻意**的：
     // 经济常数是 1:1 移植契约的一部分，改它会动到 `verify_economy`。
-    // 本轮只修"玩家被告知了什么"，不改他拿到了多少。
+    // 本轮只改"玩家被告知了什么"与"胜负要留下什么"，不改他拿到了多少钱。
     game.onMiniGame(stationIdx, win);
     const gained = game.lvbi - lvbiBefore;
+    const moodDelta = game.mood - moodBefore;
     if (win) audio.sfx('collect');
 
     // **结算屏**。之前只有一条 toast 飘过去——这是玩家唯一确认
@@ -2451,6 +2751,7 @@ private onConfirm() {
     this.ui.showResult(outcome, st.slot, () => this.afterMiniGame(stationIdx, visit), {
       gain: gained,
       timedOut: handle.timedOut,
+      mood: moodDelta,
     });
     this.ui.syncFromState();
   }
@@ -2889,6 +3190,9 @@ private onConfirm() {
     this.world.postFixedUpdate();
     this.updateRelicHint();
     this.updateRoadsideHint();
+    // 交互提示：**够得着才亮**。它读的是世界每帧算好的那三个距离
+    // （`roadsideCandidates()`），所以这里只是把它显示出来或收掉。
+    this.syncPrompt();
     // 走开了就把「这里没有可互动的东西」重新武装上。
     this.updateSpaceReplyArm();
     this.updateLakesideHint();
@@ -3152,6 +3456,18 @@ private onConfirm() {
     perf.vegTrees = v.trees;
     perf.vegBushes = v.bushes;
     perf.phase = this.phase;
+    // **档位与"玩家动过画质"这两个字段以前是死的。**
+    //
+    // 它们在 `perf.ts` 里声明、在初始化时给了默认值（档位恒为 1、
+    // touched 恒为 false），然后**再也没有人写过**。
+    // 于是 `window.gift188.perf` 报出来的档位与真实档位无关——
+    // 玩家在 `?tier=0` 下跑，调试出口却说"中档"。
+    //
+    // 性能面板自己读的是 UI 那边的 settings，所以界面是对的；
+    // 坏掉的只有这个**公共快照**——而它正是别人（AI、脚本、排查）唯一能读到的。
+    // 两处说不同的话，没有一处是对的。
+    perf.tier = this.settings.tier;
+    perf.qualityTouched = this.settings.qualityTouched;
     // 环境声的两条输入：离水多远、天有多暗。
     // 碗的位置从 `getBasins()` 拿，不从 `Water` 上拿——水面网格只知道自己
     // 的平面，"哪片水"是世界层的事，混在一起就成了两处真相。

@@ -25,20 +25,20 @@
 | 键 | 含义 | 值 |
 |---|---|---|
 | `version` | 版本 | `1.0.2` |
-| `checks` | 回归条数 | `126` |
-| `asserts` | 断言条数 | `4203` |
-| `entry_lines` | `src/verify/entry.ts` 行数 | `9420` |
-| `i18n_keys` | 文案键数（每种语言） | `626` |
-| `js_raw_kb` | JS 原始体积（KB） | `1115` |
-| `js_gzip_kb` | JS gzip 体积（KB） | `338` |
-| `css_raw_kb` | CSS 原始体积（KB） | `39` |
+| `checks` | 回归条数 | `145` |
+| `asserts` | 断言条数 | `4434` |
+| `entry_lines` | `src/verify/entry.ts` 行数 | `9582` |
+| `i18n_keys` | 文案键数（每种语言） | `649` |
+| `js_raw_kb` | JS 原始体积（KB） | `1136` |
+| `js_gzip_kb` | JS gzip 体积（KB） | `345` |
+| `css_raw_kb` | CSS 原始体积（KB） | `43` |
 | `css_gzip_kb` | CSS gzip 体积（KB） | `9` |
-| `payload_raw_mb` | 游戏本体原始体积（MB） | `22.94` |
-| `payload_gzip_mb` | 游戏本体 gzip 体积（MB） | `19.45` |
+| `payload_raw_mb` | 游戏本体原始体积（MB） | `22.96` |
+| `payload_gzip_mb` | 游戏本体 gzip 体积（MB） | `19.46` |
 | `models_mb` | 模型合计（MB） | `18.21` |
 | `model_count` | 模型文件数 | `23` |
 | `audio_mb` | 音频合计（MB） | `2.20` |
-| `dist_total_mb` | 整个 `dist/` 体积（MB，含提交页） | `46.51` |
+| `dist_total_mb` | 整个 `dist/` 体积（MB，含提交页） | `46.54` |
 
 其余的公开数字（各别模型的大小、录屏时长、字体子集大小等）
 是**资产自身的事实**，不随功能变，所以仍然留在各自的文档里。

@@ -31,6 +31,7 @@ import { audio } from '../core/audio';
 import { TIER_KEYS, qualityHint, tierSummary } from '../core/settings';
 import { t } from '../i18n';
 import { button, el, note, row, rule, setFlag, setShown, setText } from './dom';
+import { icon, type IconName } from './icons';
 import { wireKeyActivate } from './hud';
 import type { Tier } from '../core/capability';
 import { touchMode, setTouchMode, touchModeLabel, type TouchMode } from '../core/touch';
@@ -90,6 +91,7 @@ export class PausePanel {
   private allBtn: HTMLButtonElement;
   private langBtn: HTMLButtonElement;
   private pcBtn: HTMLButtonElement;
+  private helpBtn: HTMLButtonElement;
   private helpBox: HTMLDivElement;
   /** 由 buildHelp() 在构造函数里建；`!` 是准确的，TS 只是看不穿跨方法赋值。 */
   private helpBody!: HTMLPreElement;
@@ -221,17 +223,20 @@ card.appendChild(rule());
     // ---- 明信片 / 语言 / 操作说明 ----
     // 明信片放最左：暂停的那一秒是玩家唯一会停下来想"我到底在攒什么"的时刻，
     // 而这一屏是三十天里唯一能回答那个问题的地方。
+    //
+    // 三颗都带**图标**：它们是整个暂停面板里唯一三个「动词」，
+    // 而暂停面板的其余部分全是数值与开关——一排图标能把那一组从
+    // 一片参数里拎出来，玩家不用逐字读就知道"这三颗是可以点的"。
     const tools = el('div', 'g-tools');
-    this.pcBtn = button(t('postcard_look'), {
-      cls: 'g-btn-quiet',
-      onClick: () => o.onLookPostcard?.(),
-    });
+    this.pcBtn = this.toolButton('postcard', t('postcard_look'), () => o.onLookPostcard?.());
     tools.appendChild(this.pcBtn);
-    this.langBtn = button(t('language'), { cls: 'g-btn-quiet', onClick: () => this.hooks.onLangToggle() });
+    this.langBtn = this.toolButton('globe', t('language'), () => this.hooks.onLangToggle());
     tools.appendChild(this.langBtn);
-    tools.appendChild(
-      this.caption(button(t('controls_title'), { cls: 'g-btn-quiet', onClick: () => this.setHelpOpen(true) }), 'controls_title'),
-    );
+    // ⚠ **这颗不能走 `caption()`**：caption 那一族靠 `setText(node, t(key))`
+    // 重贴，而 `setText` 会把按钮里的**图标一起洗掉**。
+    // 所以它改走 `relabelTool()`——只换名字那一格。
+    this.helpBtn = this.toolButton('keys', t('controls_title'), () => this.setHelpOpen(true));
+    tools.appendChild(this.helpBtn);
     card.appendChild(tools);
 
     this.root.appendChild(card);
@@ -251,6 +256,38 @@ card.appendChild(rule());
     }, true);
     o.parent.appendChild(this.root);
     this.sync();
+  }
+
+  /**
+   * 一颗「图标 + 名字」的按钮。暂停面板工具条上的三颗都用它。
+   *
+   * 图标是 `aria-hidden` 的（见 `icons.ts`），所以**无障碍名由按钮承担**——
+   * 这里给 `aria-label` 同一个名字。
+   *
+   * 为什么图标的**旁边还留着字**：这三颗是面板里仅有的三个动词，
+   * 而「操作说明」那一个光看图标猜不出来（问号可以是很多东西）。
+   * 图标负责让人一眼认出这是哪一类动作，字负责说清是哪一件。
+   */
+  private toolButton(ic: IconName, label: string, onClick: () => void): HTMLButtonElement {
+    const b = button('', { cls: 'g-btn-quiet g-tool-btn', onClick });
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    b.appendChild(icon(ic));
+    b.appendChild(el('span', 'g-tool-t', label));
+    return b;
+  }
+
+  /**
+   * 换一颗工具按钮的名字。**只换名字那一格**，图标原样留着。
+   *
+   * 为什么不用 `setText(btn, ...)`：那会把整颗按钮的内容换成一行字，
+   * 图标就没了——而这一轮的目标正是"文字变图标"。
+   */
+  private relabelTool(btn: HTMLButtonElement, label: string): void {
+    btn.setAttribute('aria-label', label);
+    btn.title = label;
+    const span = btn.querySelector('.g-tool-t');
+    if (span) setText(span, label);
   }
 
   // ---------------------------------------------------------------- 无障碍
@@ -679,10 +716,11 @@ for (const [key, b] of [['colorblind', this.cbBtn], ['reduce_motion', this.motio
     setFlag(this.sfxBtn, 'is-on', !audio.sfxMuted);
     setText(this.sfxBtn, audio.sfxMuted ? t('off') : t('sfx_short'));
 
-    setText(this.pcBtn, t('postcard_look'));
-    setText(this.langBtn, t('language'));
-    setText(this.finishBtn, t('finish_run'));
-    setText(this.finishHint, t('finish_run_hint'));
+    // 三颗工具按钮：换名字，不动图标（见 `relabelTool`）。
+    this.relabelTool(this.pcBtn, t('postcard_look'));
+    this.relabelTool(this.langBtn, t('language'));
+    this.relabelTool(this.helpBtn, t('controls_title'));
+    setText(this.finishBtn, t('finish_run'));    setText(this.finishHint, t('finish_run_hint'));
     setText(this.helpBody, t('help_overlay'));
     this.retranslateAccessibility();
   }

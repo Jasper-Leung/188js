@@ -217,44 +217,57 @@ body {
    * 写死 52px 时 "Envelope" 要 57px，被格子切成 "Envelop"——
    * 而 `first` 机位下车篮正好铺在这一片，缺掉的最后一个字母
    * 掉在藤篮的深色上，看起来像本来就没有那个道具。
+   *
+   * 格子现在是**图标**（见 `src/ui/itemBar.ts`），标签挪到了 title 上，
+   * 于是这条"不许写死宽度"的理由已经过去了——但规则留着：
+   * 写死宽度的话，四格会挤成一小团，而图标比字更容易糊成一团。
    */
   min-width: 52px;
   padding: 6px 8px 5px;
   text-align: center;
   border-radius: 8px;
-  border: 1px solid rgba(43, 36, 27, 0.16);
+  border: 1px solid var(--line-soft);
   /*
    * 底板**始终不透明**，未买到的格子也照常挡后面的画面。
    * 原来这里挂的是整格 `opacity: 0.42`——那等于连底板一起变半透明，
    * 于是 `first` 机位的车把/车篮从格子里透出来，标签像印在藤篮上。
    * "没买到显示成暗的轮廓"要暗的是**字**，不是**底板**。
+   *
+   * ⚠ **这里必须是字面量 rgba，不能写 `var(--paper)`**：
+   * `verify_itembar_over_body` 要从这一行**算出 alpha**（它得 ≥ 0.9），
+   * 而一个变量算不出 alpha——那条判据会从"量透明度"退化成"找得到这一行"。
+   * 代价是这一块不跟 `--dusk` 走（面板那一侧跟），而它贴在最下面、
+   * 压的是车身几何，色偏在那个位置看不出来。
    */
-  background: rgba(232, 224, 205, 0.94);
+  background: rgba(28, 46, 60, 0.94);
   backdrop-filter: blur(2px);
 }
 .g-item.is-own {
-  border-color: rgba(43, 36, 27, 0.34);
-  background: rgba(238, 231, 214, 0.97);
+  border-color: var(--line);
+  background: rgba(38, 58, 74, 0.97);
 }
 .g-item.is-sel {
-  border-color: rgba(180, 96, 48, 0.85);
-  box-shadow: 0 0 0 2px rgba(180, 96, 48, 0.22);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(226, 196, 137, 0.22);
 }
 .g-item-num {
   font: 11px/1 ui-monospace, monospace;
-  color: rgba(43, 36, 27, 0.45);
+  color: var(--ink-faint);
 }
 .g-item-ic {
   font-size: 13px;
-  color: #2b241b;
+  color: var(--ink);
   margin-top: 3px;
   white-space: nowrap;
+  /* 图标比字大一号：格子里没有别的字了，图标就是全部。 */
+  display: flex;
+  justify-content: center;
 }
 /* 没买到的：字暗下去，底板不动。 */
-.g-item:not(.is-own) .g-item-ic { color: rgba(43, 36, 27, 0.5); }
+.g-item:not(.is-own) .g-item-ic { color: var(--ink-faint); }
 .g-item-c {
   font: 10px/1.2 ui-monospace, monospace;
-  color: rgba(43, 36, 27, 0.6);
+  color: var(--ink-soft);
   min-height: 12px;
 }
 

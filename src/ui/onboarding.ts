@@ -143,6 +143,11 @@ export class Onboarding {
       // 玩家多半是在窗口关上之后才想起"F 是干什么的"。
       ['key_relic_desc', 'F'],
       ['key_item_bar_desc', '1 ~ 4'],
+      // Tab = 快捷转盘。**必须列在这里**：转盘是这一轮新增的入口，
+      // 而它没有键帽出现在任何界面上——玩家不知道有 Tab，就永远开不出它。
+      // 转盘里装着目标 / 道具 / 视角 / 载具 / 声音 / 暂停，
+      // 少了它，这一轮「界面图标化」的一大半就没人用得上。
+      ['key_radial_desc', 'Tab'],
     ];
     for (const [k, glyph] of items) {
       const r = el('div', 'g-key');

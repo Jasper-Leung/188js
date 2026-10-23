@@ -19,11 +19,22 @@
  * 的早返回（那是实现细节），而这里要的是「玩家下一步该干什么」。
  * 两者必须保持一致（买了之后状态要真的变），但不必同序。
  *
- * ## 「无价」那五块
+ * ## 「无价」那五块为什么不在架子上了
  *
- * `SHOPS.NOT_FOR_SALE` = 云/茶/琴/竹/禽。它们不能买，但**要摆在架子上**：
- * 玩家在驿铺里看见五件"无价"的东西，才会明白碎片不是钱能买的，
- * 而这一趟的目标就是把它们一件一件换回来。
+ * `SHOPS.NOT_FOR_SALE` = 云/茶/琴/竹/禽。源项目把它们摆在架子上，
+ * 是为了让玩家看见"碎片不是钱能买的"。
+ *
+ * 2026-10-23 撤下。理由是**它们占的是货架位置，而玩家要的东西不在那儿**：
+ * 开局旅币 0，架上十件商品有九件买不了，再加五件永远买不了的"无价"，
+ * 玩家看到的是一张**没有一件能按的架子**。
+ *
+ * 「碎片不是钱能买的」这句话现在由另外两处说，而且都更有针对性：
+ * · 顶栏的碎片栏（`.g-frags`）：五格 + 每格三颗点，写着到访几次；
+ * · 明信片正面的五格：空着的那几格就是"还没换回来的那几件"。
+ *
+ * 货架只留**买得了的东西**：买不了的普通商品仍然在架上，
+ * 灰按钮上写清是哪一条（旅币不够 / 需要五块碎片 / 已经买满）——
+ * 那种"按不了但你知道差什么"的格子是有用的，而"无价"那五格不是。
  */
 import { t, byLang } from '../i18n';
 import { ECON, SHOPS } from '../data/raw';
@@ -32,17 +43,6 @@ import { button, el, setDisabled, setFlag, setShown, setText } from './dom';
 import { wireKeyActivate } from './hud';
 import type { UIHooks } from './index';
 import type { GameStateManager } from '../game/state';
-
-/**
- * 碎片汉字 → 槽位下标。
- *
- * `NOT_FOR_SALE` 存的是碎片本身的字（'云'），而 `fragment_0..4` 是槽位下标。
- * 架子上要给玩家看的是**槽位**那一份（云/茶/琴/竹/禽，与 HUD 同序），
- * 所以这里把字翻成下标再走 `fragment_n`。翻不出就退回 0（云），
- * 而不是让 `t()` 返回 `⟨fragment_undefined⟩`——货架上出现一个 key 本身，
- * 比显示错一个字更容易让人以为出了 bug。
- */
-const NOT_FOR_SALE_SLOT: Record<string, number> = { 云: 0, 茶: 1, 琴: 2, 竹: 3, 禽: 4 };
 
 export interface ShopOpts {
   parent: HTMLElement;
@@ -178,9 +178,6 @@ export class ShopPanel {
     for (const g of this.game.goodsForShop(this.shopName)) {
       this.grid.appendChild(this.buildCard(g));
     }
-    for (const f of SHOPS.NOT_FOR_SALE) {
-      this.grid.appendChild(this.buildPriceless(f));
-    }
   }
 
   private buildCard(g: GoodDef): HTMLElement {
@@ -202,18 +199,6 @@ export class ShopPanel {
     return box;
   }
 
-  private buildPriceless(frag: string): HTMLElement {
-    const box = el('div', 'g-good is-nfs');
-    const head = el('div', 'g-good-h');
-    head.appendChild(el('span', 'g-good-n', t(`fragment_${NOT_FOR_SALE_SLOT[frag] ?? 0}`)));
-    head.appendChild(el('span', 'g-good-p', t('shop_nfs_title')));
-    box.appendChild(head);
-    box.appendChild(el('div', 'g-good-d', t('shop_nfs_hint')));
-    // 不可买就不放按钮：放一颗灰按钮在那里，玩家会去按它，
-    // 然后得到一句「买不了」。不存在的按钮不产生这种期待。
-    return box;
-  }
-
   /** 从 game 重新读价格与可否购买。买完东西、读档、切语言之后调。 */
   refresh(): void {
     if (!this.isOpen) return;
@@ -226,7 +211,7 @@ export class ShopPanel {
     for (const c of this.cards) {
       const block = blockReason(c.good, this.game);
       // 价格**始终**显示：买不了的时候藏掉价格，玩家会以为这东西没有价，
-      // 而「无价」在这个游戏里是一个有特定含义的词（`shop_nfs_title`）。
+      // 而"这一件要多少"正是他接下来要凑的那一笔。
       setText(c.price, t('shop_buy', { 0: c.good.price }));
       if (block) {
         setDisabled(c.btn, true);

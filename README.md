@@ -116,7 +116,7 @@ No combat, no failure screen that ends your run. A full playthrough takes about
 | Delights | five minigames — cloud, tea, qin, bamboo, bird — rotating on `(fragment slot + visit index) % 5` |
 | Economy | travel coins. Three shops, ten goods, and one budget that *requires* subtraction |
 | Spirits | 1–5. Falls but never locks; floor of 1. There is a way back up (the tea shop's clearing tea) |
-| Ending | four postcard ranks — first journey / explorer / pilgrim / master; a final two-way choice |
+| Ending | **five** postcard ranks — First Ride / Explorer / Pilgrim / Master / Full (five stations, three visits each); a final two-way choice |
 | Relics | **eight**, in two layers — a present-day monologue on the first touch, the object's *own* past on the second |
 | Chapter two | opens after the synthesis screen: three new relics (the teapot at home, the station lamp, a carving knife) at non-fragment stations, plus a past layer for each of the first five |
 

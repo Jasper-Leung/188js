@@ -26,11 +26,12 @@ import { STATIONS } from '../data/route';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROAD, ECON, SHOPS, I18N } from '../data/raw';
-import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, MeshStandardMaterial, Object3D, Color, Vector3, Group, AnimationClip, KeyframeTrack, Bone } from 'three';
+import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, MeshStandardMaterial, Object3D, Color, Vector3, Group, AnimationClip, KeyframeTrack } from 'three';
 import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';import { interactAt, STATION_REACH } from '../game/phase';
 import { camParams } from '../world/ride';
 import { Vehicle, FOOT_LATERAL_OFFSET, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, SUBJECT_LIFT, liftSubjectMaterials, type RideMode } from '../world/vehicle';
 import { assertRide, assertDemoDrive, assertSpawnHeading, assertJunctionMoment } from './ride';
+import { buildSurvivorSkeleton, SURVIVOR_LEG_BONE_NAMES } from './characterFixture';
 import { GameStateManager } from '../game/state';
 
 /** 由 `entry.ts` 在原位调用一次，见文件头「为什么是导出函数」。 */
@@ -113,36 +114,51 @@ export function registerVehicleChecks(check: CheckFn): void {
       return root;
     };
 
-    // 角色：一根骨 + 一段骑行片段（骨盆高度 0.504 = 真素材实测值）
+    // 角色：**与真素材同形的骨架** + 一个网格 + 一段骑行片段
+    // （骨盆高度 0.504 = 真素材实测值）
+    //
+    // ★ 骨架是**共享的**（`./characterFixture.ts`）：与真素材 `survivor.glb` 同形，
+    //   **八根腿骨齐全**（髋 / 大腿 / 小腿 / 脚 / 脚趾 × 左右）。
+    //
+    //   原来这里只挂了「髋骨 + 两根踝骨」，而烘焙（`bakeRideToPedals`）要的
+    //   是那八根——少一根整条烘焙就返回 null，于是每轮 verify 都打四条
+    //   「骑行腿烘焙失败（骨名对不上？）」，而真游戏里那条**根本不出现**
+    //   （真素材的骨是齐的）。
+    //
+    //   更要命的是：**没有任何一条判据问过烘焙到底跑没跑**——
+    //   夹具缺骨这件事一直只表现为「日志里多几行字」，而日志没人看。
+    //   所以下面第 11 条断言专门钉它。
     //
     // ★ **必须带一个网格**，否则 `autoScaleToHeight()` 量到空盒、恒返回 1，
     //   「缩放幂等」那条断言就变成 1 === 1 的空转。
     //   网格高 **1.0**，与真素材归一化后的身高一致（实测包围盒 y 0..0.998），
     //   所以缩放应当是 1.75/1.0 = 1.75。
-    const char = new Object3D();
-    const hips = new Bone();
-    hips.name = 'mixamorigHips';
-    char.add(hips);
-    // ★ **必须带左右踝骨**：自行车的摆位判据量的是「脚圈中心落在曲柄轴心上」
-    //   （见下面第 6 条），而脚圈中心就是两踝中点绕着转的那个点。
-    //   只挂一根髋骨的话量不到脚圈中心，摆位会退回鞍面法，那条断言就测不到
-    //   它本来要测的东西了——**测不到 ≠ 通过**，所以这里要补上。
-    //   位置取自真素材实测（角色本地、模型单位）。
-    const lf = new Bone();
-    lf.name = 'mixamorigLeftFoot';
-    lf.position.set(0.1, 0.15, 0.06);
-    char.add(lf);
-    const rf = new Bone();
-    rf.name = 'mixamorigRightFoot';
-    rf.position.set(-0.07, 0.24, 0.06);
-    char.add(rf);
+    const char = buildSurvivorSkeleton();
     const body = new Mesh(new BoxGeometry(0.4, 1.0, 0.2));
     body.name = 'charBody';
     body.position.set(0, 0.5, 0);
     char.add(body);
-    const rideTimes = new Float32Array([0, 1]);
+    // ★ 骑行片段必须有**足够的键**。
+    //
+    //   循环接缝是按「曲柄角累计走满一圈」量的，而曲柄角取的是
+    //   **左踝相对两踝中点的方位角**——只采样两帧的话，
+    //   一整圈的角度差（2π）被解缠回 0，于是量不到「踩满一圈」。
+    //
+    //   而且它有连锁后果：接缝量不到 ⇒ 播放倍率退回按步速推 ⇒
+    //   曲柄角不再等于轮角 ÷ 传动比 ⇒ 「曲柄比轮子慢 2.6 倍」那条断言会红。
+    //   症状是「一条机构断言红了」，而真正的原因是**夹具的片段太短**。
+    //
+    //   真素材那段是 120 个键 / 4.958s / 24fps；这里取 24 个键 / 1s，
+    //   同样够解缠（一帧 15°），而片段短、跑得快。
+    const RIDE_KEYS = 24;
+    const rideTimes = new Float32Array(RIDE_KEYS + 1);
+    const rideHips = new Float32Array((RIDE_KEYS + 1) * 3);
+    for (let i = 0; i <= RIDE_KEYS; i++) {
+      rideTimes[i] = i / RIDE_KEYS;
+      rideHips.set([0, 0.504, 0], i * 3);
+    }
     const rideClip = new AnimationClip('骑自行车', 1, [
-      new KeyframeTrack('mixamorigHips.position', rideTimes, Float32Array.from([0, 0.504, 0, 0, 0.504, 0])),
+      new KeyframeTrack('mixamorigHips.position', rideTimes, rideHips),
     ]);
 
     const bike = buildBike();
@@ -388,6 +404,58 @@ export function registerVehicleChecks(check: CheckFn): void {
       if (!(v.rideTimeScale > 0.5)) {
         probs.push(`骑 3 m/s 时骑行动画倍率 ${v.rideTimeScale.toFixed(3)}，踏板不动`);
       }
+    }
+
+    // 11. ★ **烘焙必须真的跑过**（夹具完整性）
+    //
+    // `bakeRideToPedals()` 把骑行片段的两条腿重烘到踏板圆上。
+    // 它要求骨架里**八根腿骨齐全**；缺一根就返回 null，
+    // 而「返回 null」在那条路上**只表现为一行日志**——
+    // 于是「夹具缺骨」这件事可以一直不被任何一条判据看见。
+    //
+    // 跑过的标志很具体：处理之后的骑行片段里，
+    // **六条腿骨的四元数轨道**（UpLeg / Leg / Foot × 左右）都在。
+    // 没有它们，说明烘焙没跑，或跑了但没写回片段。
+    asserts++;
+    {
+      const names = new Set((v.rideClips.ride?.tracks ?? []).map((t) => t.name));
+      const want = [
+        'mixamorigLeftUpLeg.quaternion',
+        'mixamorigLeftLeg.quaternion',
+        'mixamorigLeftFoot.quaternion',
+        'mixamorigRightUpLeg.quaternion',
+        'mixamorigRightLeg.quaternion',
+        'mixamorigRightFoot.quaternion',
+      ];
+      const missing = want.filter((n) => !names.has(n));
+      if (missing.length) {
+        probs.push(
+          `骑行片段里没有 ${missing.join('、')} 的轨道 —— 烘焙没跑通（腿没有被重烘到踏板上）`,
+        );
+      }
+    }
+    // 11b. 夹具的骨架必须**与真素材同形**：那八根腿骨一根都不能少。
+    //
+    // 这一条与上一条是同一件事的两面：上一条问「烘焙跑没跑」，
+    // 这一条问「为什么没跑」——骨架缺骨就是唯一的原因。
+    asserts++;
+    {
+      const missing = SURVIVOR_LEG_BONE_NAMES.filter((n) => !char.getObjectByName(n));
+      if (missing.length) {
+        probs.push(`夹具角色缺 ${missing.join('、')} —— 骨架与真素材不同形，烘焙那条路根本进不去`);
+      }
+    }
+    // 11c. ★ 烘焙之后**接缝量得到**：整条链路（烘焙 → 接缝 → 倍率 → 曲柄）都得通。
+    //
+    //   第 3 条（曲柄 = 轮角 ÷ 传动比）在烘焙之前是**靠回退分支**成立的：
+    //   量不到动画自带的曲柄转速时，倍率退回按步速推。
+    //   烘焙跑通之后它必须走**动画时钟**那条路——而那条路要求
+    //   「烘焙后的片段里脚恰好踩满一圈」。
+    //   接缝量不到 ⇒ 倍率退化成别的数 ⇒ 第 3 条会红，
+    //   而症状是「一条机构断言红了」，真正的原因是**接缝没量到**。
+    asserts++;
+    if (!v.rideSeam) {
+      probs.push('烘焙之后仍然量不到循环接缝 —— 脚没踩满一圈，播放倍率会退化成别的数');
     }
 
     // 8. ★ **反复切载具不许堆积空节点**

@@ -34,6 +34,7 @@ import { t } from '../i18n';
 import { audio } from '../core/audio';
 import { codeOf } from '../core/keymap';
 import { button, el, setAttr, setFlag, setShown, setText } from './dom';
+import { icon, iconButton, type IconName } from './icons';
 import { wireKeyActivate } from './hud';
 import { STATION_REACH } from '../game/phase';
 import type { UIHooks } from './index';
@@ -175,15 +176,19 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     // 而钓鱼那 1.15 秒的咬钩窗里按两下和按一下不是一回事。
     let pointerCast = false;
     let actionPointer = -1;
-    this.checkBtn = button(t('touch_checkin_button'), {
-      cls: 'g-touch-check',
-      onClick: () => {
-        if (pointerCast) {
-          pointerCast = false;
-          return;
-        }
-        this.pressAction();
-      },
+    this.checkBtn = button('', { cls: 'g-touch-check g-fade g-ic-btn' });
+    // 图标槽自己留着，好让状态变化时**换图标**而不是重建按钮。
+    this.checkIcEl = el('span', 'g-ic');
+    this.checkIcEl.appendChild(icon('check'));
+    this.checkBtn.appendChild(this.checkIcEl);
+    this.checkBtn.setAttribute('aria-label', t('touch_checkin_button'));
+    this.checkBtn.title = t('touch_checkin_button');
+    this.checkBtn.addEventListener('click', () => {
+      if (pointerCast) {
+        pointerCast = false;
+        return;
+      }
+      this.pressAction();
     });
     const press = (e: PointerEvent) => {
       if (actionPointer !== -1) return;
@@ -209,21 +214,21 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
 
     // ---- 右上：暂停 / 静音 ----
     const top = el('div', 'g-touch-t');
-    this.pauseBtn = button(t('touch_pause_button'), {
-      cls: 'g-touch-sq',
-      aria: t('key_pause'),
-      onClick: () => requestPause(),
-    });
-    this.muteBtn = button(t('touch_mute_button'), {
-      cls: 'g-touch-sq',
-      aria: t('key_mute'),
-      onClick: () => this.toggleMute(),
-    });
-    this.vehicleBtn = button(t('touch_vehicle'), { cls: 'g-touch-vehicle', aria: t('touch_vehicle'), onClick: () => {
+    this.pauseBtn = iconButton('pause', t('touch_pause_button'), t('touch_pause_button'), 'g-fade g-touch-sq');
+    this.pauseBtn.addEventListener('click', () => requestPause());
+    this.muteBtn = button('', { cls: 'g-touch-sq g-fade g-ic-btn' });
+    this.muteIcEl = el('span', 'g-ic');
+    this.muteIcEl.appendChild(icon('sound'));
+    this.muteBtn.appendChild(this.muteIcEl);
+    this.muteBtn.setAttribute('aria-label', t('touch_mute_button'));
+    this.muteBtn.title = t('touch_mute_button');
+    this.muteBtn.addEventListener('click', () => this.toggleMute());
+    this.vehicleBtn = iconButton('vehicle', t('touch_vehicle'), t('touch_vehicle'), 'g-fade g-touch-vehicle');
+    this.vehicleBtn.addEventListener('click', () => {
       const code = codeOf('vehicle');
       window.dispatchEvent(new KeyboardEvent('keydown', { code, key: code, bubbles: true }));
       window.dispatchEvent(new KeyboardEvent('keyup', { code, key: code, bubbles: true }));
-    } });
+    });
     this.root.appendChild(this.vehicleBtn);
     top.appendChild(this.pauseBtn);
     top.appendChild(this.muteBtn);
@@ -243,16 +248,13 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     // `click` 两条路，而那一个键会派发两次。在木牌旁，一次点按会
     // 既读出木牌文字又直接起跑躲避挑战。
     let actPointer = false;
-    this.actBtn = button(t('touch_act_button'), {
-      cls: 'g-touch-act',
-      aria: t('key_interact'),
-      onClick: () => {
-        if (actPointer) {
-          actPointer = false;
-          return;
-        }
-        this.sendInteract();
-      },
+    this.actBtn = iconButton('hand', t('touch_act_button'), t('touch_act_button'), 'g-fade g-touch-act');
+    this.actBtn.addEventListener('click', () => {
+      if (actPointer) {
+        actPointer = false;
+        return;
+      }
+      this.sendInteract();
     });
     this.actBtn.addEventListener('pointerdown', (e) => {
       actPointer = true;
@@ -351,9 +353,31 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
     this.state.moveX = 0;
     this.state.moveY = 0;
     this.paintKnob();
-    if (on) setText(this.checkBtn, t('touch_cast_button'));
-    else setText(this.checkBtn, t('touch_checkin_button'));
+    // 湖边那一屏是**抛竿**，不是打卡：图标与无障碍名都换掉。
+    // 换的是图标而不是文字——这颗按钮现在是纯图形，
+    // 所以它的名字只有一个出处：`aria-label`。
+    this.setCheckLabel(on ? t('touch_cast_button') : t('touch_checkin_button'), on ? 'hand' : 'check');
   }
+
+  /**
+   * 换那颗大按钮的图标与名字。
+   *
+   * 图标**不是每帧都换**：只有名字变了才动 DOM。
+   * `replaceChildren` 会重建子树，而 `sync()` 每帧都跑——
+   * 每帧重建一次图标是一笔真实的开销（虽然不大）。
+   */
+  private setCheckLabel(label: string, ic: IconName): void {
+    setAttr(this.checkBtn, 'aria-label', label);
+    setAttr(this.checkBtn, 'title', label);
+    if (this.checkIcon === ic) return;
+    this.checkIcon = ic;
+    this.checkIcEl.replaceChildren(icon(ic));
+  }
+
+  /** 那颗大按钮当前的图标。用来避免每帧换图标。 */
+  private checkIcon: IconName = 'check';
+  /** 那颗大按钮里的图标槽。 */
+  private checkIcEl!: HTMLSpanElement;
 
   private moveTo(e: PointerEvent): void {
     const r = this.stick.getBoundingClientRect();
@@ -378,18 +402,25 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
    * 「这里还欠一次到访吗」只有 `fragmentStationNeedsVisit()` 一个判据。
    */
   sync(): void {
-    setText(this.vehicleBtn, t('touch_vehicle'));
+    // 这一组按钮**全是图形**了，所以它们的"文案"只有一处：
+    // `aria-label`（外加同名的 `title`，给鼠标用户看）。
+    // 原来这里是 `setText(...)` 写可见文字——现在那样做会把图标洗掉。
     setAttr(this.vehicleBtn, 'aria-label', t('touch_vehicle'));
-    setText(this.pauseBtn, t('touch_pause_button'));
-    setText(this.muteBtn, t('touch_mute_button'));
-    setText(this.actBtn, t('touch_act_button'));
-    setAttr(this.pauseBtn, 'aria-label', t('key_pause'));
-    setAttr(this.muteBtn, 'aria-label', t('key_mute'));
-    setAttr(this.actBtn, 'aria-label', t('key_interact'));
+    setAttr(this.vehicleBtn, 'title', t('touch_vehicle'));
+    setAttr(this.pauseBtn, 'aria-label', t('touch_pause_button'));
+    setAttr(this.pauseBtn, 'title', t('touch_pause_button'));
+    setAttr(this.muteBtn, 'aria-label', t('touch_mute_button'));
+    setAttr(this.muteBtn, 'title', t('touch_mute_button'));
+    setAttr(this.actBtn, 'aria-label', t('touch_act_button'));
+    setAttr(this.actBtn, 'title', t('touch_act_button'));
     setAttr(this.stick, 'aria-label', t('touch_joystick_key'));
     setText(this.rotateMessage, t('touch_rotate_hint'));
     setText(this.rotateBtn, t('touch_landscape'));
     setText(this.portraitBtn, t('touch_portrait_continue'));
+    // 静音图标跟着真实状态走：喇叭有声 / 喇叭上划一道。
+    // 状态从 `audio` 读而不是自己存一份——M 键（在桌面端）会直接改 audio
+    // 而不经过任何 hook，这一侧存的那份会开始说谎。
+    this.setMuteIcon(audio.fullyMuted);
     // 湖边那一屏不跑这一段：那一侧没有驿站，也就没有"还欠一次到访吗"。
     if (this.lakesideMode) {
       setFlag(this.checkBtn, 'is-live', true);
@@ -402,9 +433,20 @@ readonly state = { moveX: 0, moveY: 0, checkInPressed: false, holdPressed: false
       nb.needsVisit &&
       nb.distance <= STATION_REACH;
     const revisited = inRange && this.game.getStationCount(nb.index) > 0;
-    setText(this.checkBtn, revisited ? t('touch_revisit_button') : t('touch_checkin_button'));
+    this.setCheckLabel(revisited ? t('touch_revisit_button') : t('touch_checkin_button'), 'check');
     setFlag(this.checkBtn, 'is-live', inRange);
   }
+
+  /** 换静音那颗的图标。**只在真的变了的时候动 DOM**。 */
+  private setMuteIcon(muted: boolean): void {
+    const want: IconName = muted ? 'mute' : 'sound';
+    if (this.muteIcon === want) return;
+    this.muteIcon = want;
+    this.muteIcEl.replaceChildren(icon(want));
+  }
+
+  private muteIcon: IconName = 'sound';
+  private muteIcEl!: HTMLSpanElement;
 
   /**
    * 全局静音。状态从 `audio` 读而不是自己存一份——M 键（在桌面端）

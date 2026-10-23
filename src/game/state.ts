@@ -7,7 +7,7 @@
  * 移植时保留了几条不太直觉但很重要的判据：
  *
  * · **幂等账本 `earnedTags`**。每一笔旅币都带一个 tag，同一个 tag 只发一次。
- *   读档重玩时 `earn_km` 每帧都在调，没有这个账本，玩家绕一圈回来
+ *   读档重玩时圈钱每圈都在调，没有这个账本，玩家绕一圈回来
  *   旅币就会凭空翻几倍。
  *
  * · **心神只有一条上行口**。原版收满五块碎片正好把心神从 4 打到 1，
@@ -45,7 +45,17 @@ export interface SaveBlob {
   economy: {
     lvbi: number;
     inv: Record<string, number>;
-    spent_km: number;
+    /**
+     * 老存档里有这个字段，本版**不再写、也不再读**。
+     *
+     * 它原来是「按公里发钱」的记账位（`LVBI_PER_KM` 那条老路）。
+     * 口径改成按圈之后，这个数没有意义了。
+     *
+     * 留着它不报错也不迁移，是**故意的**：
+     * 老存档读回来时这个键直接被忽略，玩家不会因为口径变了
+     * 丢掉已经攒下的旅币、天数和碎片——那一趟的进度比记账方式重要。
+     */
+    spent_km?: number;
     earned_tags: string[];
     seen_stations: string[];
     mood: number;
@@ -62,6 +72,12 @@ export interface SaveBlob {
     laps?: number;
     /** 累计打卡。老存档没有，按已收碎片数推出来——那是下界，不会少算 */
     check_ins?: number;
+    /**
+     * 主线状态：`1` = 已接下（刚进游戏时接下），`0` / 缺省 = 还没接。
+     *
+     * 老存档没有这个字段，按"没接"处理——那正是老存档该有的降级。
+     */
+    quest_main?: number;
   };
 }
 
@@ -237,7 +253,6 @@ export class GameStateManager {
   business = newBusiness();
   lvbi = 0;
   inv = new Map<string, number>();
-  spentKm = 0;
   earnedTags = new Set<string>();
   seenStations = new Set<number>();
   mood = ECON.MOOD_INITIAL;
@@ -328,14 +343,61 @@ export class GameStateManager {
   /** 总共多少天。 */
   static readonly DAYS_LIMIT = 30;
 
+  // ---------------------------------------------------------------- 圈钱
+  //
+  // ## 为什么这里另起一套口径，而不是照抄源项目的「每公里 +2」
+  //
+  // 源项目是 Godot 版，那条环线**真长 188 公里**，
+  // 所以 `ECON.LVBI_PER_KM = 2` 意味着「走完全程 = 376 枚」——
+  // 那是它总预算（799）的 47%，是这一趟里最大的一笔收入。
+  //
+  // 这一版是同一条路，但**缩成了一条 1228.8 米的环**。
+  // 按公里发钱在这里等于：一圈 2 枚，而铺子里最便宜的东西 40 枚。
+  // 于是 `verify_economy` 守着的那条「全清 799 / 缺口 211」
+  // **从来没有成立过**——实际能拿到的只有 423 + 2 ≈ 425，真实缺口 585。
+  // 铺子里的东西看着买得起，兜里其实一分没有。
+  //
+  // ## 改成按圈计费
+  //
+  // 一圈 = 这条环线走完一圈（`noteLap()` 触发），发 `LVBI_PER_LAP`。
+  // **最多领 `LAP_BONUS_CAP` 圈**——刚好够刷满评级（五座各三次 = 第五圈）。
+  // 领满之后再多骑不给钱：该干的事已经干完了，
+  // 再骑只是**在烧日期**（`DAYS_PER_LAP`），不是赚更多的钱。
+  //
+  // ## 数字怎么来的
+  //
+  // 源项目的总预算 799 是设计好的（缺口 211 ≈ 两盏半灯笼），
+  // 其余各项之和是 423，所以圈钱总额应该是 799 − 423 = 376。
+  // 376 除以 5 圈是 75.2——整数圈钱凑不出 376，
+  // 于是取 75 × 5 = 375：全清 798、缺口 212，与源项目的 799 / 211 只差一两枚。
+  // 差这一两枚不值得把数字凑成怪数，**玩家也永远看不到总额**。
+
+  /** 每骑完一圈发多少旅币。 */
+  static readonly LVBI_PER_LAP = 75;
+  /** 圈钱最多领几圈。第五圈刚好是刷满评级的那一圈。 */
+  static readonly LAP_BONUS_CAP = 5;
+
   /** 骑完的圈数（≥0）。落盘。 */
   laps = 0;
   /** 累计打卡次数（落盘，由 `checkIn` 自己加）。 */
   checkIns = 0;
 
-  /** 骑完一圈记一天账。**只由世界层在圈数真的 +1 时调。** */
+  /**
+   * 骑完一圈记一天账，**并且**发这一圈的旅币。
+   *
+   * 圈钱在这里发，是因为这里是**唯一**知道"圈数真的 +1 了"的地方
+   * （世界层只在中心线参数绕回去时调它）。
+   * 幂等靠 tag：`lap_1` / `lap_2` / … 每个圈只发一次，
+   * 读档重开时 `laps` 与 `earnedTags` 一起回来，不会重发。
+   *
+   * 超过 `LAP_BONUS_CAP` 之后不再发——那是**故意的**：
+   * 第五圈刚好是刷满评级的那一圈，往后多骑只是在烧日期。
+   */
   noteLap() {
     this.laps++;
+    if (this.laps <= GameStateManager.LAP_BONUS_CAP) {
+      this.earn(GameStateManager.LVBI_PER_LAP, `lap_${this.laps}`);
+    }
     this.save();
   }
 
@@ -385,6 +447,82 @@ export class GameStateManager {
     if (this.overdue) return 'objective_overdue';
     if (this.chapter1Done) return 'objective_chapter2';
     return this.objective === 'return' ? 'objective_return' : 'objective_collect';
+  }
+
+  // ---------------------------------------------------------------- 主线
+
+  /**
+   * 主线：「收集五枚碎片」。
+   *
+   * ## 为什么要有它，而不只是顶栏那一句目标
+   *
+   * 顶栏的 `objective_collect` 是一**句话**——"五件乐事散在这条路上"。
+   * 它回答的是"这一趟在干什么"，但它**不回答"我干到哪儿了"**：
+   * 那句话里没有数，玩家只能自己数顶栏那五个色块。
+   *
+   * 所以主线是另一样东西：它有**进度**（3/5）、有**状态**（进行中 / 已达成），
+   * 而且它有一个明确的**触发时刻**——刚进游戏就接下。
+   *
+   * ## 触发条件为什么是「刚进入游戏」
+   *
+   * 因为主线要**先于任何玩法**出现在玩家眼前。
+   * 如果它等到"第一次走到驿站"才接下，那么玩家在头两分钟看到的仍然是一个
+   * 没有目标的世界——而这个游戏的头两分钟恰好是它最需要说话的时候。
+   * 接下主线的动作放在 `enterWorld()` 里，于是玩家一抬头就看见
+   * 「主线 · 收集碎片 0/5」。
+   *
+   * ## 完成之后**不结束这一趟**
+   *
+   * 主线达成只是把那一格翻成"已达成"，**游戏继续**。
+   * 这一条是硬要求：这个游戏讲的是"一个人回到自己的家乡"，
+   * 讲完主要的那件事之后，这条路还在那里，玩家可以继续骑、继续摸旧物、
+   * 继续把五座各走满三次。**主线是路标，不是终点线。**
+   *
+   * 所以这里**不**有任何"完成即结算"的副作用；
+   * 第一章的收尾仍然是原来那一条路（回十八驿领东西）。
+   */
+  /** 主线是否已经接下。接下之后它一直在，直到这一趟结束。 */
+  private questMain = false;
+
+  /** 主线是否已经接下。 */
+  get mainQuestAccepted(): boolean {
+    return this.questMain;
+  }
+
+  /**
+   * 接下主线。**一次性闩锁**：返回 true 表示"这一次调用真的接下了它"。
+   *
+   * 放在 `enterWorld()` 里，而 `enterWorld()` 是**幂等**的
+   * （UI 的 `enterWorld()` 也会走到宿主那一条），所以这里必须自己防重入。
+   */
+  acceptMainQuest(): boolean {
+    if (this.questMain) return false;
+    this.questMain = true;
+    this.save();
+    return true;
+  }
+
+  /** 主线要收几枚碎片。 */
+  get mainQuestTotal(): number {
+    return ROAD.FRAGMENT_SLOT_STATION_IDX.length;
+  }
+
+  /** 主线已经收到几枚。 */
+  get mainQuestProgress(): number {
+    return this.getCollectedCount();
+  }
+
+  /**
+   * 主线是否达成。
+   *
+   * 它是**算出来的**而不是一个闩锁：达成条件就是"五枚都收齐了"，
+   * 而 `allCollected()` 已经是那个判据的唯一出处。
+   * 另存一个 `questDone` 就会多出"两个数可能对不上"这件事。
+   *
+   * ⚠ 主线**没接下**时恒为 false——没接的任务不算达成。
+   */
+  get mainQuestDone(): boolean {
+    return this.questMain && this.allCollected();
   }
 
   /**
@@ -453,10 +591,11 @@ export class GameStateManager {
     this.collected = new Map();
     for (const idx of ROAD.FRAGMENT_SLOT_STATION_IDX) this.collected.set(idx, 0);
     this.collectedFired = false;
+    // 主线也一并复位：重开一趟就是重新接一次主线。
+    this.questMain = false;
     this.lvbi = 0;
     this.business = newBusiness();
     this.inv = new Map();
-    this.spentKm = 0;
     this.earnedTags = new Set();
     this.seenStations = new Set();
     this.mood = ECON.MOOD_INITIAL;
@@ -590,24 +729,14 @@ export class GameStateManager {
 
   // ================= 旅币 =================
 
-  /**
-   * 每骑过 1 整公里 +2。只在跨过整数公里时发钱。
-   * 帧间只记进度，所以每帧调也不会每帧写盘。
-   */
-  earnKm(newKm: number): number {
-    const clamped = Math.min(Math.max(newKm, 0), ECON.TOTAL_ROUTE_KM);
-    const whole = Math.floor(clamped);
-    if (whole > Math.floor(this.spentKm)) {
-      const gained = (whole - Math.floor(this.spentKm)) * ECON.LVBI_PER_KM;
-      this.spentKm = whole;
-      this.lvbi += gained;
-      this._l.lvbi({ delta: gained, total: this.lvbi });
-      this.save();
-      return gained;
-    }
-    if (clamped > this.spentKm) this.spentKm = clamped;
-    return 0;
-  }
+  // 按公里发钱的那条老路（`earnKm()`）已经拆掉了。
+  //
+  // 它在源项目里是对的（那条环线真长 188 公里，`LVBI_PER_KM = 2` 走完全程 376 枚，
+  // 是总预算 799 的 47%），在这一版是错的（环线只有 1228.8 米，一圈只值 2 枚，
+  // 而铺子里最便宜的东西 40 枚）。现在的口径是**按圈**发，发在 `noteLap()` 里。
+  //
+  // 方法整个删掉而不是留一个空壳：调用点（`world.ts` / `headless.ts`）
+  // 会当场编译不过——**编译不过比静默算错好**。
 
   /** tag 幂等：同一个 tag 只发一次。空 tag 每次都发。 */
   earn(amount: number, tag = ''): number {
@@ -630,10 +759,33 @@ export class GameStateManager {
     return gained;
   }
 
+  /**
+   * 一局乐事的账。
+   *
+   * ## 胜负为什么写进**心神**，而不只是旅币
+   *
+   * 原来只有钱分胜负：赢 20、输 5。可这五个小游戏**没有任何赌注**——
+   * 碎片在第一次到访就必得（`checkIn()` 不看胜负），而输赢只差 15 枚旅币。
+   * 于是"把五件乐事打赢"这件事在进度上**没有任何区别**：
+   * 练不练这五件手艺，这一趟拿到的东西一模一样。
+   *
+   * 现在胜负改写**心神**：赢了回一格，输了掉一格。
+   *
+   * · 心神不是数字，是**画面**：它同时决定雾的浓度（`getMoodMaskAlpha`）
+   *   与视野（`getVisibilityFactor`）。赢了之后路变清楚、雾变淡，
+   *   输了之后相反——**输掉的代价是看得见的那一层**，不是一行小字。
+   * · 收一块碎片本来就要掉一格（`checkIn()` 里那句「深度余响的代价」）。
+   *   所以赢一局是**抵掉**那一次代价，输一局是**再付一次**。
+   *
+   * 心神有下限 1（`costMood` 不会把它扣到 0），所以它**不是**失败条件——
+   * 这一局输了，下一局照样能再赢回来。
+   */
   onMiniGame(stationIdx: number, win: boolean): number {
     const amount = win ? ECON.LVBI_MINI_WIN : ECON.LVBI_MINI_LOSE;
     const tag = win ? `mini_${stationIdx}_win` : `mini_${stationIdx}_lose`;
     const gained = this.earn(amount, tag);
+    if (win) this.restoreMood(1);
+    else this.costMood(1);
     this.save();
     return gained;
   }
@@ -844,7 +996,6 @@ export class GameStateManager {
         economy: {
           lvbi: this.lvbi,
           inv: Object.fromEntries(this.inv),
-          spent_km: this.spentKm,
           earned_tags: [...this.earnedTags],
           seen_stations: [...this.seenStations].map(String),
           mood: this.mood,
@@ -857,6 +1008,7 @@ export class GameStateManager {
           chapter2_done: this.chapter2Done,
           laps: this.laps,
           check_ins: this.checkIns,
+          quest_main: this.questMain ? 1 : 0,
         },
       };
       this.store.write(SAVE_KEY, JSON.stringify(blob));
@@ -904,7 +1056,8 @@ export class GameStateManager {
       if (ec) {
         this.lvbi = Math.max(0, Number(ec.lvbi) || 0);
         this.inv = new Map(Object.entries(ec.inv ?? {}).map(([k, v]) => [k, Number(v)]));
-        this.spentKm = Math.min(Math.max(Number(ec.spent_km) || 0, 0), ECON.TOTAL_ROUTE_KM);
+        // `spent_km` 不再读：它是「按公里发钱」那条老路的记账位，口径已改成按圈。
+        // 老存档里带着这个键，直接忽略——进度比记账方式重要。
         this.earnedTags = new Set(ec.earned_tags ?? []);
         this.seenStations = new Set((ec.seen_stations ?? []).map(Number));
         this.mood = Math.min(Math.max(Number(ec.mood) || ECON.MOOD_INITIAL, ECON.MOOD_FLOOR), ECON.MOOD_CEIL);
@@ -937,6 +1090,8 @@ export class GameStateManager {
       // 就已经发过了，读档回来不该再发一遍。
       this.business = readBusiness(blob.business);
       this.collectedFired = this.allCollected();
+      // 主线：老存档没有这个字段，按"还没接"处理（那正是老存档该有的降级）。
+      this.questMain = ec.quest_main === 1;
       return true;
     } catch {
       this.clearSave();

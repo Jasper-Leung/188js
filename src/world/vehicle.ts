@@ -797,8 +797,25 @@ export interface DriveBasis {
    * 符号不是随意的：不打滑要求 `v + ω × r = 0`，车头取 `head`、
    * 接地点 `r = (0, −R, 0)` 时解出 `ω = +v / R` **仅当**轴指向左侧。
    * 于是 `spin.rotation.x = +里程/半径` 对所有车型都是对的，代码里不必再判方向。
+   *
+   * ★ **这是前后两轮的公共轴**。真实车辆上它们是**一根轴**，所以取平均更稳；
+   *   但这台摩托车的 GLB 里前后轮轴实测相差 **1.757°**，于是公共轴让
+   *   **每个轮子都偏离自己的轴约 0.88°**（前轮偏 −0.88°、后轮偏 +0.88°）。
+   *   轮子绕着差 0.88° 的轴转 = 轮面在拧，接地点横向蹭。
+   *   所以**逐轮自转**改用各自实测的轴（见 `frontAxle` / `rearAxle`），
+   *   这一项只留给「整车摆到路面上」用——那个场合要的是整体姿态。
    */
   axle: Vector3;
+  /**
+   * 前轮**自己**的实测轴（模型本地空间，符号同 `axle`：指向左侧）。
+   *
+   * 为什么单独留一份：轮子该绕**自己**的轴转，不是绕一个平均轴转。
+   * 差 0.88° 时轮胎是斜着拧的，视觉上就是「轮子在抖」，
+   * 而 0.88° 恰好在「看不出来」与「看得见」的边界上——所以必须修而不是放着。
+   */
+  frontAxle: Vector3;
+  /** 后轮**自己**的实测轴（模型本地空间，符号同 `axle`）。 */
+  rearAxle: Vector3;
   /** 前后轮心（模型本地单位） */
   front: Vector3;
   rear: Vector3;
@@ -849,6 +866,13 @@ export function measureDriveBasis(
   // 符号约定：指向左侧（`up × head`）
   const left = new Vector3(0, 1, 0).cross(head);
   if (axle.dot(left) < 0) axle.negate();
+  // ★ **逐轮各自的轴**：符号同样统一到「指向左侧」，但**方向不再平均**。
+  //   这一步是「前轮转动时部分零件跟着转」那个症状的一半根因：
+  //   公共轴让每个轮子偏出自己的轴 0.88°，轮胎是斜着拧的。
+  const frontAxle = f.axle.clone();
+  const rearAxle = r.axle.clone();
+  if (frontAxle.dot(left) < 0) frontAxle.negate();
+  if (rearAxle.dot(left) < 0) rearAxle.negate();
   // 横向正交化到「车尾」上，再取右；上 = 车尾 × 右（这样 right × up = rear，基底是右手的）
   const right = axle.clone().negate().addScaledVector(rear, axle.dot(rear)).normalize();
   const up = rear.clone().cross(right).normalize();
@@ -858,6 +882,8 @@ export function measureDriveBasis(
   return {
     head,
     axle,
+    frontAxle,
+    rearAxle,
     front: f.centre,
     rear: r.centre,
     wheelbase: f.centre.distanceTo(r.centre),
@@ -1197,7 +1223,31 @@ const MOTO_BASIS = new WeakMap<Object3D, DriveBasis | null>();
  * 判据必须落在这里而不是 `this.motoSteer`：`rebuild()` 会把实例字段清成 `null`，
  * 判据跟着一起被清掉，于是「已建过」永远不成立，每次按 E 都重建一轮枢轴。
  */
-const MOTO_RIGS = new WeakMap<Object3D, { steer: Group; spins: { axis: Group; spin: Group }[] }>();
+const MOTO_RIGS = new WeakMap<Object3D, { steer: Group; spins: MotoSpin[] }>();
+
+/**
+ * 摩托车一个轮子的自转机构。
+ *
+ * `radius` 是**这个轮子自己的**滚动半径（米）——逐轮不同，
+ * 共用一个会让后轮快 5.7%（胎面在地面上滑）。见 `collectMotorcycle`。
+ */
+export interface MotoSpin {
+  /** 轴对齐层：本地 +X 已经转到该轮自己的自转轴上。 */
+  axis: Group;
+  /** 自转层：每帧写 `rotation.x`。 */
+  spin: Group;
+  /** 被挂进自转层的那个零件。 */
+  mesh: Object3D;
+  /** 该轮自己的滚动半径（米）。 */
+  radius: number;
+  /**
+   * 该轮自己的自转轴（车模本地空间，指向车的左侧）。
+   *
+   * 存下来是因为装配时要用它做轴对齐，而装配之后就没别的用处了——
+   * 但留着它，判据就能直接问「这个轮子当初是对着哪根轴对齐的」。
+   */
+  axle: Vector3;
+}
 
 /** 取自行车的行车基底；**只在第一次真正测量**，之后一直返回同一份。 */
 function bikeBasisOf(bike: Object3D): DriveBasis | null {
@@ -1654,6 +1704,34 @@ const MOTORCYCLE_STEER = [
 ];
 
 /**
+ * 转向组与轮子组**不许有交集**。
+ *
+ * ## 为什么这条要写成代码而不是靠人记得
+ *
+ * `steer` 组里的零件跟着**转向**（`steer.rotation.y`），
+ * 自转组里的零件跟着**轮子转**（`spin.rotation.x`）。
+ * 一个零件同时进两个组的话，`collectMotorcycle()` 里两次 `attach` 的
+ * **先后顺序**决定它最终归谁——而后一次 `attach` 会把它从前一个组里**拽走**。
+ *
+ * 症状是「前轮一转，某几件零件跟着转起来」——**而且只在转向与自转同时发生时**
+ * 才看得出来，因为两者都动时画面上分不清是谁在带谁。
+ * 而这种 bug 不会让任何东西报错：节点数对、transform 都合法、
+ * 画面上只是「有几件零件不该转却转了」。
+ *
+ * ## 为什么实测**没有**交集
+ *
+ * 这台车的 7 件转向件实测都分布在**前部上方**（y = 0.49~0.60，
+ * 挡泥板 `tripo_part_57` 在 y = 0.32），而两个轮子在 y = 0.18 / 0.16。
+ * 所以当前名单是对的——但它对**下一次换模型**没有保护。
+ * 这条断言就是那份保护：`verify_moto_rig` 会问它，
+ * 而它一旦为真，症状就是上面写的那一条。
+ */
+export function motoSteerWheelOverlap(): string[] {
+  const wheels = new Set([...MOTORCYCLE_FRONT_WHEELS, ...MOTORCYCLE_REAR_WHEELS]);
+  return MOTORCYCLE_STEER.filter((n) => wheels.has(n));
+}
+
+/**
  * 停放姿态：模型自带的纵向倾角（绕前后轴，单位弧度），由前后轮中心的高度差量出来。
  *
  * 「摩托车自带一个倾角」就是它。实测前轮中心 y=0.179、后轮 y=0.162、
@@ -1842,7 +1920,7 @@ export class Vehicle {
    * 摩托车前后轮的自转层（`axis` 层带一次性写死的轴对齐，**不写 rotation**）。
    * 与自行车 `BikeRig.spins` 同一套骨架，见 `alignLocalX`。
    */
-  private motoSpins: { axis: Group; spin: Group }[] = [];
+  private motoSpins: MotoSpin[] = [];
   /**
    * 摩托车侧撑倾角的载体，**必须在行车基底之外**。
    *
@@ -1852,8 +1930,18 @@ export class Vehicle {
    * 它绕的又是模型自己的 Z——偏了 26.58°，那不是侧倾是侧倾加俯仰。
    */
   private motoSlot: Group | null = null;
-  /** 摩托车轮子半径（米），按里程换算转角用 */
-  private motoWheelR = 0.35;
+  /**
+   * 摩托车**逐轮**的滚动半径（米）。
+   *
+   * 前后轮不一样大（实测 0.3495 vs 0.3308），共用一个会让后轮快 5.7%，
+   * 胎面在地面上滑。逐轮各用各的，这个滑移就没了。
+   *
+   * ★ 这里**只有这一份**半径。原来的 `motoWheelR`（单个前轮半径）
+   * 与它并存的时候，两条判据各自去读不同的那一份——
+   * 一条读前轮、一条读后轮，于是「后轮按后轮的半径转」这条**修好了的事实**
+   * 被拿前轮的半径判成错。红着的那条量的是同一个现象，只是口径反了。
+   */
+  private motoWheelRs = { front: 0.35, rear: 0.35 };
   /** 摩托车轴距（**米**）。转向角公式 `d = atan(w * L / v)` 里 L 要用米。 */
   private motoWheelbaseM = 1.45;
   /** 滑板轮半径（米），由 `collectWheels` 逐节点实测。0 = 还没量到。 */
@@ -2028,14 +2116,14 @@ export class Vehicle {
       this.ridePedalRate = r.pedalRate;
       this.rideFootOrbit = r.footOrbit;
       if (r.cadence > 1e-3) this.clipCadence.ride = r.cadence;
-      if (!r.seam) {
-        // 量不到 = 素材不循环（或骨架认不出脚）。**照旧播整条**，
-        // 只是 warn 一句——裁一个量不出接缝的片段会把踩踏剪成半截。
-        console.warn(
-          '[vehicle] 量不到「骑自行车」的循环接缝（骨架里没有左右踝/根骨，或一圈没踩满），' +
-            '循环照旧在片段末尾接回——脚会在每圈末尾跳一下',
-        );
-      }
+      // ★ **这里不报「量不到接缝」**。
+      //
+      //   这一段量的是**烘焙之前**的片段，而烘焙（`bakeRideLegs`）会把两条腿
+      //   重烘到踏板圆上——**接缝是烘焙之后才有的**。
+      //   烘焙成功时，脚恰好踩满一圈，烘焙后的接缝是量得到的；
+      //   而在这里就报，等于报一个**随后就被修掉的状态**。
+      //
+      //   告警挪到 `bakeRideLegs()` 里、烘焙之后再判（见那里的注释）。
       c.ride = r.clip;
     }
     // ★ 滑板姿势：从**处理之后**的 `run` 里挑「双脚张得最开的那一帧」，定格。
@@ -2338,6 +2426,20 @@ export class Vehicle {
       this.rideSeam && this.rideSeam.time > 1e-6
         ? (2 * Math.PI * this.rideSeam.turns) / this.rideSeam.time
         : 0;
+    // ★ 「接缝量不到」的告警放在**这里**——烘焙之后。
+    //
+    //   `prepareClips()` 量的是烘焙**前**的那份片段，而烘焙会把两条腿
+    //   重烘到踏板圆上，**接缝是烘焙之后才有的**：烘焙成功时脚恰好踩满一圈。
+    //   所以那条告警原来发在一个**随后就被修掉的状态**上。
+    //
+    //   而烘焙之前也不该报：那时候车模 rig 还没装（`attach()` 时还在徒步相位），
+    //   骑行片段根本不会被播——报它等于报一个不存在的问题。
+    if (!this.rideSeam) {
+      console.warn(
+        '[vehicle] 烘焙后的骑行片段量不到循环接缝（脚没踩满一圈），' +
+          '循环照旧在片段末尾接回——脚会在每圈末尾跳一下',
+      );
+    }
     if (this.rideSeam && Math.abs(this.rideSeam.footGapAtEnd) > 0.02) {
       console.warn(
         `[vehicle] 烘焙后的骑行片段首尾仍有 ${this.rideSeam.footGapAtEnd.toFixed(4)} 的姿势差 —— 循环会跳`,
@@ -2628,27 +2730,55 @@ export class Vehicle {
       for (const s of cached.spins) s.spin.rotation.x = 0;
       this.motoSteer = cached.steer;
       this.motoSpins = cached.spins;
+      // ★ 半径也要一起回来。`motoWheelRs` 是**实例字段**，而 rig 缓存在
+      //   `WeakMap`（按车模）里——换一个 Vehicle 实例复用同一台车模时，
+      //   字段还是默认的 0.35，于是「逐轮半径」在这台车上又退化成共用一个。
+      //   这里从缓存的 spins 里把它读回来，两处口径就永远一致。
+      this.motoWheelRs = {
+        front: cached.spins[0]?.radius ?? this.motoWheelRs.front,
+        rear: cached.spins[1]?.radius ?? this.motoWheelRs.rear,
+      };
       return;
     }
 
     // 取**缓存那份**基底：轮子一旦被 attach 进 rig，它量到的就不是原始姿态了
     // （见 `BIKE_BASIS` 上那张「每次按 E 都漂一次」的表）。
     const basis = motoBasisOf(moto);
-    const frontBox = localUnion(moto, MOTORCYCLE_FRONT_WHEELS);
-    if (!frontBox.isEmpty()) {
-      // 竖直跨度 = 轮直径。存米制半径给按里程换算用。
-      // 本地盒子里**不含** root.scale，所以这里要乘米制缩放才是世界半径。
-      this.motoWheelR = ((frontBox.max.y - frontBox.min.y) / 2) * scale;
-    }
     const frontWheel = moto.getObjectByName(MOTORCYCLE_FRONT_WHEELS[0]);
     const rearWheel = moto.getObjectByName(MOTORCYCLE_REAR_WHEELS[0]);
     if (!basis || !frontWheel || !rearWheel) return;
+
+    // ★ **逐轮各自的滚动半径**。
+    //
+    // 原来只有一个 `motoWheelR`，而且只从**前轮**的包围盒取。
+    // 而这台车的前后轮不一样大：前轮竖直跨度 0.3419、后轮 0.3237（模型单位），
+    // 换算成米是 0.3495 vs 0.3308——**后轮小 5.7%**。
+    // 于是后轮每转一圈就比前轮多跑 5.7% 的「里程」，
+    // 画面上是胎面在地面上**滑**（后轮转得比该转的快）。
+    //
+    // 半径取**包围盒竖直跨度的一半**：那是轮子的外缘（接地点到轴心），
+    // 而 `measureWheel()` 给的协方差半径是 0.1386 / 0.1401——那是
+    // 「质心到轴的平均距离」，**不是滚动半径**，用它算转速会偏快 23%。
+    const frontBox = localUnion(moto, MOTORCYCLE_FRONT_WHEELS);
+    const rearBox = localUnion(moto, MOTORCYCLE_REAR_WHEELS);
+    const frontR = frontBox.isEmpty() ? 0.35 : ((frontBox.max.y - frontBox.min.y) / 2) * scale;
+    const rearR = rearBox.isEmpty() ? frontR : ((rearBox.max.y - rearBox.min.y) / 2) * scale;
+    this.motoWheelRs = { front: frontR, rear: rearR };
 
     // 轴距存**米**：`δ = atan(ω·L / v)` 里 L 必须是米。
     // 少了这一步，摩托车的前端偏转会差一整个缩放系数（实测 2.044）。
     this.motoWheelbaseM = basis.wheelbase * scale;
 
-    const lateral = basis.axle;
+    // ★ **逐轮各自的轴**（不再用前后轮的平均轴）。
+    //
+    // `motorcycle.glb` 实测前后轮轴方向差 **1.757°**。用平均轴的话，
+    // 前轮偏自己的轴 −0.88°、后轮偏 +0.88°——**每个轮子都在拧**。
+    // 轮胎拧着转，接地点就不是一个点而是一小段线，轮子会肉眼可见地「抖」。
+    //
+    // 而这一条正是用户报的「前轮转动时部分零件也跟着转」的一半根因：
+    // 轮子绕歪轴转时，**跟着它的那些几何自然跟着甩**。
+    const frontAxle = basis.frontAxle;
+    const rearAxle = basis.rearAxle;
 
     // ---- 转向枢轴：摆在**前轮实测轴心**上，绕 Y 偏转模拟车把 ----
     //
@@ -2673,23 +2803,25 @@ export class Vehicle {
       const o = moto.getObjectByName(n);
       if (o) steer.attach(o);
     }
-    const spins: { axis: Group; spin: Group; mesh: Object3D }[] = [];
-    const addSpin = (host: Object3D, mesh: Object3D, tag: string) => {
+    const spins: MotoSpin[] = [];
+    const addSpin = (host: Object3D, mesh: Object3D, tag: string, axle: Vector3, radius: number) => {
       const axis = new Group();
       axis.name = `${RIG}moto${tag}Axis`;
       host.add(axis);
       const spin = new Group();
       spin.name = `${RIG}moto${tag}Spin`;
       axis.add(spin);
-      spins.push({ axis, spin, mesh });
+      spins.push({ axis, spin, mesh, radius, axle: axle.clone() });
     };
     // **前轮也要跟着转向**：真车上前轮和车把是一个刚体。
-    addSpin(steer, frontWheel, 'Front');
-    addSpin(rearHub, rearWheel, 'Rear');
+    addSpin(steer, frontWheel, 'Front', frontAxle, frontR);
+    addSpin(rearHub, rearWheel, 'Rear', rearAxle, rearR);
 
     // ---- 轴对齐：父节点全部就位之后才做；**做完再挂轮子**，理由见 `assembleBike` ----
+    //
+    // ★ 逐轮对齐到**各自的**轴（`s.axle`），而不是共用一根平均轴。
     moto.updateMatrixWorld(true);
-    for (const s of spins) alignLocalX(s.axis, lateral, moto);
+    for (const s of spins) alignLocalX(s.axis, s.axle, moto);
     moto.updateMatrixWorld(true);
     for (const s of spins) s.spin.attach(s.mesh);
 
@@ -2957,9 +3089,14 @@ export class Vehicle {
       this.updateBikeRig(dt, speed, yawRate);
     }
     // 摩托车：同一套骨架，转角同样按里程算，所以停车后轮子不会继续空转。
+    //
+    // ★ **逐轮各用自己的半径**。原来前后轮共用前轮的半径，
+    //   而后轮小 5.7% —— 后轮每转一圈就多滚 5.7% 的地面，
+    //   画面上是胎面在**滑**（后轮转得比该转的快）。
     if (this.motoSpins.length) {
-      const ang = this.wheelSpin / Math.max(this.motoWheelR, 1e-4);
-      for (const s of this.motoSpins) s.spin.rotation.x = ang;
+      for (const s of this.motoSpins) {
+        s.spin.rotation.x = this.wheelSpin / Math.max(s.radius, 1e-4);
+      }
     }
     // 车把随速度偏转，**跟着实际转向输入**：直行时 heading 不变但玩家
     // 可能一直压着舵，用 heading 的变化率会让原地打方向时车把纹丝不动。
@@ -3348,6 +3485,20 @@ export class Vehicle {
   get motoWheelAngle(): number {
     return this.motoSpins[1]?.spin.rotation.x ?? 0;
   }
+  /**
+   * 摩托车**前轮**当前的转角（弧度）。给回归量。
+   *
+   * ★ 为什么要有前轮这一份：前后轮**不一样大**（实测 0.3495 vs 0.3308），
+   *   而 `motoWheelAngle` 量的是**后轮**。判据若拿前轮的半径去对后轮的角度，
+   *   它量到的就是「后轮转得比该转的快 5.7%」——而那恰恰是修好的状态。
+   *
+   *   换句话说：**要问「后轮按后轮的半径转」，就得同时能问前轮的**，
+   *   否则两轮共用一个半径这种回归量不出来（只会红一条，而那一红
+   *   会被误当成「判据写错了」）。
+   */
+  get motoFrontWheelAngle(): number {
+    return this.motoSpins[0]?.spin.rotation.x ?? 0;
+  }
   /** 摩托车自转层的本地 +X 在世界空间的方向。给回归量（同一族）。 */
   get motoSpinAxisWorld(): Vector3 | null {
     const spin = this.motoSpins[1]?.spin;
@@ -3369,10 +3520,6 @@ export class Vehicle {
   get bikeSeat(): Vector3 | null {
     return this.rig?.seat ? this.rig.seat.clone() : null;
   }
-  /** 摩托车轮子半径（米）。给回归量：按里程换算转角时要用。 */
-  get motorcycleWheelRadius(): number {
-    return this.motoWheelR;
-  }
   /**
    * 滑板每个轮子当前的转角（弧度）。**给回归量：轮子有没有被找到、有没有在转。**
    *
@@ -3383,6 +3530,226 @@ export class Vehicle {
    */
   get skateWheelAngles(): number[] {
     return this.wheels.map((w) => w.rotation.z);
+  }
+
+  /**
+   * 摩托车每个零件在**车模本地空间**里的位姿快照。
+   *
+   * ## 为什么需要它
+   *
+   * 「前轮转的时候旁边几个零件也跟着转」这一族故障，在画面上只是**看着别扭**，
+   * 而代码里没有任何东西能问「到底哪些零件在动」——
+   * 自转组里到底挂了几件、`steer` 组里到底挂了几件，
+   * 全都只存在于 `collectMotorcycle()` 那些局部变量里。
+   *
+   * 这个快照把那些局部变量**摊开成可读的事实**：
+   * 转一圈前后各取一次，两次差集就是「跟着转了的零件」。
+   * 排障靠它，回归也靠它。
+   *
+   * ## 快照记的是**相对车模**的位姿，不是世界位姿
+   *
+   * 世界位姿会把「车整体在往前挪」也算进去，而那是车在动，
+   * 不是零件在跟着转。相对车模的位姿只看**零件之间的相对关系**。
+   *
+   * ## 每件 7 个数：位置 3 + 四元数 4
+   *
+   * 只记位置是不够的：一个绕自身中心转的零件，位置一动不动，
+   * 只有姿态变了。所以两个都记。
+   */
+  motoPoseSnapshot(): Record<string, number[]> {
+    const moto = this.models.motorcycle;
+    const out: Record<string, number[]> = {};
+    if (!moto) return out;
+    moto.updateMatrixWorld(true);
+    const inv = new Matrix4().copy(moto.matrixWorld).invert();
+    const rel = new Matrix4();
+    const p = new Vector3();
+    const q = new Quaternion();
+    const s = new Vector3();
+    moto.traverse((o) => {
+      if (!o.name) return;
+      rel.multiplyMatrices(inv, o.matrixWorld);
+      rel.decompose(p, q, s);
+      out[o.name] = [
+        +p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5),
+        +q.x.toFixed(5), +q.y.toFixed(5), +q.z.toFixed(5), +q.w.toFixed(5),
+      ];
+    });
+    return out;
+  }
+
+  /**
+   * 摩托车每个零件在**车模本地空间**里的几何包围盒（真实顶点量出来的）。
+   *
+   * ## 为什么不能用 GLB 里的 accessor min/max
+   *
+   * 这份资产是 meshopt 量化的，JSON 里的 min/max 不可信——
+   * 实测每个零件的盒子都读成正方体，圆度恒为 1.000。
+   * 所以盒子的**大小**必须从真实顶点重算。
+   *
+   * ## 它回答的是哪一类问题
+   *
+   * 「前轮那个零件里到底装了什么」——只靠节点名与零件表是猜的，
+   * 而盒子能给出硬事实：它有多大、往哪个方向伸出多远。
+   * 一个轮子零件如果把前叉的下段也包了进去，
+   * 那它自转时前叉就会跟着转——**这就是"轮子转的时候零件跟着转"**。
+   */
+  motoPartBoxes(): Record<string, { min: number[]; max: number[]; centre: number[]; size: number[] }> {
+    const moto = this.models.motorcycle;
+    const out: Record<string, { min: number[]; max: number[]; centre: number[]; size: number[] }> = {};
+    if (!moto) return out;
+    moto.updateMatrixWorld(true);
+    const inv = new Matrix4().copy(moto.matrixWorld).invert();
+    const rel = new Matrix4();
+    const box = new Box3();
+    const v = new Vector3();
+    moto.traverse((o) => {
+      const g = (o as Mesh).geometry;
+      if (!g || !o.name) return;
+      const pos = g.attributes?.position;
+      if (!pos) return;
+      box.makeEmpty();
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(rel.multiplyMatrices(inv, o.matrixWorld));
+        box.expandByPoint(v);
+      }
+      if (box.isEmpty()) return;
+      const min = [box.min.x, box.min.y, box.min.z];
+      const max = [box.max.x, box.max.y, box.max.z];
+      out[o.name] = {
+        min: min.map((n) => +n.toFixed(4)),
+        max: max.map((n) => +n.toFixed(4)),
+        centre: min.map((n, i) => +((n + max[i]) / 2).toFixed(4)),
+        size: min.map((n, i) => +(max[i] - n).toFixed(4)),
+      };
+    });
+    return out;
+  }
+
+  /**
+   * 摩托车**每个轮子各自**实测的轴心、自转轴与半径。
+   *
+   * ## 为什么必须逐个量，而不是共用一个 `basis.axle`
+   *
+   * `measureDriveBasis()` 给出的 `axle` 是**前后轮的平均**——
+   * 而这台车的两个轮子**轴向并不一致**（实测差 **1.758°**）。
+   *
+   * 共用平均值的后果是：前轮绕一条**比自己的轴偏 0.88°** 的轴自转。
+   * 轮子于是**一边滚一边摇**：
+   * · 轮胎是绕自身轴对称的，看上去还是圆的；
+   * · 而刹车盘那种**垂直于轮轴的薄片**会被带着歪，画面上就是一个**斜的椭圆**——
+   *   看上去像"轮子转的时候旁边那几个零件也跟着歪"。
+   *
+   * 逐个量之后，每个轮子绕**它自己的**轴转，那一族症状就没了。
+   *
+   * 轴的符号统一成**指向车的左侧**（与 `measureDriveBasis` 同一个约定），
+   * 于是「不打滑」要求 `ω = +里程/半径` 对前后轮都成立，代码里不必再判方向。
+   */
+  motoWheelFrames(): { front: WheelFrame | null; rear: WheelFrame | null } {
+    const moto = this.models.motorcycle;
+    const out: { front: WheelFrame | null; rear: WheelFrame | null } = { front: null, rear: null };
+    if (!moto) return out;
+    const basis = motoBasisOf(moto);
+    const front = moto.getObjectByName(MOTORCYCLE_FRONT_WHEELS[0]);
+    const rear = moto.getObjectByName(MOTORCYCLE_REAR_WHEELS[0]);
+    const norm = (f: WheelFrame | null): WheelFrame | null => {
+      if (!f || !basis) return f;
+      const axle = f.axle.clone();
+      const left = new Vector3(0, 1, 0).cross(basis.head);
+      if (axle.dot(left) < 0) axle.negate();
+      return { centre: f.centre.clone(), axle, radius: f.radius };
+    };
+    out.front = norm(front ? measureWheelNode(moto, front) : null);
+    out.rear = norm(rear ? measureWheelNode(moto, rear) : null);
+    return out;
+  }
+
+  /**
+   * 摩托车自转组里挂着哪些零件。
+   *
+   * 它是 `motoPoseSnapshot()` 的补充：快照说「谁动了」，
+   * 这个说「谁**本来就应该**动」——
+   * 自转组里只有轮子，前轮自转时跟着动的东西就**只该是轮子本身**。
+   */
+  get motoSpinMembers(): { front: string[]; rear: string[] } {
+    const names = (mesh: Object3D | undefined): string[] => {
+      if (!mesh) return [];
+      const out: string[] = [];
+      mesh.traverse((o) => { if (o.name) out.push(o.name); });
+      return out;
+    };
+    return {
+      front: names(this.motoSpins[0]?.spin),
+      rear: names(this.motoSpins[1]?.spin),
+    };
+  }
+
+  /**
+   * 摩托车**逐轮**的滚动半径（米）。
+   *
+   * 给回归量：后轮比前轮小 5.7%，而两者转角必须**分别**按自己的半径算，
+   * 否则后轮会在地面上滑。这个 getter 让判据能直接问「两个半径差多少」。
+   */
+  get motorcycleWheelRadii(): { front: number; rear: number } {
+    return { front: this.motoSpins[0]?.radius ?? this.motoWheelRs.front, rear: this.motoSpins[1]?.radius ?? this.motoWheelRs.rear };
+  }
+
+  /**
+   * 摩托车**转向组**里挂着哪些零件。
+   *
+   * 它与 `motoSpinMembers` 是一对：自转组只该有轮子，
+   * 转向组只该有前叉/挡泥板那几件。**两组不许有交集**——
+   * 有交集就意味着某件零件同时被两个 `attach` 抢，
+   * 而后一次 `attach` 会把它从先前的组里拽走。
+   */
+  get motoSteerMembers(): string[] {
+    const out: string[] = [];
+    this.motoSteer?.traverse((o) => { if (o.name) out.push(o.name); });
+    return out;
+  }
+
+  /**
+   * 自转轴**偏离该轮自己实测轴**多少度（前后轮各一个）。
+   *
+   * ## 它量的是什么
+   *
+   * 自转组的 `axis` 层在装配时把本地 +X 转到**目标轴**上。
+   * 这个 getter 把「转到的方向」与「该轮自己实测出来的轴」放在
+   * **同一个空间**（车模本地）里比夹角。
+   *
+   * ## 为什么这个数就是那个症状
+   *
+   * 轮子绕歪轴转时，**它带着的那些几何自然跟着甩**——
+   * 胎是圆的看不出来，可轮辋辐条、刹车盘都是**垂直于轮轴**的薄片，
+   * 歪 0.88° 转起来就是一个**摆动的椭圆**。
+   * 玩家看到的就是「轮子在转，可轮子上的零件在晃」。
+   *
+   * 所以这个数必须**接近 0**。实测修复前是 0.88°（前后轮各偏一半），
+   * 修复后应当 < 0.05°。
+   */
+  motoSpinAxisErrorDeg(): { front: number; rear: number } {
+    const moto = this.models.motorcycle;
+    const out = { front: NaN, rear: NaN };
+    if (!moto) return out;
+    const frames = this.motoWheelFrames();
+    const pair: Array<[0 | 1, WheelFrame | null]> = [
+      [0, frames.front],
+      [1, frames.rear],
+    ];
+    for (const [i, frame] of pair) {
+      const axisGroup = this.motoSpins[i]?.axis;
+      if (!axisGroup || !frame) continue;
+      // 「转到的方向」在世界空间里取（`axis` 的本地 +X），
+      // 再换算回**车模本地空间**，才能和实测轴（车模本地）比。
+      moto.updateMatrixWorld(true);
+      const world = new Vector3(1, 0, 0).transformDirection(axisGroup.matrixWorld);
+      const q = new Quaternion();
+      moto.getWorldQuaternion(q);
+      const local = world.clone().applyQuaternion(q.invert());
+      const dot = Math.max(-1, Math.min(1, Math.abs(local.dot(frame.axle))));
+      out[i === 0 ? 'front' : 'rear'] = (Math.acos(dot) * 180) / Math.PI;
+    }
+    return out;
   }
 }
 

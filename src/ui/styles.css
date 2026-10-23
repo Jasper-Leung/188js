@@ -21,9 +21,10 @@
 
    ## 零图片
 
-   全文件没有一张 url()。纸的纹理、蜡的红、按钮的边、摇杆的圈——
+   全文件没有一张 url()。玻璃的底、金线的边、按钮的圈、摇杆的环——
    全部是渐变 / 边框 / 阴影画出来的。理由见 theme.ts：
    每多一个资源请求，首屏在 3G 上就多一次往返，而目标机器往往也是慢网络机器。
+   图标同理：它是**内联 SVG**（见 `icons.ts`），不是字体也不是图片。
 
    ## 动效：只有一种
 
@@ -34,10 +35,19 @@
 
    ## 暗色（黄昏）
 
-   `--dusk` 由 index.ts 每 0.25s 写一次（0..1），下面所有纸色都由它算出来。
-   不压暗的后果很具体：黄昏时世界整个沉下去，一块原色纸面板浮在上面
+   `--dusk` 由 index.ts 每 0.25s 写一次（0..1），下面所有底色都由它算出来。
+   不压暗的后果很具体：黄昏时世界整个沉下去，一块原色面板浮在上面
    会亮得刺眼，而**面板与背景的对比度反而比日间更高**——
    那是把「这里最重要」这个信号反着发。
+
+   ## 色板：**深青蓝玻璃 + 鎏金**
+
+   这一层原来是「宣纸与墨」（暖白纸 + 深褐墨 + 一处印泥红），
+   现在换成冷青蓝的半透明底、鎏金的强调色、
+   一支只给「此刻响应你」的元素青。
+
+   ⚠ **颜色只写在 `.g-root` 的变量块里**（theme.ts 是同一套色在 TS 侧的出口）。
+     别的选择器一律读变量——改色只改那一处。
    ========================================================================== */
 
 /* =============================================================================
@@ -67,11 +77,11 @@
   font-family: '188UI', 'LXGW WenKai', system-ui, 'Segoe UI', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   line-height: 1.8;
   letter-spacing: 0.02em;
-  color: #2b241b;
+  color: #ece6d6;
 
   /* 表单控件（背面那个 textarea）在浏览器深色模式下会被自动反色。
-     显式声明 light 是为了让它和纸面一个色——那张卡是米白的。 */
-  color-scheme: light;
+     显式声明 dark 是为了让它和界面一个色——那一栏现在也是深色的。 */
+  color-scheme: dark;
 
   position: fixed;
   inset: 0;
@@ -86,39 +96,60 @@
 
   /* ---- 黄昏推进度（0..1，由 index.ts 写）---- */
   --dusk: 0;
-  --pw: calc(236 - var(--dusk) * 78);
-  --pg: calc(227 - var(--dusk) * 81);
-  --pb: calc(206 - var(--dusk) * 82);
-  --paper: rgb(var(--pw) var(--pg) var(--pb));
-  --paper-2: rgb(calc(var(--pw) - 8) calc(var(--pg) - 9) calc(var(--pb) - 10));
-  --paper-3: rgb(calc(var(--pw) - 16) calc(var(--pg) - 18) calc(var(--pb) - 20));
-  /* 比 --paper-3 再深一档，给「选中态底色」用。
-   *
-   * `--paper-3` 当选中底色是不行的：卡片底色就是 `--paper`，
-   * 两者只差 16/18/20（约 7%），在 42% 的暗化蒙版上看过去**分不出深浅**。
-   * 而正反面那两颗按钮原来唯一的差别就是这个底色加上文字色，
-   * 于是「选中的那颗」读起来像一块空的——玩家描述成"透明"，
-   * 其实是**激活态比面板还接近面板**。差值拉到 40/44/48（约 17%）才立得住。 */
-  --paper-6: rgb(calc(var(--pw) - 40) calc(var(--pg) - 44) calc(var(--pb) - 48));
 
-  --ink: #2b241b;
-  --ink-soft: #6b5f4c;
-  --ink-faint: #9a8d76;
-  --accent: #9d3a2f;
-  --gold: #c9a26b;
-  --line: rgba(43, 36, 27, 0.18);
-  --line-soft: rgba(43, 36, 27, 0.1);
+  /* =====================================================================
+     色板：**深青蓝玻璃 + 鎏金**
+     ---------------------------------------------------------------------
+     原来这一层是「宣纸与墨」：暖白的纸、深褐的墨、一处印泥红。
+     现在换成**冷青蓝的半透明玻璃**、
+     **鎏金的强调色**、以及一点**元素青**。
+
+     三条为什么：
+     · **底色压深**：HUD 是深色的，它浮在 3D 场景上时
+       靠的是「暗底 + 金线」把眼睛抓住；浅色纸面板浮在黄昏的天空上会发白。
+     · **强调色换成金**：金色表示「可交互 / 当前选中 / 奖励」。
+       而这套界面里最重要的一格（下一处目标、碎片计数、主线进度）全是那一类。
+     · **加一支元素青**：它只给「现在可以按」的那一格（交互提示、转盘选中项）。
+       元素色表示"此刻响应你"，而这一层只有一个地方需要那个意思。
+
+     ⚠ **所有颜色只在这一段出现一次**（theme.ts 是同一套色在 TS 侧的出口）。
+       别的选择器一律读变量——改色只改这里。
+     ===================================================================== */
+  --pw: calc(28 - var(--dusk) * 13);
+  --pg: calc(46 - var(--dusk) * 21);
+  --pb: calc(60 - var(--dusk) * 27);
+  --paper: rgb(var(--pw) var(--pg) var(--pb));
+  --paper-2: rgb(calc(var(--pw) - 4) calc(var(--pg) - 5) calc(var(--pb) - 7));
+  --paper-3: rgb(calc(var(--pw) - 9) calc(var(--pg) - 11) calc(var(--pb) - 14));
+  /* 「选中态底色」。这一层是**提亮**而不是压深——
+     深底上「更深」等于看不见，而选中态必须一眼看得出。
+     提亮 20/24/28 与底色的对比度是 **1.42**（阈值 1.30）。 */
+  --paper-6: rgb(calc(var(--pw) + 20) calc(var(--pg) + 24) calc(var(--pb) + 28));
+
+  --ink: #ece6d6;
+  --ink-soft: #a7b6c0;
+  --ink-faint: #7b8e9b;
+  /* 鎏金：强调色。碎片图标 / 当前目标 / 主按钮 / 焦点圈都是它。 */
+  --accent: #e2c489;
+  --accent-soft: #f0dcae;
+  /* 元素青：只给「此刻响应你」的那一格。 */
+  --cyan: #7fd3e6;
+  --cyan-deep: #3f9fbd;
+  --gold: #d9b877;
+  /* 边线是**金的暗线**，不是墨线——这是深底上唯一能读出「这是块板」的办法。 */
+  --line: rgba(226, 196, 137, 0.3);
+  --line-soft: rgba(226, 196, 137, 0.14);
   --radius: 0.2rem;
   --fade: 150ms;
 
-  /* 半透明纸。**不要**在这里再抄一份 236/227/206：
-     抄一份的那一处不会跟着 --dusk 变，黄昏时它会比周围的纸亮一档，
+  /* 半透明纸。**不要**在这里再抄一份 28/46/60：
+     抄一份的那一处不会跟着 --dusk 变，黄昏时它会比周围的板亮一档，
      而玩家看不出为什么这一块没暗下去。 */
   --paper-85: rgb(var(--pw) var(--pg) var(--pb) / 0.85);
   --paper-72: rgb(var(--pw) var(--pg) var(--pb) / 0.72);
   --paper-90: rgb(var(--pw) var(--pg) var(--pb) / 0.9);
-  /* 纸上的渐隐（顶栏那一带）：透明度自己随黄昏降，
-     因为暗背景上不需要那么多纸来压住字。 */
+  /* 板面上的渐隐（顶栏那一带）：透明度自己随黄昏降，
+     因为暗背景上不需要那么多墨来压住字。 */
   --paper-fade-a: calc(0.86 - var(--dusk) * 0.3);
 }
 
@@ -144,11 +175,10 @@
 }
 
 /* 焦点圈。这是硬要求，不是可选项——原作正因为「取消按钮键盘点不到」
-   把键盘玩家困住了。outline 不用 none，用 ink 而不是 accent：
-   accent 已经被「碎片 / 下一处」占着，焦点圈再用同一支红，
-   玩家分不清「这里能按」和「这里是目标」。 */
+   把键盘玩家困住了。outline 不用 none，用**金**而不是墨：
+   墨色在深底上几乎看不见，而这一圈必须一眼看得出"焦点在这儿"。 */
 .g-root :focus-visible {
-  outline: 2px solid #2b241b;
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius);
 }
@@ -157,7 +187,7 @@
    可以接受，而"焦点看不见"不能接受）。 */
 @supports not selector(:focus-visible) {
   .g-root :focus {
-    outline: 2px solid #2b241b;
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 }
@@ -215,6 +245,22 @@
   color: var(--ink);
 }
 
+/* 「图标 + 名字」的工具按钮。暂停面板工具条上的三颗用它。 */
+.g-root .g-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35em;
+  padding: 0.3em 0.7em;
+}
+
+.g-root .g-tool-btn .g-ic {
+  color: var(--accent);
+}
+
+.g-root .g-tool-t {
+  white-space: nowrap;
+}
+
 .g-root .g-btn-toggle.is-on {
   border-color: var(--accent);
   color: var(--accent);
@@ -229,9 +275,10 @@
   align-items: center;
   justify-content: center;
   padding: 1.5rem;
-  /* 背景只压到 0.42：再深就看不出底下是那条 8 字环线了，
-     而"暂停时世界还在那儿"是本作想让人记住的事。 */
-  background: rgba(20, 17, 12, 0.42);
+  /* 背景只压到 0.55：再深就看不出底下是那条 8 字环线了，
+     而"暂停时世界还在那儿"是本作想让人记住的事。
+     颜色是**冷黑**而不是原来的暖黑——暖黑压在青蓝面板上会显脏。 */
+  background: rgba(8, 14, 20, 0.55);
   overflow-y: auto;
 }
 
@@ -244,7 +291,11 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 1.6rem 1.7rem;
-  box-shadow: 0 0.4rem 1.6rem rgba(20, 17, 12, 0.28);
+  /* 一层内金线 + 一层外投影。**内金线是这套面板的关键**：
+     有了它，深色板面才读作"一块镶了边的板"而不是"一块半透明的方块"。 */
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 196, 137, 0.12),
+    0 0.6rem 2rem rgba(4, 9, 14, 0.55);
   animation: gFade var(--fade) ease-out both;
 }
 
@@ -1114,6 +1165,13 @@
   letter-spacing: 0.12em;
 }
 
+/* 组头前面那枚碎片图标。它比「碎片」两个字先到（颜色先于文字）。 */
+.g-root .g-frags-ic {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+
 .g-root .g-frags-n {
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
@@ -1209,6 +1267,280 @@
 .g-root .g-pip.is-on {
   background: var(--accent);
   border-color: var(--accent);
+}
+
+/* =============================================================================
+   图标 —— 内联 SVG 的通用尺寸
+   -----------------------------------------------------------------------------
+   形状在 `icons.ts`，**颜色不在这里定**：图标一律走 `currentColor`，
+   于是「图标是灰的、字是金的」这种打架在结构上就不可能发生。
+
+   尺寸用 `em` 而不是 `px`：`.g-root` 的根字号是 `clamp(14px, …, 16.5px)`，
+   而这一整套界面是按 rem 缩放的（见 `index.css`）——
+   写死 px 的话，浏览器字号放大一档，图标不会跟着走。
+   ========================================================================== */
+.g-root .g-ic {
+  display: inline-block;
+  width: 1.15em;
+  height: 1.15em;
+  flex: 0 0 auto;
+  vertical-align: -0.18em;
+  color: inherit;
+}
+
+/* 一颗**只有图标**的按钮。`aria-label` 由调用方给（`icons.ts` 里强制）。 */
+.g-root .g-ic-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35em;
+  padding: 0.35em;
+  min-width: 2.1em;
+  min-height: 2.1em;
+  line-height: 1;
+}
+
+/* ---- 主线追踪器 ----
+ *
+ * 它是碎片卡里的**头一行**：图标 + 主线名 + 进度。
+ *
+ * 「当前目标」用鎏金（`--accent`），因为它就是这一屏的重点；
+ * 达成之后整行换 `--gold`（金），读作"这件事成了"而不是"这件事还要做"。
+ * 强调色只有一处是 theme.ts 的第二条原则，所以达成态用同一族的金，
+ * 而不是另开一个绿——深底上再塞一个高饱和色，读起来像出了错。
+ */
+.g-root .g-quest {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4em;
+  font-size: 0.84em;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.g-root .g-quest-ic {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+}
+
+.g-root .g-quest-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.g-root .g-quest-n {
+  margin-left: auto;
+  padding-left: 0.5em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.g-root .g-quest.is-done .g-quest-ic,
+.g-root .g-quest.is-done .g-quest-t,
+.g-root .g-quest.is-done .g-quest-n {
+  color: var(--gold);
+}
+
+.g-root .g-quest-hint {
+  margin-top: 0.1em;
+  font-size: 0.76em;
+  color: var(--ink-soft);
+  letter-spacing: 0.04em;
+}
+
+/* ---- 交互提示 ----
+ *
+ * 屏幕下方中线的一颗小按钮：**够得着才在**。
+ *
+ * 位置固定在下方而不是浮在那个东西上面，是有意换来的：
+ * 旧物那一族在世界里的位置很杂，而投影世界坐标到屏幕要处理
+ * 「在相机背后」那一支（脚下提示圈已经处理过一次）——
+ * 两处各做一次投影，就有两处会算错位置。
+ * 固定位置的好处是它**不会在画面上乱跑**：玩家知道提示在下面那一块。
+ */
+.g-root .g-prompt {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--g-safe-b) + 3.2rem);
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25em;
+  pointer-events: none;
+  /* 在 HUD 之上、面板之下。面板是 50、转盘是 40，于是
+   * 「暂停面板开着时底下不该有一颗会呼吸的提示」是结构上成立的。 */
+  z-index: 12;
+  animation: gFade var(--fade) ease-out both;
+}
+
+.g-root .g-prompt-btn {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.3em 0.6em;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 0.3rem 0.9rem rgba(4, 9, 14, 0.5);
+  color: var(--ink);
+}
+
+.g-root .g-prompt-ic {
+  display: inline-flex;
+  align-items: center;
+  color: var(--cyan);
+}
+
+.g-root .g-prompt-key {
+  font-size: 0.78em;
+  line-height: 1;
+  padding: 0.15em 0.4em;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.g-root .g-prompt-t {
+  font-size: 0.78em;
+  color: var(--ink-soft);
+  text-shadow: 0 0.1rem 0.3rem rgba(4, 9, 14, 0.8);
+}
+
+/* ---- Tab 转盘 ----
+ *
+ * 一圈按钮：`.g-radial-ring` 是定位基准，每一颗用 `--a`（角度）摆上去。
+ *
+ * `translate(-50%,-50%) rotate(--a) translateY(-R) rotate(-1 * --a)`：
+ * 前两段把按钮的中心对到圆心，第三段把它转到角度上并推到半径 R，
+ * 最后一段**把按钮转回正着**——不然整圈字都是斜的，
+ * 而一圈斜着的字读起来比不转更糟。
+ */
+.g-root .g-radial {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  background: rgba(8, 14, 20, 0.45);
+  /* 在道具栏（25）与可见性开关（30）之上，在面板（50）之下。 */
+  z-index: 40;
+  animation: gFade var(--fade) ease-out both;
+}
+
+.g-root .g-radial-hub {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2em;
+  padding: 0.9em 1.1em;
+  text-align: center;
+  /* ★ 宽度有上限，否则它会**盖住左右两格**。
+   *
+   * 圆心左右各有一颗（0° / 180°），而它们离圆心最近：半径 9.4em 减半个身位
+   * 2.6em = **6.8em** 就是那两格的内缘。hub 是居中的 flex 项，宽度由文字决定——
+   * 中文「快捷转盘 / 方向键选择 · Enter 确认 · Esc 关闭」只有十几个字，
+   * 而英文「Quick wheel / Arrows to pick · Enter to confirm · Esc to close」
+   * 宽出两倍，于是 hub 直接盖在左右两格上（实机截图：两格只剩两片边角）。
+   *
+   * 12.5em 的一半是 6.25em，比 6.8em 少 0.55em——**留得开**。
+   * 文字因此会折成两三行，那正是圆形的 hub 本来的样子。
+   */
+  max-width: 12.5em;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 0 1px rgba(226, 196, 137, 0.12),
+    0 0.6rem 2rem rgba(4, 9, 14, 0.55);
+}
+
+.g-root .g-radial-hub-t {
+  font-size: 0.95em;
+  color: var(--ink);
+}
+
+.g-root .g-radial-hub-h {
+  font-size: 0.72em;
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+}
+
+.g-root .g-radial-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+}
+
+.g-root .g-radial-item {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 5.2em;
+  min-height: 5.2em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.1em;
+  padding: 0.4em 0.2em;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink);
+  transform: translate(-50%, -50%) rotate(var(--a, 0deg)) translateY(-9.4em) rotate(calc(-1 * var(--a, 0deg)));
+  transition: border-color var(--fade) ease-out, color var(--fade) ease-out;
+}
+
+.g-root .g-radial-ic {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ink-soft);
+}
+
+.g-root .g-radial-key {
+  font-size: 0.66em;
+  line-height: 1;
+  color: var(--ink-faint);
+  letter-spacing: 0.06em;
+}
+
+.g-root .g-radial-t {
+  font-size: 0.74em;
+  line-height: 1.2;
+  color: var(--ink-soft);
+}
+
+/* 选中项用**元素青**：theme.ts 的第三条——青色只给「此刻响应你」的那一格。 */
+.g-root .g-radial-item.is-sel {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 0 1px rgba(127, 211, 230, 0.35);
+}
+
+.g-root .g-radial-item.is-sel .g-radial-ic,
+.g-root .g-radial-item.is-sel .g-radial-t {
+  color: var(--cyan);
+}
+
+.g-root .g-radial-item.is-off {
+  color: var(--ink-faint);
+  border-style: dashed;
+}
+
+.g-root .g-radial-item.is-off .g-radial-ic,
+.g-root .g-radial-item.is-off .g-radial-t {
+  color: var(--ink-faint);
 }
 
 /* ---- 小地图 ---- */

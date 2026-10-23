@@ -41,8 +41,15 @@ export class BusinessPanel {
     this.site = b; this.hooks.open(); setShown(this.root, true); setShown(this.entry, false);
     this.content.replaceChildren(); this.controls = [];
     this.content.appendChild(el('h2', '', stationNameOf(STATIONS[station].def)));
-    this.content.appendChild(el('p', 'g-note', t('biz_motive')));
-    if (b.id === 'music') {
+    // **没点亮的驿站说另一套话。**
+    //
+    // 原来这里不管解没解锁都写「先备料，再制作，接一单试试」，
+    // 底下还写「第一单从这里开始」——可六个按钮全在写「口碑未达标」。
+    // 三句话互相打架：一边叫你开始，一边告诉你什么都做不了，
+    // 而玩家真正缺的那句「那我该去哪儿」从来没出现过。
+    const locked = this.game.business.reputation < b.unlock;
+    this.content.appendChild(el('p', 'g-note', locked ? t('biz_locked_note', { need: b.unlock }) : t('biz_motive')));
+    if (b.id === 'music' && !locked) {
       const choices = el('div', 'g-acts');
       choices.appendChild(button(t('qin_option_game'), { onClick: () => this.startQin('game') }));
       choices.appendChild(button(t('qin_option_free'), { onClick: () => this.startQin('free') }));
@@ -51,17 +58,26 @@ export class BusinessPanel {
     }
     this.content.appendChild(el('h3', '', t(b.nameKey)));
     this.content.appendChild(this.status);
-    const actions = el('div', 'g-business-actions');
-    for (const action of ['gather', 'craft', 'accept', 'deliver', 'cancel', 'upgrade'] as const) {
-      const btn = button(t(`biz_action_${action}`), { onClick: () => {
-        const result = this.game.businessAct(b.id, action);
-        this.feedback.textContent = result.story ? t(`biz_story_${result.story}`) : t(result.reason);
-        this.refresh();
-      } });
-      actions.appendChild(btn); this.controls.push({ button: btn, action });
+    // **没点亮就不摆按钮。**
+    //
+    // 六个灰按钮全都写着同一句「口碑未达标」——那不是信息，是噪音。
+    // 玩家看到的是"这里什么都不能做"，而不是"这里还没开张"。
+    // 真正需要出现在屏幕上的，是**下一步**：去已经点亮的驿站做成几单。
+    if (!locked) {
+      const actions = el('div', 'g-business-actions');
+      for (const action of ['gather', 'craft', 'accept', 'deliver', 'cancel', 'upgrade'] as const) {
+        const btn = button(t(`biz_action_${action}`), { onClick: () => {
+          const result = this.game.businessAct(b.id, action);
+          this.feedback.textContent = result.story ? t(`biz_story_${result.story}`) : t(result.reason);
+          this.refresh();
+        } });
+        actions.appendChild(btn); this.controls.push({ button: btn, action });
+      }
+      this.content.appendChild(actions);
     }
-    this.content.appendChild(actions);
-    this.feedback.textContent = t(`biz_story_${Math.max(0, this.game.business.chapter)}`);
+    this.feedback.textContent = locked
+      ? t('biz_locked_hint')
+      : t(`biz_story_${Math.max(0, this.game.business.chapter)}`);
     this.content.appendChild(this.feedback);
     this.content.appendChild(el('p', 'g-note', t('biz_network', { sites: BUSINESSES.map(d => `${stationNameOf(STATIONS[d.station].def)} (${d.unlock})`).join(' · ') })));
     this.content.appendChild(button(t('biz_close'), { cls: 'g-btn-major', onClick: () => this.close() }));

@@ -58,6 +58,8 @@ import { LakesidePanel } from './lakesidePanel';
 import type { LakesideFrame } from '../world/lakeside';
 import { HudVisibility } from './visibility';
 import { ItemBar } from './itemBar';
+import { InteractPrompt, type PromptState } from './interactPrompt';
+import { RadialMenu, type RadialItem } from './radialMenu';
 import { StoryCards, ResultCard, setNarrativeQuiet, type SettleOutcome } from './storyCard';
 import { WorldVisibility } from '../game/phase';
 import { MoodMask } from './moodMask';
@@ -309,6 +311,12 @@ readonly touch: {
   private toast: Toast;
   private lakeside!: LakesidePanel;
   private itemBar!: ItemBar;
+  /** 交互提示。**够得着才在**（见 interactPrompt.ts 的文件头）。 */
+  private prompt!: InteractPrompt;
+  /** Tab 转盘。宿主给条目，UI 只负责画与收键。 */
+  private radial!: RadialMenu;
+  /** 转盘当前那一圈条目。切语言时用它重画（名字是函数，跟着语言走）。 */
+  private radialItems: RadialItem[] = [];
   private visibility!: HudVisibility;
   private storyCards!: StoryCards;
   private resultCard!: ResultCard;
@@ -366,6 +374,24 @@ readonly touch: {
       game: this.game,
       onCheckIn: () => this.hooks.onCheckIn(),
     });
+    // 交互提示与转盘**在 HUD 之后构造**：它们是浮在骑行画面上的那一层，
+    // 必须压在 HUD 上面；而面板（`.g-screen`，z-index 50）仍然在它们上面
+    // （转盘 40 / 提示 12），所以「暂停面板开着时底下不该有提示」
+    // 是结构上成立的，而不是靠谁记得先关掉它。
+    this.prompt = new InteractPrompt(this.root, {
+      // ★ 叙事段落在场时，这颗提示让路（前景在前，背景让路）。
+      //
+      // 闸门做在提示组件自己身上，而不是宿主每帧判断：
+      // 宿主那一层要同时拿到「有没有叙事段落」与「有没有可交互的东西」，
+      // 漏判一次就是屏上两颗药丸叠在一起（手机横屏时它们真的重叠，
+      // 而提示的层级更高，点下去会打到提示而不是叙事卡的按钮）。
+      //
+      // 这里传的是 `this.storyBusy`——**屏上有叙事卡，或叙事队列还没空**。
+      // `storyCards` 在本类里比 `prompt` 先构造（见上面），所以这个闭包
+      // 被调用时它一定已经就位。
+      blocked: () => this.storyBusy,
+    });
+    this.radial = new RadialMenu(this.root);
     this.shop = new ShopPanel({
       parent: this.root,
       hooks: this.hooks,
@@ -444,6 +470,10 @@ readonly touch: {
       // 湖边读数也要跟着换语言：它不在 `syncFromState()` 的管辖范围内
       // （`lakeside` 不在 `isInWorld()` 里），所以这里单独点一次。
       this.lakeside.setLang();
+      // 转盘上的名字是**函数**，所以重画一遍就换完了。
+      // 不重画的话，切完语言转盘上还是旧语言——而它常驻在骑行画面上，
+      // 是玩家最容易盯着看的一块字。
+      this.radial.setItems(this.radialItems);
       // toast 的清空也**只该在这里**：`clear()` 的注释写着"切语言、重开、
       // 读档之后"，而 `syncFromState()` 是每公里跑一次的——把 clear() 放进
       // 去的话，每过一公里玩家就没提示看了。toast 的寿命只有 1.8 秒，
@@ -511,6 +541,13 @@ readonly touch: {
     // 道具栏跟着 HUD 一起进出世界：它和 HUD 一样是"在世界里的信息"，
     // 标题页上摆一排空格子只会让人以为少了什么。
     this.itemBar.setVisible(v);
+    // 交互提示与转盘是**世界里的**浮层：离开世界时必须一起收掉。
+    // 漏掉的话，标题页上会浮着一颗「按 F 摸一下」——
+    // 而标题页上没有旧物，那颗按钮按下去什么也不会发生。
+    if (!v) {
+      this.prompt.set(null);
+      this.radial.close();
+    }
     this.visibility.setAvailable(v && this.hudControlsEnabled);
     // 触屏控件跟着 HUD 一起进出世界。
     // 标题页/引导页上摆一个活的摇杆是有害的：那里点它什么也不会发生，
@@ -631,6 +668,17 @@ readonly touch: {
     return this.storyCards.busy;
   }
 
+  /**
+   * 退掉当前这张叙事卡片，让下一张接上来。
+   *
+   * 序章期间玩家按空格时走这条路：故事卡是定时卡，自己不吃按键，
+   * 而打卡又让开——不接这一下，那一下空格就是**纯粹没发生**。
+   * 屏上没有卡时返回 false。
+   */
+  advanceStoryCard(): boolean {
+    return this.storyCards.advanceTop();
+  }
+
   /** 强制打断：压暗 + 锁操作。只给"有人在你耳边说话"那几场用。 */
   showInterruptCard(text: string, title?: string, ms?: number): void {
     this.storyCards.show(text, { title, interrupt: true, ms });
@@ -639,14 +687,15 @@ readonly touch: {
   /**
    * 小游戏结算屏。三态——**取消不是失败**。
    *
-   * `o.gain` 是这一局实际到账的旅币，`o.timedOut` 区分"超时"与"玩砸了"。
-   * 两者都只改小字，大字仍由 `settleTextKey` 判，所以结算三态的语义没被动过。
+   * `o.gain` 是这一局实际到账的旅币，`o.timedOut` 区分"超时"与"玩砸了"，
+   * `o.mood` 是这一局在**心神**上的得失（赢 +1 / 输 −1）。
+   * 三者都只改小字，大字仍由 `settleTextKey` 判，所以结算三态的语义没被动过。
    */
   showResult(
     outcome: SettleOutcome,
     slot: number,
     onDone?: () => void,
-    o: { gain?: number; timedOut?: boolean } = {},
+    o: { gain?: number; timedOut?: boolean; mood?: number } = {},
   ): void {
     this.resultCard.show(outcome, slot, undefined, onDone, o);
   }
@@ -659,6 +708,69 @@ readonly touch: {
   /** 道具栏，用来在打卡/购买之后刷新已拥有状态 */
   get items(): ItemBar {
     return this.itemBar;
+  }
+
+  // ---------------------------------------------------------------- 转盘 / 交互提示
+
+  /**
+   * 换转盘上那一圈条目。
+   *
+   * **条目由宿主给**：UI 只负责画与收键，而"按下去要发生什么"
+   * 是游戏规则上的事，不该由界面层决定。
+   *
+   * 条目的名字是**函数**（`() => t(...)`），所以切语言不需要重设整圈——
+   * UI 在 `onLangChange` 里重画一次就够了。
+   */
+  setRadialItems(items: RadialItem[]): void {
+    this.radialItems = items;
+    this.radial.setItems(items);
+  }
+
+  /** 转盘开着吗。宿主在处理按键之前要问这一句。 */
+  get radialOpen(): boolean {
+    return this.radial.isOpen;
+  }
+
+  /** 开 / 关转盘。 */
+  toggleRadial(): void {
+    this.radial.toggle();
+  }
+
+  /**
+   * 把这一下按键交给转盘。
+   *
+   * 返回 true 表示「转盘吃掉了这一下」——宿主必须**就此打住**：
+   * 方向键在骑行相位是转向，Esc 是暂停，而这两件事在转盘开着时
+   * 分别是"换选中的那一项"和"关掉转盘"。
+   */
+  handleRadialKey(code: string, shift = false): boolean {
+    return this.radial.handleKey(code, shift);
+  }
+
+  /**
+   * 交互提示。传 `null` = 现在没有可交互的东西，于是提示整个收掉。
+   *
+   * **判据由宿主给**（它手里有 `world.relicNearby` / `world.qinInReach` /
+   * `world.signInReach`），UI 只负责把它画出来或收掉。
+   *
+   * ★ 顺带把「它是哪一族动作」推给脚下那一圈：
+   *   两者指向同一个动作时，圈上那行字让位（规则见 `hud.ts` 的 `ringLabelText()`）。
+   *   提示与圈都在这个 UI 层里，**这一层是唯一同时看得见两者的地方**，
+   *   所以「谁在说话」这件事只在这里判一次。
+   *
+   * ★ 叙事段落在场时**提示让路**——但那条闸门不在这里，
+   *   而在提示组件自己身上（`InteractPrompt` 的 `blocked`）。
+   *   所以 `setPrompt()` 传进来的状态**可能不显示**：
+   *   屏上有叙事卡时，这一格让给叙事卡。
+   */
+  setPrompt(s: PromptState | null): void {
+    this.prompt.set(s);
+    this.hud.setPromptKind(this.prompt.kind);
+  }
+
+  /** 交互提示现在亮着吗。给宿主与回归读。 */
+  get promptShown(): boolean {
+    return this.prompt.shown;
   }
 
   showTitle(): void {
@@ -741,6 +853,9 @@ readonly touch: {
    * 先把暂停收起来：两张居中卡片叠在一起读作"有两个菜单"，
    * 而这一屏要说的事只有一件——这趟攒到哪儿了。
    * 相位不动，仍然是 `paused`，所以退出时回到的是暂停面板而不是路上。
+   *
+   * **对外公开**是因为 Tab 转盘上也有这一项：转盘是骑行时的快捷入口，
+   * 而"看看这一趟攒到哪儿了"正是它该给的一个动作。
    */
   lookPostcard(): void {
     this.pause.hide();
@@ -919,7 +1034,7 @@ readonly touch: {
    * 而不是各自去读 game。
    *
    * ⚠️ 调用频率比看上去高得多：`main.ts` 在 `game.on('lvbi')` 上挂了它，
-   * 而 `earnKm()` **每跨一整公里**触发一次——不是每次发钱，是每公里。
+   * 而旅币**每一次变动**都会触发一次——打卡、买东西、过关、每骑完一圈。
    * 所以
    *   · 常驻的（HUD / 触屏 / 遮罩 / 性能面板）无条件同步，全是带缓存的
    *     文本写入，代价约等于零；

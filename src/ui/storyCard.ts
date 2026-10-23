@@ -46,6 +46,16 @@ const MAX_MS = 22000;
 interface Card {
   root: HTMLDivElement;
   life: number;
+  /**
+   * **能不能被关闭。**
+   *
+   * 「停下来读」性质的段落为真（序章、驿里的声音、木牌）；
+   * 「骑过去顺便读」的为假（路边那块碑文）。
+   * 空格推进只动这一类——见 `advanceTop()`。
+   */
+  dismissible: boolean;
+  /** 是不是从**队列**里接上来的（属于一段顺序播的叙事）。 */
+  sequenced: boolean;
 }
 
 /**
@@ -232,11 +242,18 @@ export class StoryCards {
       this.queue = [];
       for (const c of this.cards) c.root.remove();
       this.cards = [];
-      this.show(last.text, last.opts);
+      // 它是这一段的**最后一张**，所以它仍然算「队列里来的」。
+      // （`sequenced` 只影响一件事：退掉它之后要不要立刻接下一张。）
+      this.pumping = true;
+      try {
+        this.show(last.text, last.opts);
+      } finally {
+        this.pumping = false;
+      }
       return;
     }
     const only = this.cards[0];
-    if (only) this.dismiss(only.root);
+    if (only) this.dismiss(only.root, only.sequenced);
   }
 
   /**
@@ -320,7 +337,14 @@ export class StoryCards {
     }
     this.root.appendChild(card);
     const ms = opts.ms ?? readingMs(text, isEnglish());
-    this.cards.push({ root: card, life: Math.max(MIN_MS, ms) / 1000 });
+    // `pumping` 为真 = 这张是从**队列**里接上来的（属于一段顺序播的叙事）。
+    // 路边单独浮出来的那几张不是。
+    this.cards.push({
+      root: card,
+      life: Math.max(MIN_MS, ms) / 1000,
+      dismissible: opts.dismissible === true,
+      sequenced: this.pumping,
+    });
 
     // 超出上限就把最早那条挤掉，而不是往下堆到屏幕外
     while (this.cards.length > MAX_CARDS) {
@@ -331,21 +355,71 @@ export class StoryCards {
   }
 
   /**
+   * 退掉当前这张，让队列里的下一张接上来。**键盘用。**
+   *
+   * ## 为什么需要它
+   *
+   * 故事卡是**定时卡**：它自己读满 `readingMs` 就退场。
+   * 它**不吃按键**——吃按键的是对白框（`dialogue.ts`，捕获阶段拦 Space/Enter）。
+   * 于是序章那七张摆在屏上的时候，玩家按空格**什么都不会发生**：
+   * 打卡被 `prologueBusy` 让开，故事卡又不理按键。
+   * 玩家按了七八下，屏幕上只有一张自己慢慢走完的卡。
+   *
+   * 而空格在这个游戏里别处都是「推进」——它不该是唯一一个按了没反应的键。
+   *
+   * ## 只动**可关闭**的那张
+   *
+   * 路边那块碑文是「骑过去顺便读」的：它**不吃点击**，
+   * 也不该因为玩家按了空格就被抽走——那句话是给停下来的人读的。
+   * 所以这里只退 `dismissible` 的卡，其余的当没看见。
+   *
+   * ## 为什么走 `dismiss()`
+   *
+   * 和「点一下退一张」同一条路径，所以"按空格"和"点一下"
+   * 不可能一个跳卡、一个等计时。
+   */
+  advanceTop(): boolean {
+    const i = this.cards.findIndex((c) => c.dismissible);
+    if (i < 0) return false;
+    const card = this.cards[i];
+    this.dismiss(card.root, card.sequenced);
+    return true;
+  }
+
+  /**
    * 点掉某一张。
    *
    * 走的是和 `update()` 里自动退场**同一条**路径，所以队列推进只有一处实现——
    * "点掉"和"等它走完"的行为不可能各说各话。
+   *
+   * @param pumpSequence 这张是不是**队列里**来的。
+   *   是的话，下一张**立刻**接上——见 `afterCardGone()`。
    */
-  private dismiss(card: HTMLElement): void {
+  private dismiss(card: HTMLElement, pumpSequence = false): void {
     const i = this.cards.findIndex((c) => c.root === card);
     if (i < 0) return;
     card.remove();
     this.cards.splice(i, 1);
-    this.afterCardGone();
+    this.afterCardGone(pumpSequence);
   }
 
-  /** 一张退场之后：队列里还有就接上，否则把容器收起来。 */
-  private afterCardGone(): void {
+  /**
+   * 一张退场之后：队列里还有就接上，否则把容器收起来。
+   *
+   * @param pumpSequence 退掉的是**队列里**来的那一张。
+   *
+   *   这种情况下**下一张立刻接上**，哪怕屏上还压着别的卡。
+   *   理由：屏上那张若是路边那块碑文（关不掉），
+   *   「屏上真的空了才接下一张」会让序章停在那儿好几秒——
+   *   而玩家按的是空格，他要的是"接着念"。
+   *   「接上就重叠 220ms」那个顾虑只对**自动退场**成立：
+   *   那是两张卡自己撞在一起，而这里是玩家主动要的。
+   */
+  private afterCardGone(pumpSequence = false): void {
+    if (pumpSequence && this.queue.length && !this.cards.some((c) => c.sequenced)) {
+      this.pump();
+      return;
+    }
     if (this.cards.length) return;
     if (this.queue.length) this.pump();
     else setShown(this.root, false);
@@ -459,7 +533,7 @@ export class ResultCard {
   private last: {
     outcome: SettleOutcome;
     slot: number;
-    o: { gain?: number; timedOut?: boolean };
+    o: { gain?: number; timedOut?: boolean; mood?: number };
   } | null = null;
 
   constructor(parent: HTMLElement) {
@@ -499,7 +573,7 @@ export class ResultCard {
     slot: number,
     ms = settleMs(outcome),
     onDone?: () => void,
-    o: { gain?: number; timedOut?: boolean } = {},
+    o: { gain?: number; timedOut?: boolean; mood?: number } = {},
   ): void {
     this.last = { outcome, slot, o };
     this.paint(outcome, slot, o);
@@ -515,7 +589,7 @@ export class ResultCard {
    * `this.life` 续上（那会让玩家切一次语言就多看好几秒），
    * 也不能把已经落幕的卡重新 `setShown(true)`。
    */
-  private paint(outcome: SettleOutcome, slot: number, o: { gain?: number; timedOut?: boolean }): void {
+  private paint(outcome: SettleOutcome, slot: number, o: { gain?: number; timedOut?: boolean; mood?: number }): void {
     setText(this.big, t(settleTextKey(outcome)));
     // 副标题：赢了给乐事名，输了给「这一件：X」——
     // 输的时候玩家同样需要知道自己刚才是哪一件没做成，
@@ -524,9 +598,18 @@ export class ResultCard {
     const name = t(`fragment_${slot}`);
     setText(this.sub, outcome === 'win' ? name : outcome === 'lose' ? `${t('mg_played')}${name}` : '');
 
+    // 一行账：**旅币**与**心神**并排。
+    //
+    // 胜负要写在**同一行**上，因为它们是同一件事的两面：
+    // 这一局给了什么、这一局拿走了什么。只念旅币的话，
+    // 心神那一格的变化就只剩顶栏那个数字悄悄跳了一下。
     const gain = o.gain ?? 0;
-    setText(this.gain, gain > 0 ? t('collecting_lvbi', { 0: gain }) : '');
-    setShown(this.gain, gain > 0);
+    const mood = o.mood ?? 0;
+    const parts: string[] = [];
+    if (gain > 0) parts.push(t('collecting_lvbi', { 0: gain }));
+    if (mood !== 0) parts.push(t('result_mood', { 0: mood > 0 ? `+${mood}` : `${mood}` }));
+    setText(this.gain, parts.join(' · '));
+    setShown(this.gain, parts.length > 0);
 
     // 超时与玩砸分开说。取消没有这一行：他没输。
     const note = outcome === 'lose' ? t(o.timedOut ? 'mg_timeout' : 'mg_failed_hint') : '';

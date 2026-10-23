@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="188">
+  <!--
+    站点图标。
+
+    ## 为什么要有它
+
+    浏览器每次打开一个没有 favicon 的页面，都会自动去要一次 `/favicon.ico`，
+    拿回来一个 404。那一行 404 本身无害，可它：
+    · 在 Network 面板里占一条，掩盖真正的失败；
+    · 在控制台里留一条红字（"Failed to load resource: 404"）；
+    · 证明这一页**没有自己的图标**——而这个游戏有一整套完整的视觉。
+
+    ## 为什么用 SVG 而不是 PNG/ICO
+
+    · 16×16 的 PNG 在这个深青蓝底上会把「188」糊成一团灰；
+      SVG 是矢量，缩到 16px 仍是三根清楚的竖画。
+    · 一个文件顶三个（16/32/64），不用维护三份尺寸。
+    · 字节数是 PNG 的零头——首屏请求越少越好。
+
+    颜色取自 `src/ui/theme.ts` 的同一套：底 `PAPER_DAY` 的 #1c2e3c，
+    字 `ACCENT` 的 #e2c489。**两份色表不许各写一份**（theme.ts 文件头）。
+  -->
+  <rect width="64" height="64" rx="14" fill="#1c2e3c"/>
+  <rect x="3.5" y="3.5" width="57" height="57" rx="12" fill="none" stroke="#d9b877" stroke-width="1.6" opacity="0.55"/>
+  <text x="32" y="43.5" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="30" font-weight="700" fill="#e2c489">188</text>
+</svg>

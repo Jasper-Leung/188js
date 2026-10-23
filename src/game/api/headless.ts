@@ -119,6 +119,8 @@ export class HeadlessAdapter implements AiAdapter {
   private readonly events: AiEvent[] = [];
   /** 累计骑行米数。和 `World.odometer` 同一个算法：每帧把位移累加进去。 */
   private odometer = 0;
+  /** 上一帧的环线归一化位置（0..1）。判"绕回去一圈"用。 */
+  private lastArc = 0;
   /** 当前报的界面状态。见 `HeadlessScreen` 为什么要它可注入。 */
   private screen: HeadlessScreen = { ...DEFAULT_SCREEN };
   /** 事件去抖用的上一帧影子。 */
@@ -149,6 +151,9 @@ export class HeadlessAdapter implements AiAdapter {
     const start = roadSpawnPose(pointAtArcLength(0).pos.x, pointAtArcLength(0).pos.z);
     this.ride.spawn(start.x, start.z, start.heading);
     this.ride.setCanMove(true);
+    // 圈的判据要**从出发的位置**起算，不能从 0 起算——
+    // 否则玩家在起点附近来回蹭两下就会被记成"骑完一圈"。
+    this.lastArc = nearestArcParam(start.x, start.z);
     this.prev = {
       day: this.game.day,
       lvbi: this.game.lvbi,
@@ -207,8 +212,17 @@ export class HeadlessAdapter implements AiAdapter {
 
     this.odometer += Math.hypot(this.ride.pos.x - px, this.ride.pos.z - pz);
     // 和 `world.ts:340-341` 逐字一致：公里数是**位移累加**，不是沿环线投影。
+    // 公里数现在**只作调试口径**——经济按圈发（见 `GameStateManager.LVBI_PER_LAP`）。
     this.game.progressKm = this.odometer / 1000;
-    this.game.earnKm(this.game.progressKm);
+
+    // 圈数：和 `world.ts` 用同一个判据（中心线参数从 >0.85 绕回 <0.15）。
+    //
+    // 这一段**必须**和无头之外的那一套一致，否则两套经济会分叉：
+    // 浏览器里骑完一圈发 75 枚，无头里不发 → 无头的旅币数会偏少，
+    // 而 `npm run ai:play` 的判据读的就是无头那份数字。
+    const arc = this.arcFraction();
+    if (this.lastArc > 0.85 && arc < 0.15) this.game.noteLap();
+    this.lastArc = arc;
 
     this.t += HEADLESS_DT;
     this.tick++;

@@ -31,12 +31,16 @@ import {
   MeshBasicMaterial,
   Color,
   OctahedronGeometry,
+  BufferGeometry,
+  Float32BufferAttribute,
+  DoubleSide,
 } from 'three';
 import { WORLD } from '../data/raw';
 import { STATIONS, type StationPlacement, CENTERLINE, TOTAL_ARCLENGTH, pointAtArcLength } from '../data/route';
 import { loadModel, modelUrl, tintModel, type LoadedModel } from './assets';
 import type { Terrain } from './terrain';
 import type { QualityPreset } from '../core/settings';
+import { STATION_REACH } from '../game/phase';
 
 export interface StationRuntime {
   index: number;
@@ -93,16 +97,69 @@ export function stationStretch(modelIdx: number): readonly [number, number] {
  */
 const FRONT_FACING_MODEL_IDX = new Set([6, 7, 8, 9, 10, 11, 12]);
 
+// ---------------------------------------------------------------- 打卡圈
+
+/**
+ * 碎片驿站脚下那圈光的参数。
+ *
+ * ## 为什么要画它
+ *
+ * `STATION_REACH`（≈21.5m）这个判定圈**从来没有被画出来过**：
+ * 驿站中心离路面中心线约 18m，而判定圈比它还大一点，
+ * 于是**沿路面骑过驿站就已经够得着**——可地面上没有任何东西说"这里"。
+ *
+ * 玩家能拿到的只有两句事后的话：进圈之后 HUD 弹一颗「Space」键帽，
+ * 没进圈的时候按空格得到一句「再靠近一点 · 站进光圈再按空格」。
+ * 第二句里那个"光圈"**本来是不存在的**——它是一句承诺，而承诺没有兑现。
+ *
+ * 所以这一圈是**兑现那句文案**，不是新增一条机制：
+ * 半径就是 `STATION_REACH`，进圈 = 空格生效，判定与提示从此对得上。
+ */
+const RING_SEGMENTS = 72;
+/** 环宽（米）。窄一点更像一道光，而不是一片地。 */
+export const RING_WIDTH = 0.9;
+/** 抬离地面的高度（米）。贴着地形走，抬一点是为了不和地形 z-fighting。 */
+const RING_LIFT = 0.12;
+/** 超过这个距离就不画：远处一个 21.5m 的圈挂在山坡上只会像一块色斑。 */
+export const RING_SHOW_DIST = 170;
+/** 圈外的透明度。 */
+export const RING_FAR_OPACITY = 0.26;
+/** 圈内的透明度。进圈那一刻要看得见。 */
+export const RING_NEAR_OPACITY = 0.72;
+
+export interface RingRuntime {
+  mesh: Mesh;
+  mat: MeshBasicMaterial;
+  /** 驿站自己的颜色。 */
+  base: Color;
+  /** 圈心（驿站坐标）。 */
+  x: number;
+  z: number;
+}
+
 export class Stations {
   readonly group = new Group();
   readonly list: StationRuntime[] = [];
+  /**
+   * 打卡圈。**碎片驿站脚下那五道光。**
+   *
+   * 公开是给回归与调试面板读的：这一圈是**判定**的可见化，
+   * 半径必须与 `STATION_REACH` 一致，而这件事在无头环境里
+   * 只能靠读几何证明（见 `verify/optimization.ts`）。
+   */
+  readonly rings: RingRuntime[] = [];
   private preset: QualityPreset;
   private silhouetteGroup = new Group();
+  /** 打卡圈。碎片驿站脚下那五道光。 */
+  private ringGroup = new Group();
+  private terrain: Terrain;
 
   constructor(preset: QualityPreset, terrain: Terrain) {
     this.preset = preset;
+    this.terrain = terrain;
     this.group.name = 'stations';
     this.group.add(this.silhouetteGroup);
+    this.group.add(this.ringGroup);
 
     for (let i = 0; i < STATIONS.length; i++) {
       const placement = STATIONS[i];
@@ -123,6 +180,74 @@ export class Stations {
       this.list.push(entry);
       // 剪影替身先摆上，玩家一进场就能看见路边的"东西在那儿"
       this.addSilhouette(i, placement, groundY, cfg);
+      // 碎片驿站多一圈打卡的光。**只有碎片驿站有**——
+      // 十一座路过站不收打卡，画了圈只会让玩家在不该按空格的地方按。
+      if (placement.hasFragment) this.addRing(placement);
+    }
+  }
+
+  /**
+   * 造一圈贴着地形的环。
+   *
+   * 顶点高度**逐点取地形**，而不是把一个平环摆上去：
+   * 21.5m 的半径跨过去地形能差出好几米，
+   * 平环的一半会埋进坡里、另一半浮在空中。
+   */
+  private addRing(p: StationPlacement): void {
+    const R = STATION_REACH;
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (let i = 0; i <= RING_SEGMENTS; i++) {
+      const a = (i / RING_SEGMENTS) * Math.PI * 2;
+      const ca = Math.cos(a);
+      const sa = Math.sin(a);
+      for (const r of [R - RING_WIDTH, R]) {
+        const x = p.x + ca * r;
+        const z = p.z + sa * r;
+        pos.push(x, this.terrain.getHeightAt(x, z) + RING_LIFT, z);
+      }
+      if (i < RING_SEGMENTS) {
+        const b = i * 2;
+        idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+      }
+    }
+    const geo = new BufferGeometry();
+    geo.setAttribute('position', new Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+
+    const base = new Color(p.def.color[0], p.def.color[1], p.def.color[2]);
+    const mat = new MeshBasicMaterial({
+      color: base.clone(),
+      transparent: true,
+      opacity: RING_FAR_OPACITY,
+      // 不写深度：环是地面上的贴花，被坡挡住就该看不见。
+      // 但它自己不能挡住别的东西。
+      depthWrite: false,
+      side: DoubleSide,
+      fog: true,
+    });
+    const mesh = new Mesh(geo, mat);
+    mesh.name = `station-ring-${p.slot}`;
+    mesh.renderOrder = 1;
+    this.ringGroup.add(mesh);
+    this.rings.push({ mesh, mat, base, x: p.x, z: p.z });
+  }
+
+  /**
+   * 圈的显隐与明暗。**每帧跑**（不是每 0.4s 一次）：
+   * 圈外 → 圈内的那一下必须跟着手走，迟 0.4s 会读成"我明明进来了"。
+   */
+  updateRings(playerX: number, playerZ: number): void {
+    for (const r of this.rings) {
+      const d = Math.hypot(r.x - playerX, r.z - playerZ);
+      const visible = d < RING_SHOW_DIST;
+      r.mesh.visible = visible;
+      if (!visible) continue;
+      const inside = d <= STATION_REACH;
+      r.mat.opacity = inside ? RING_NEAR_OPACITY : RING_FAR_OPACITY;
+      // 进圈时提亮一点：颜色不变，亮度变——颜色是驿站的，亮度是状态。
+      const k = inside ? 1.25 : 0.85;
+      r.mat.color.setRGB(r.base.r * k, r.base.g * k, r.base.b * k);
     }
   }
 

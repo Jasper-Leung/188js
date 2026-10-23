@@ -44,7 +44,7 @@ import { verticalFovForAspect, horizontalFromVertical, FOV_BASE, FOV_REF_ASPECT,
 import { afterCheckInRoute, canGoPhase, canRide, isInWorld, WorldVisibility, phaseEdgeErrors, phaseReachErrors, settleTextKey, settleMs, unwrapArc, recheckGate, STATION_REACH } from '../game/phase';
 import { RIDE } from '../data/raw';
 import { CAM_MODES, camParams, OFFROAD, offRoadFactorFor } from '../world/ride';
-import { Vehicle, MODE_TUNE, RIDE_MODES, autoScaleToHeight, collectClips, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, type RideMode } from '../world/vehicle';
+import { Vehicle, MODE_TUNE, RIDE_MODES, autoScaleToHeight, collectClips, measureWheelNode, rootBoneName, rootTrackOf, stripRootMotion, cadenceScale, BIKE_STEER_MAX, BIKE_GEAR_RATIO, BIKE_WHEEL_R, SKATE_DECK_Y, prepareRideClip, pedalCadence, PEDAL_CADENCE_MAX, motoSteerWheelOverlap, type RideMode } from '../world/vehicle';
 import { stancePoseOf, keyTimesOf, PoseSampler, FOOT_BONES, loopSeamOf, trimToSeam } from '../world/pose';
 import { expect, fakeCtx, stripComments } from './harness';
 import { registerFeatureChecks } from './features';
@@ -63,6 +63,8 @@ import { readingMs, StoryCards, setNarrativeQuiet, ResultCard } from '../ui/stor
 import { PausePanel } from '../ui/pausePanel';
 import { isShown } from '../ui/dom';
 import { registerInteractionChecks } from './interaction';
+import { registerOptimizationChecks } from './optimization';
+import { registerWidgetChecks } from './widgets';
 import { Dialogue } from '../ui/dialogue';
 import { homeNextLine, splitNextTarget } from '../ui/hud';
 import { PRESETS } from '../core/settings';
@@ -2550,22 +2552,28 @@ check('verify_economy', () => {
   // 是按**驿站**给的（`mini_<站>_win`），一座驿站打三次都只发一次钱。
   // 写成 15 × 20 会得到 999，比真实值多 200——而这一条断言守的就是
   // 幂等账本，所以它必须按账本的口径算，而不是按局数算。
+  //
+  // 里程那一项**已经不是按公里算了**（见 `GameStateManager.LVBI_PER_LAP`）：
+  // 源项目那条环线真长 188 公里，所以 `LVBI_PER_KM = 2` 走完全程是 376 枚；
+  // 这一版的环线只有 1228.8 米，按公里发钱一圈才 2 枚——
+  // 于是这一条断言守的那个 799 预算**从来没成立过**，实际能拿到的只有 425。
+  // 现在口径是按圈：前 5 圈各 75 枚，领满就不再给。
   const frags = 5;
   const repeats = 2;
-  const kmIncome = Math.floor(ECON.TOTAL_ROUTE_KM) * ECON.LVBI_PER_KM;
+  const lapIncome = GameStateManager.LAP_BONUS_CAP * GameStateManager.LVBI_PER_LAP;
   const passIncome = 16 * ECON.LVBI_PER_PASS;
   const firstCheckin = frags * ECON.LVBI_FIRST_CHECKIN;
   const repeatCheckin = frags * repeats * ECON.LVBI_REPEAT_CHECKIN;
   const miniAllWin = frags * ECON.LVBI_MINI_WIN;
   const frag = frags * ECON.LVBI_PER_FRAGMENT;
-  const full = kmIncome + passIncome + firstCheckin + repeatCheckin + miniAllWin + frag;
+  const full = lapIncome + passIncome + firstCheckin + repeatCheckin + miniAllWin + frag;
   asserts++;
-  if (full !== 799) probs.push(`全清收入 ${full}，源项目口径是 799（其中小游戏只有 ${miniAllWin}，按站幂等）`);
+  if (full !== 798) probs.push(`全清收入 ${full}，本版口径是 798（圈钱 ${lapIncome} + 碎片 ${frag} + 其余 ${passIncome + firstCheckin + repeatCheckin + miniAllWin}）`);
 
   // 只骑不打卡的"纯骑行"收入
-  const rideOnly = kmIncome + passIncome;
+  const rideOnly = lapIncome + passIncome;
   asserts++;
-  if (rideOnly !== 424) probs.push(`纯骑行收入 ${rideOnly}，源项目口径是 424`);
+  if (rideOnly !== 423) probs.push(`纯骑行收入 ${rideOnly}，本版口径是 423`);
 
   // 合理全购：**明信片套餐只买最高那一档**（互斥升级），其余按 max_own 叠满。
   // 早先按"每件买一件"求和会得到 965，比真实值少 45——因为灯笼能买两盏、
@@ -2588,7 +2596,7 @@ check('verify_economy', () => {
   // 缺口是正的：必须在视野和纸面之间做减法
   const gap = sensible - full;
   asserts++;
-  if (gap !== 211) probs.push(`缺口 ${gap}，源项目口径是 211（两盏半灯笼）`);
+  if (gap !== 212) probs.push(`缺口 ${gap}，本版口径是 212（两盏半灯笼；源项目 799 预算时是 211）`);
   asserts++;
   if (gap <= 0) probs.push('缺口 ≤ 0，铺子里的东西全都买得起，选择就不存在了');
 
@@ -6677,14 +6685,6 @@ function countTree(o: Object3D): number {
   return n;
 }
 
-/** 一段假的骑行片段：根骨 y = 0.504（真素材实测值），水平位移 0。 */
-function realRideClip(): AnimationClip {
-  const t = new Float32Array([0, 1]);
-  return new AnimationClip('骑自行车', 1, [
-    new KeyframeTrack('mixamorigHips.position', t, Float32Array.from([0, 0.504, 0, 0, 0.504, 0])),
-  ]);
-}
-
 const realModels = await loadRealModels();
 
 if (!realModels) {
@@ -6705,7 +6705,13 @@ if (!realModels) {
 
   for (const mode of ['bike', 'motorcycle'] as const) {
     const v = new Vehicle();
-    v.attach({ bike: bicycle, motorcycle, skate: null, char, clips: collectClips([realRideClip()]) });
+    // ★ 用**真素材自带的动画**，不再用 `realRideClip()` 那段两键的假片段。
+    //
+    //   假片段只有两帧：循环接缝量不到（脚根本没动过），
+    //   而烘焙出来的脚也只有两个位置——**整条骑行链路（接缝 → 裁剪 →
+    //   倍率 → 曲柄）在这条判据里一次都没跑过**。
+    //   而这条判据本来就挂着真角色与真车模，用真动画没有额外的代价。
+    v.attach({ bike: bicycle, motorcycle, skate: null, char, clips: collectClips(realModels.charAnims) });
     if (!v.set(mode)) {
       asserts++;
       probs.push(`${mode}: 切不进去`);
@@ -6839,7 +6845,12 @@ if (!realModels) {
       v.update(1 / 60, 0, 0);
       v.update(1 / 60, 10, 0);
       const d = wheel() - before;
-      const r = mode === 'bike' ? 0.35 : v.motorcycleWheelRadius;
+      // ★ 半径必须取**它量的是哪只轮子**的那一个。
+      //   摩托车前后轮不一样大（实测 0.3495 / 0.3308），而 `wheel()` 量的是
+      //   **后轮**。拿前轮的半径去对后轮的角度，它量到的就是
+      //   「后轮快了 5.7%」——而那恰恰是**修好之后**的状态。
+      //   于是这条判据一开始把正确的实现判成了错（红着，且看着像代码坏了）。
+      const r = mode === 'bike' ? BIKE_WHEEL_R : v.motorcycleWheelRadii.rear;
       asserts++;
       if (d <= 0) {
         probs.push(`${mode}: 前进 1/6 秒后轮角增量 ${d.toFixed(4)} rad，轮子在倒着转`);
@@ -6868,7 +6879,110 @@ if (!realModels) {
       }
     }
 
-    // 6. ★ 自行车 rig 的装配尺寸 ——「看起来歪」最直接的能量法
+    // 7. ★★★★ **摩托车专用**：逐轮轴、逐轮半径、两组不许重叠
+    //
+    //    前六条问的是「这台车整体对不对」，而这一族问的是
+    //    **用户报的那句「前轮转动时，部分零件也跟着转动」**。
+    //
+    //    实测 `motorcycle.glb` 的三个硬事实：
+    //    · 前后轮轴方向差 **1.757°** ⇒ 原来「取平均当唯一轴」让
+    //      每个轮子都偏离自己的轴 **0.88°**。轮子绕歪轴转，
+    //      轮辋辐条 / 刹车盘这些**垂直于轮轴**的薄片就跟着甩 ——
+    //      玩家看到的就是「轮子在转，轮子上的零件在晃」。
+    //    · 前后轮**不一样大**（竖直跨度 0.3419 vs 0.3237）⇒
+    //      共用一个半径会让后轮快 **5.7%**，胎面在地面上滑。
+    //    · 转向组与轮子组**不许有交集**：一个零件进两组时，
+    //      后一次 `attach` 会把它从前一组里拽走，于是它跟着另一个轴动。
+    if (mode === 'motorcycle') {
+      // 7a. 逐轮自转轴必须对准**该轮自己**的实测轴
+      asserts++;
+      {
+        const err = v.motoSpinAxisErrorDeg();
+        // 容差 0.05°：修复前是 0.88°，修复后应当接近 0。
+        // 留 0.05° 是给浮点与量测噪声，不是放水。
+        for (const [tag, deg] of [['前轮', err.front], ['后轮', err.rear]] as const) {
+          asserts++;
+          if (!Number.isFinite(deg)) {
+            probs.push(`摩托车：量不到${tag}的自转轴误差`);
+          } else if (deg > 0.05) {
+            probs.push(
+              `摩托车${tag}的自转轴偏离它自己实测的轴 ${deg.toFixed(3)}° —— ` +
+                '轮子绕着歪轴转，轮辋与刹车盘这些垂直于轮轴的薄片会跟着甩',
+            );
+          }
+        }
+      }
+
+      // 7b. 前后轮必须用**各自**的半径，且两个半径确实不同
+      asserts++;
+      {
+        const r = v.motorcycleWheelRadii;
+        asserts++;
+        if (!(r.front > 0) || !(r.rear > 0)) {
+          probs.push(`摩托车轮半径量不到：前 ${r.front} / 后 ${r.rear}`);
+        } else {
+          asserts++;
+          // 真实这台车后轮小 5.7%。若两个半径**完全相同**，
+          // 说明代码又退回「共用一个半径」了 —— 那是胎面滑移的根因。
+          const diff = Math.abs(r.front - r.rear) / r.front;
+          if (diff < 0.01) {
+            probs.push(
+              `摩托车前后轮半径相同（都是 ${r.front.toFixed(4)}m）—— ` +
+                '共用一个半径会让后轮快 5.7%，胎面在地面上滑',
+            );
+          }
+          notes.push(`摩托车轮半径 前 ${r.front.toFixed(4)}m / 后 ${r.rear.toFixed(4)}m`);
+        }
+      }
+
+      // 7c. ★ 轮角必须**分别**按各自的半径算（不打滑）
+      //
+      // 第 4 条量的是**后轮**（`motoWheelAngle` 读的就是后轮的自转层）。
+      // 这一条量**前轮**：两个轮子各按各的半径转，才叫「逐轮」。
+      //
+      // 两条一起才拦得住「两轮共用一个半径」那种回归：
+      //   · 都用前轮半径 → 后轮快 5.7%（第 4 条红）
+      //   · 都用后轮半径 → 前轮慢 5.7%（这一条红）
+      asserts++;
+      {
+        const before = v.motoFrontWheelAngle;
+        v.update(1 / 60, 0, 0);
+        v.update(1 / 60, 10, 0);
+        const d = v.motoFrontWheelAngle - before;
+        const r = v.motorcycleWheelRadii.front;
+        asserts++;
+        const want = (10 / 60) / r;
+        if (Math.abs(d - want) > 0.02) {
+          probs.push(
+            `摩托车前轮角增量 ${d.toFixed(4)} rad，${(10 / 60).toFixed(4)}m ÷ R${r.toFixed(4)}m 应为 ${want.toFixed(4)}`,
+          );
+        }
+      }
+
+      // 7d. 转向组与自转组**不许有交集**
+      asserts++;
+      {
+        const overlap = motoSteerWheelOverlap();
+        asserts++;
+        if (overlap.length) {
+          probs.push(
+            `摩托车的转向组与轮子组有交集：${overlap.join(', ')} —— ` +
+              '同一件零件被两个 attach 抢，后一次会把它从先前那组里拽走',
+          );
+        }
+        // 实测的成员也钉一下：自转组只该有轮子。
+        const members = v.motoSpinMembers;
+        asserts++;
+        const foreign = [...members.front, ...members.rear].filter(
+          (n) => !/^tripo_part_(0|1)$/.test(n) && !/^rig:/.test(n),
+        );
+        if (foreign.length) {
+          probs.push(`摩托车自转组里混进了不该自转的零件：${foreign.join(', ')}`);
+        }
+      }
+    }
+
+    // 8. ★ 自行车 rig 的装配尺寸 ——「看起来歪」最直接的能量法
     if (mode === 'bike') {
       asserts++;
       const f = bicycle.getObjectByName('rig:frontSteer')?.getWorldPosition(new Vector3());
@@ -8092,15 +8206,13 @@ check('verify_ui_visibility', () => {
  *
  * ## 这个 bug 换了三个位置，三次的修法还不一样
  *
- * · **碎片栏**（`.g-frags`）：72% 的半透明纸 —— 底下的山透过字缝冒出来。
- * · **标题页那张卡**（`.g-card-title`）：0.55 的白纱压不住画面。
+ * · **碎片栏**（`.g-frags`）：半透明的底 —— 底下的山透过字缝冒出来。
+ * · **标题页那张卡**（`.g-card-title`）：一层薄纱压不住画面，
  *   主视觉不是均匀浅色，它有大片淡墨山体（最暗处约 rgb(45)），
- *   0.55 压上去只有 `236×0.55 + 45×0.45 ≈ 157` 的一片中灰——
- *   **卡上每一行字**都浮在上面，不只是某一块。上一轮只给画质组补了块实色底，
  *   于是"标题页部分文字还是看不清"：补一块底治的是那一个块，不是那张卡。
  * · **游戏内顶栏**（`.g-top`）：`--paper-85 → 透明` 平均铺满整条，
- *   字的底边落在全条 82% 处，那里只剩 0.15 的纸；压到山体（rgb≈60）上
- *   是 `236×0.15 + 60×0.85 ≈ 86`，`--ink-soft` 压上去 1.4:1。
+ *   字的底边落在全条 82% 处，那里只剩 0.15 的底；压到山体上，
+ *   `--ink-soft` 就托不住它了。
  *
  * 三次都**不报错、别的判据全绿**，靠人眼第一眼。所以下面按机制分开钉，
  * 而不是笼统一句"要有底"：
@@ -8108,7 +8220,7 @@ check('verify_ui_visibility', () => {
  * | 目标 | 要求 | 为什么是这一条 |
  * |---|---|---|
  * | `.g-frags` | 底必须**不透明** | 小方块压在世界画面上，没有"再垫一层"的地方 |
- * | `.g-card-title` | 必须**保持半透明**，且 alpha **≥ 0.8** | 整张卡压在主视觉上；0.8 是托住 `--ink-soft` 的下限，再低就回到中灰 |
+ * | `.g-card-title` | 必须**保持半透明**，且 alpha **≥ 0.9** | 整张卡压在主视觉上；0.9 是托住 `--ink-soft` 的下限，再低就回到中灰 |
  * | `.g-top` | 渐隐必须落在 `calc(100% - …em)` 里 | 顶栏会折成两行，按百分比写渐变的话第二行又落回透明区 |
  *
  * ## 为什么读源码，而不是算对比度
@@ -8215,11 +8327,11 @@ check('verify_paper_backing', () => {
 
   // 2. 标题页那张卡：**保持半透明**，但不许薄过 0.9。
   //
-  // 下限从 0.8 提到 0.9 是量出来的。底色是 `236×α + 45×(1-α)` 撑起来的
-  // 浅色（45 是主视觉里淡墨山体实测的最暗处），而卡上最短的那一档字是
-  // `--ink-soft` #6b5f4c：0.86 → 3.82:1，0.90 → 4.10:1，0.95 → 4.48:1。
+  // 下限从 0.8 提到 0.9 是量出来的：底色是 `底色×α + 主视觉×(1-α)` 撑起来的，
+  // 而卡上最短的那一档字是 `--ink-soft`；底色板换成深青蓝之后，
+  // 薄纱会透出主视觉的浅色山体，字立刻发灰。
   // 实机截图里「字浮在画上、发灰」就是 0.86 那一档。
-  // 反过来 `--ink-faint` #9a8d76 在任何一档都只有 2.0–2.3:1，
+  // 反过来 `--ink-faint` 在任何一档都只有 2.0–2.3:1，
   // **加厚纱救不了它**——所以标题页上"有意义"的字一律用 `--ink-soft`，
   // 那一档只留给版权与几何调试这类真正无关紧要的字。
   asserts++;
@@ -8235,8 +8347,8 @@ check('verify_paper_backing', () => {
         probs.push(`.g-card-title 用了 color-mix()（${bg}）—— 判据量不了它的浓度`);
       } else if (a < 0.9) {
         probs.push(
-          `.g-card-title 的纱只有 ${a}：卡上最短的那档字（--ink-soft #6b5f4c）` +
-            '压在淡墨山体（最暗处约 rgb(45)）上只有 3.8:1 上下，读不出来' +
+          `.g-card-title 的纱只有 ${a}：卡上最短的那档字（--ink-soft）` +
+            '压在淡墨山体（最暗处约 rgb(45)）上读不出来' +
             '（0.90 → 4.1:1，0.95 → 4.5:1）',
         );
       }
@@ -9097,13 +9209,21 @@ function ensureStubDom(): StubDom {
   const g = globalThis as { document?: Document; window?: Window & typeof globalThis };
   ensureStubWindow(g);
   if (!g.document) {
-    g.document = {
-      createElement(tag: string) {
+    /**
+     * 建一个桩元素。
+     *
+     * `createElement` 与 `createElementNS` **共用它**：内联 SVG（`src/ui/icons.ts`）
+     * 走的是 `createElementNS`，而这个桩原来只有 `createElement`——
+     * 于是任何一条要建图标的判据都会死在
+     * 「`createElementNS is not a function`」上，而症状与真正的原因离得很远。
+     */
+    const makeNode = (tag: string) => {
         const cls = new Set<string>();
         const kids: unknown[] = [];
         const listeners: Record<string, (() => void)[]> = {};
         const attrs: Record<string, string> = {};
         const text = { v: '' };
+        const styleProps: Record<string, string> = {};
         // 桩元素自己的引用。`remove()` 要拿它去 `kids` 里摘自己，
         // 而箭头函数里的 `this` 指的是 `createElement` 的宿主，不是元素——
         // 所以必须显式存一份，见下面 `remove` 的注释。
@@ -9129,7 +9249,20 @@ function ensureStubDom(): StubDom {
             for (const c of v.split(/\s+/)) if (c) cls.add(c);
           },
           type: '',
-          style: {} as Record<string, string>,
+          /**
+           * 行内样式。**必须有 `setProperty`**：`dom.ts` 的 `setStyle()`
+           * 与转盘摆位（`style.setProperty('--a', …)`）都走它，
+           * 而这个桩原来给的是 `{}`——于是任何一条碰到样式的判据
+           * 都会死在「`style.setProperty is not a function`」上。
+           */
+          style: {
+            setProperty: (k: string, v: string) => {
+              styleProps[k] = v;
+            },
+            getPropertyValue: (k: string) => styleProps[k] ?? '',
+          } as unknown as CSSStyleDeclaration,
+          /** `dataset` —— 转盘靠它记住"这一格的图标换过了没有"。 */
+          dataset: {} as Record<string, string>,
           children: kids,
           value: '',
           get textContent() {
@@ -9156,6 +9289,15 @@ function ensureStubDom(): StubDom {
               },
             };
           },
+          /**
+           * `ownerDocument` —— `dom.ts` 的 `blurWithin()` 要读
+           * `container.ownerDocument.activeElement`，而这个桩原来没有它，
+           * 于是「关掉面板时把焦点挪走」那一行会直接抛
+           * 「读 undefined 的属性」。转盘的 `close()` 走的就是它。
+           */
+          get ownerDocument() {
+            return g.document;
+          },
           appendChild: (n: unknown) => {
             kids.push(n);
             // 记住父节点。**没有这一句 `remove()` 就摘不掉自己**：
@@ -9164,6 +9306,14 @@ function ensureStubDom(): StubDom {
             // 真 DOM 里 `removeChild` 走的是父节点的子列表，桩也得这样。
             (n as { __parent?: unknown[] }).__parent = kids;
             return n;
+          },
+          /**
+           * `replaceChildren` —— 换图标时用它（`icons.ts` 的换图标那一步）。
+           * 桩原来没有，于是「换一个图标」会抛。
+           */
+          replaceChildren: (...nodes: unknown[]) => {
+            kids.length = 0;
+            for (const n of nodes) kids.push(n);
           },
           remove: () => {
             // ⚠ 这里原来写的是 `kids.indexOf(this)`，而它是**箭头函数**，`this`
@@ -9200,7 +9350,11 @@ function ensureStubDom(): StubDom {
           querySelectorAll: (sel: string) => findAll(kids, sel),
         };
         return node;
-      },
+    };
+    g.document = {
+      createElement: (tag: string) => makeNode(tag),
+      /** SVG 走这里。见上面那段注释。 */
+      createElementNS: (_ns: string, tag: string) => makeNode(tag),
     } as unknown as Document;
   }
 
@@ -9255,6 +9409,14 @@ registerDistChecks(check);
 registerSceneryChecks(check);
 registerExperienceChecks(check);
 registerInteractionChecks(check, () => ensureStubDom().parent());
+// 2026-10 评测后那一轮优化（打卡圈 / 按圈经济 / 乐事赌注 / 经营面板文案 /
+// 序章空格 / 碎片 x/3 / favicon / perf 快照 / README 档数）。
+// 挨着交互族注册：它吃同一套 DOM 桩（序章空格那条要真的造一张故事卡）。
+registerOptimizationChecks(check, () => ensureStubDom().parent());
+// 界面上那几块常驻件：主线追踪器 / Tab 转盘 / 交互提示 / 图标集。
+// 紧挨着交互族注册——它们吃同一套 DOM 桩，而「提示够得着才亮」
+// 与「转盘的按键归属」是同一件事的两面。
+registerWidgetChecks(check, () => ensureStubDom().parent());
 
 // ---------------------------------------------------------------- 音频（引擎）
 // 要的是 `window` 桩本身：`AudioSystem.unlock()` 从 `window.AudioContext`

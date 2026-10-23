@@ -448,6 +448,10 @@ export class World {
       this.stations.update(this.ride.pos.x, this.ride.pos.z);
     }
 
+    // 打卡圈**每帧**跟手。进圈那一瞬间要立刻变色——
+    // 放进上面那个 0.4s 节流里的话，读起来就是"我明明进来了，圈却没动"。
+    this.stations.updateRings(this.ride.pos.x, this.ride.pos.z);
+
     this.water.update(this.time, this.sky.state.sunDir, {
       color: this.fogColor,
       near: this.preset.fogNear,
@@ -463,10 +467,11 @@ export class World {
     this.odometer += moved;
     this.lastPos.copy(this.ride.pos);
 
-    // 里程**只作经济口径**，不给玩家看（km 一换算就是 2km/s，
-    // 玩家三十秒就能算出 7200km/h，然后整个数字失去可信度）
+    // 里程**只作调试口径**，不给玩家看（km 一换算就是 2km/s，
+    // 玩家三十秒就能算出 7200km/h，然后整个数字失去可信度）。
+    // 经济不再跟着里程走——见 `GameStateManager.LVBI_PER_LAP`：这一版的环线
+    // 只有 1228.8 米，按公里发钱等于一圈 2 枚。
     game.progressKm = this.odometer / 1000;
-    game.earnKm(game.progressKm);
 
     // 圈数：看中心线参数有没有绕回去
     const arc = nearestArcParam(this.ride.pos.x, this.ride.pos.z);
@@ -800,6 +805,36 @@ touchRelic(): { titleKey: string; textKey: string; index: number; layer: 'now' |
   /** 木牌够得着吗（F 键的判据，与旧物同一族）。 */
   canTouchSign(): boolean {
     return this.signInReach;
+  }
+
+  /**
+   * 路边那一族（"摸一下"）此刻**够得着**的东西，**按距离从近到远排**。
+   *
+   * ## 为什么它住在世界里
+   *
+   * 这一族有三样：旧物、琴音林的琴、路肩上的木牌。
+   * 它们共用 F 键，而"按 F 会发生什么"由**距离**决定——
+   * 够得着的里面最近的那一个吃掉这一次按键。
+   *
+   * 原来这个排序写在宿主的 `touchRoadside()` 里，而界面上那颗
+   * 「按 F 摸一下」的提示要显示**同一个**东西。
+   * 两处各列一次的话，迟早有一处先改、另一处没改，
+   * 而症状是**"提示说按 F，按下去却是另一件"**——
+   * 玩家不会怀疑提示，只会怀疑游戏。
+   *
+   * 所以它在这里落一份，两边都问它。
+   */
+  roadsideCandidates(): { kind: 'relic' | 'qin' | 'sign'; d: number }[] {
+    const out: { kind: 'relic' | 'qin' | 'sign'; d: number }[] = [];
+    // 旧物要**还没听过**：听过的那一件已经被读走了，
+    // 再按 F 不会发生任何事——提示也就不该亮。
+    if (this.relicNearby >= 0 && this.relics.pending(this.relicNearby)) {
+      out.push({ kind: 'relic', d: this.relicDistance });
+    }
+    if (this.qinInReach) out.push({ kind: 'qin', d: this.qinDistance });
+    if (this.signInReach) out.push({ kind: 'sign', d: this.signDistance });
+    out.sort((a, b) => a.d - b.d);
+    return out;
   }
 
   /**
