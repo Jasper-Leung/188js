@@ -83,7 +83,7 @@ import { BUSINESSES } from '../data/business';
 import { businessBlock } from '../game/business';
 import { StoryCards, ResultCard } from '../ui/storyCard';
 import { isShown } from '../ui/dom';
-import { t } from '../i18n';
+import { t, isEnglish, setLang } from '../i18n';
 import { ShopPanel } from '../ui/shopPanel';
 import { BusinessPanel } from '../ui/businessPanel';
 import type { UIHooks } from '../ui';
@@ -702,40 +702,77 @@ export function registerOptimizationChecks(check: CheckFn, parent: () => HTMLEle
     const probs: string[] = [];
     const g = new GameStateManager();
     const hooks = { onShopBuy: () => {}, onShopClose: () => {} } as unknown as UIHooks;
-    const panel = new ShopPanel({ parent: parent(), hooks, game: g });
 
-    // ---- 1. 驿铺的架子上摆的全是商品表里的那几件 ----
-    asserts++;
+    // ---- 1 & 2. 架子上的东西与商品表对得上，且「无价」那五件一个都不在 ----
+    //
+    // ★ 这两条**必须与当前语言无关**。
+    //
+    //   货架上写的是 `byLang(g.name, g.name_en)`——跟着当前语言走；
+    //   而商品表里**同时**有中文名与英文名。
+    //   早先这里只把**中文名**收进白名单，于是英文界面下**每一件**商品
+    //   都会被报成「不在商品表里」。
+    //
+    //   而这个坑在本地踩不到：无头回归的语言跟着 `systemLang()` 走，
+    //   它读 `navigator.language`——**Node 21+ 才有 `navigator`**。
+    //   本机 Node 22 + 中文系统 → 'zh'；CI 的 Node 20 没有 navigator → 兜底 'en'。
+    //   于是同一条判据本地绿、CI 红，而红的原因**与被测的东西毫无关系**。
+    //
+    //   所以这里两种写法都收，并且**两种语言各跑一遍**：
+    //   一边证「架上的东西都在表里」，一边证「架上的字跟着语言走」。
+    //   「无价」那五件同理：中文名与英文名**都不许**在架上。
     {
       const shopName = '驿铺';
-      panel.open(shopName);
-      const grid = panel.root.querySelector('.g-goods');
-      const cards = grid ? grid.querySelectorAll('.g-good') : [];
-      const want = g.goodsForShop(shopName).length;
-      if (cards.length !== want) {
-        probs.push(`驿铺架子上有 ${cards.length} 件，商品表里有 ${want} 件`);
+      const goods = g.goodsForShop(shopName);
+      // 商品表里**每一种语言写法**都算「这件商品」。
+      const names = new Set<string>();
+      for (const x of goods) {
+        names.add(x.name);
+        if (x.name_en) names.add(x.name_en);
       }
-      asserts++;
-      const names = new Set(g.goodsForShop(shopName).map((x) => x.name));
-      for (const c of cards) {
-        const n = (c.querySelector('.g-good-n') as HTMLElement | null)?.textContent ?? '';
-        if (!names.has(n)) probs.push(`架子上摆着一件不在商品表里的东西：「${n}」`);
-      }
-    }
+      // 「无价」那五件，**两种语言的写法**都不许出现在架上。
+      const notForSale = new Set<string>(SHOPS.NOT_FOR_SALE as string[]);
+      for (const en of Object.values(SHOPS.NOT_FOR_SALE_EN)) notForSale.add(en);
 
-    // ---- 2. 五件「无价」一个都不许在架上 ----
-    asserts++;
-    {
-      const grid = panel.root.querySelector('.g-goods');
-      const cards = grid ? grid.querySelectorAll('.g-good') : [];
-      for (const c of cards) {
-        const n = (c.querySelector('.g-good-n') as HTMLElement | null)?.textContent ?? '';
-        if ((SHOPS.NOT_FOR_SALE as string[]).includes(n)) {
-          probs.push(`架子上还摆着「${n}」——它永远买不了`);
+      const wasEnglish = isEnglish();
+      for (const lang of ['zh', 'en'] as const) {
+        setLang(lang);
+        // ★ 每种语言**各造一个面板**：同一个面板 `open()` 两次会把卡片堆成两份——
+        // `build()` 里的 `this.grid.textContent = ''` 在真 DOM 上会清掉子节点，
+        // 而无头的 DOM 桩**只换自己的那份文字**，孩子还在那儿。
+        // （这正是 `harness.ts` 记着的那条：桩的 textContent 不聚合后代。）
+        const panel = new ShopPanel({ parent: parent(), hooks, game: g });
+        panel.open(shopName);
+        const grid = panel.root.querySelector('.g-goods');
+        const cards = grid ? grid.querySelectorAll('.g-good') : [];
+        const nameOf = (c: Element): string =>
+          (c.querySelector('.g-good-n') as HTMLElement | null)?.textContent ?? '';
+
+        // 件数对得上
+        asserts++;
+        if (cards.length !== goods.length) {
+          probs.push(
+            `${lang} 界面的驿铺架子上有 ${cards.length} 件，商品表里有 ${goods.length} 件`,
+          );
         }
-        const en = SHOPS.NOT_FOR_SALE_EN[n];
-        if (en && n === en) probs.push(`架子上还摆着「${n}」——它永远买不了`);
+        // 架上的每一件都在商品表里
+        asserts++;
+        for (const c of cards) {
+          const n = nameOf(c);
+          if (!names.has(n)) {
+            probs.push(`${lang} 界面的架子上摆着一件不在商品表里的东西：「${n}」`);
+          }
+        }
+        // 五件「无价」一个都不许在架上
+        asserts++;
+        for (const c of cards) {
+          const n = nameOf(c);
+          if (notForSale.has(n)) {
+            probs.push(`${lang} 界面的架子上还摆着「${n}」——它永远买不了`);
+          }
+        }
       }
+      // 还原：判据不许把语言留在一个别的状态里给后面的判据用。
+      setLang(wasEnglish ? 'en' : 'zh');
     }
 
     // ---- 3. 三间铺子都过一遍 ----

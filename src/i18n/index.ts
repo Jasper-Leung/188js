@@ -70,8 +70,28 @@ export function langOf(tag: string): Lang {
 /**
  * 系统语言。读 `navigator.languages[0] || navigator.language`。
  *
- * 两条防御：Node（无头回归）里没有 `navigator`，某些隐私模式下
- * `navigator.language` 是空串——两种都回退到 `DEFAULT_LANG`。
+ * 两条防御：`navigator.language` 读不到时（某些隐私模式下是空串），
+ * 以及**根本没有 `navigator`** 时，都回退到 `DEFAULT_LANG`。
+ *
+ * ## ★ 无头回归跑在哪个语言上，取决于 **Node 版本**
+ *
+ * `navigator` 是 **Node 21+ 才有的全局**（Node 20 上没有）。
+ * 于是同一份回归：
+ *
+ *   · 本机 Node 22 + 中文系统 → `navigator.language = 'zh-SG'` → **'zh'**
+ *   · CI 的 Node 20 → 没有 `navigator` → 兜底 `DEFAULT_LANG` = **'en'**
+ *
+ * 也就是说：**判据跑在哪个语言上，是环境决定的，不是代码决定的。**
+ * 2026-10-23 那次 CI 红的就是这么来的——`verify_shop_no_priceless`
+ * 拿**渲染出来的货架文字**（跟着语言走）去比对**商品表里的中文名**，
+ * 于是在英文侧每一件商品都被报成「不在商品表里」。
+ *
+ * 所以规矩是：**判据不许依赖当前语言**。
+ * 要比渲染结果，就用 `t()` 取同一份文案（两边一致），
+ * 或者把**数据自带的两边写法**都收进白名单。
+ * 反过来，把语言钉死在某一个值上并不能解决问题——那只是把
+ * 「这台机器上绿、那台机器上红」换成「所有人都在同一个假设下绿」，
+ * 而那个假设本身没人验过。
  *
  * 探测走 `globalThis` 间接取，**不能写裸 `navigator`**：esbuild 打包时
  * 看见 bundle 里没有这个全局标识符，会把 `typeof navigator !== 'undefined'`

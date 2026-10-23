@@ -26,7 +26,7 @@
 |---|---|---|
 | `version` | 版本 | `1.0.2` |
 | `checks` | 回归条数 | `145` |
-| `asserts` | 断言条数 | `4434` |
+| `asserts` | 断言条数 | `4437` |
 | `entry_lines` | `src/verify/entry.ts` 行数 | `9582` |
 | `i18n_keys` | 文案键数（每种语言） | `649` |
 | `js_raw_kb` | JS 原始体积（KB） | `1136` |
