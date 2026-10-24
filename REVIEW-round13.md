@@ -386,6 +386,8 @@ private demoDrive(): Input {
   | `.cache/eval/toast3.mjs` | toast 放大 4 倍取证 |
   | `.cache/eval/accept.mjs` | 修完之后的实机复测（对比度 + 演示打卡） |
   | `.cache/eval/demoend.mjs` | 演示收尾：它到底会不会走到明信片结算页 |
+  | `.cache/eval/touchshot.mjs` | 补拍一张干净的触屏 HUD（右下角那几颗按钮） |
+  | `.cache/eval/fix-touch-corners.png` | **修完之后**的触屏右上角：暂停/音量两颗方块终于看得见了 |
   | `.cache/eval/toast-zoom.png` | **§3.1 的头号证据图** |
   | `.cache/eval/toast-bad.png` | 同一条 toast 的原尺寸截图 |
   | `.cache/eval/crop-prompt.png` | §3.3 提示药丸特写 |
