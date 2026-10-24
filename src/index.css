@@ -20,7 +20,22 @@
 }
 
 :root {
-  --paper: #e8e0cd;
+  /* ⚠ **这一套是「宣纸与墨」，是 UI 重做之前的那一版色板**，只给
+   * `.g-root` **之外**的东西用（启动屏、无脚本提示、body 底色）。
+   *
+   * 它和 `src/ui/styles.css` 里 `.g-root` 的那套**同名不同义**：
+   * 这里的 `--paper` 是**浅色**纸（#e8e0cd），那边的 `--paper` 是**深色**底板
+   * （rgb(28,46,60)）。两套都用「paper / ink」这组名字，是本轮 UI 重做
+   * 引入的那一族"深字压深底"回归的根因——写 `color: var(--paper)` 的人
+   * 以为自己拿到了浅色字，实际拿到的是深色底板的颜色。
+   *
+   * 所以这里的 `--paper` 改名成 `--paper-legacy`：
+   * **名字不同了，含义就不会再被拿去混用。**
+   * 浅色字这一侧统一叫 `--ink`（深墨），和 `.g-root` 那套的 `--ink`（浅字）
+   * 一样是"同名不同义"——但它只在这一处用（body 的字色），且 `:root` 之外的
+   * 任何元素都在 `.g-root` 里，不会读到它。
+   */
+  --paper-legacy: #e8e0cd;
   --paper-warm: #efe8d8;
   --ink: #2a2622;
   --ink-soft: #5c5347;
@@ -178,7 +193,9 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  background: var(--paper);
+  /* `:root` 那一套是**浅色纸 + 深墨**（见上面那段注释），
+     所以这里用的是 `--paper-legacy`，不是 `--paper`。 */
+  background: var(--paper-legacy);
   color: var(--ink);
   font-size: 16px;
   z-index: 200;

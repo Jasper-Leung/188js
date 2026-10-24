@@ -51,6 +51,7 @@ import { registerFeatureChecks } from './features';
 import { registerVehicleChecks } from './vehicle';
 import { registerAiApiChecks } from './ai';
 import { registerUiRegressionChecks } from './ui_regressions';
+import { registerUiContrastChecks } from './ui_contrast';
 import { registerDeliveryChecks } from './delivery';
 import { registerDistChecks } from './dist';
 import { registerSceneryChecks } from './scenery';
@@ -6294,6 +6295,13 @@ registerAiApiChecks(check);
 // 全绿证明不了「看得见」——无头没有排版引擎——所以这一族改去证
 // **当初让它消失的那个结构已经不存在了**。理由见那个文件的头。
 registerUiRegressionChecks(check);
+
+// 第十三轮实机撞出来的那一族：**字与底读不出来**。
+// 提示条实测 1.31:1——「序章还在播 · 按空格接着念」印在一块近黑的板上，
+// 而它是游戏唯一的临时反馈通道。根因是 UI 重做把 `--paper` 的语义翻了
+// （浅纸 → 深底板），于是仍按旧约定写下的 `color: var(--paper)` 全成了深字压深底。
+// 紧挨着上一族注册：两族问的是同一件事的两面——**结构**对不对、**颜色**算不算得过。
+registerUiContrastChecks(check);
 
 // 本轮三件新内容（茶倒水 / 路边躲避挑战 / 琴音林自由演奏）。
 // 同样**在原位调用**：这一族里的琴那条要在 `verify_phase` 之前跑完，

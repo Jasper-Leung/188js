@@ -515,6 +515,65 @@ export function interactAt(i: InteractInput): InteractKind {
   return 'none';
 }
 
+/**
+ * 演示模式要不要替玩家按那一下空格。
+ *
+ * ## 为什么它在这里，而不是写在宿主里
+ *
+ * 判定写在宿主里就没人能问它——`main.ts` 里的任何一行都得开浏览器才验得了。
+ * 而这一条是**每帧都要问一次**的规则，答错了的症状是
+ * 「演示开了 90 秒，碎片 0、到访 0、钱没花过、天数没动」：
+ * **一个不会报错的按钮比没有按钮更糟**，因为它把"这个做不出来"写在了界面上。
+ *
+ * ## 演示该做什么，不该做什么
+ *
+ * · **该**：站在碎片驿站前时替玩家打卡。
+ *   「打卡 → 对白 → 拿到碎片」是这个游戏**唯一的动词**，
+ *   而原来的演示只让车自己往前骑——圈上那句「空格 · 在此完成乐事」
+ *   全程亮着，界面在喊"按空格"，演示永远不按。
+ * · **不该**：在铺子前按空格。铺子是一屏货架，它开着就得有人关，
+ *   而演示里没有人按键——车会停在铺子门口直到预算耗尽。
+ *   所以这里只认 `checkin` 这一族。
+ *
+ * ## 为什么叙事段落占着屏时不按
+ *
+ * 序章那七张是**定时卡**，它们自己会走完；而演示的预算只有 90 秒，
+ * 替玩家把它们推完等于让评审只看见一个空场景。
+ * 更要紧的是：叙事段落占着屏时按空格，推进的是**卡**而不是打卡，
+ * 那一下不会产生任何进度——按了等于没按。
+ */
+export function demoShouldCheckIn(o: {
+  /** 演示进行中 */
+  active: boolean;
+  /** 当前相位 */
+  phase: Phase;
+  /** 叙事段落占着屏 */
+  storyBusy: boolean;
+  /** 打卡过场进行中（镜头接管中不抢） */
+  busy: boolean;
+  /** 面前是什么（`interactAt()` 的结果） */
+  kind: InteractKind;
+  /** 离驿站多远（米） */
+  distance: number;
+  /** 够得着的距离。**传 `STATION_REACH`**，不要自己再写一份。 */
+  reach: number;
+  /** 演示已经走了多少秒 */
+  demoT: number;
+  /** 从这一秒起开始收尾，不再打卡 */
+  endAt: number;
+}): boolean {
+  if (!o.active) return false;
+  if (o.phase !== 'roaming') return false;
+  if (o.storyBusy) return false;
+  if (o.busy) return false;
+  // 只认碎片驿站：铺子开着没人关。
+  if (o.kind !== 'checkin') return false;
+  if (o.distance > o.reach) return false;
+  // 收尾阶段不再打卡——那段时间要留给明信片。
+  if (o.demoT >= o.endAt) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------- 演示驾驶
 
 /**

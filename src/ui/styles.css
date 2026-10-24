@@ -126,6 +126,27 @@
      提亮 20/24/28 与底色的对比度是 **1.42**（阈值 1.30）。 */
   --paper-6: rgb(calc(var(--pw) + 20) calc(var(--pg) + 24) calc(var(--pb) + 28));
 
+  /* ══════════════════════════════════════════════════════════════════════
+     ⚠ **语义钉死：`--paper` 是底板，`--ink` 是字。**
+     ══════════════════════════════════════════════════════════════════════
+
+     这里的 `--paper` 是**深色**（日间 rgb(28,46,60) → 黄昏 rgb(15,25,33)），
+     它的名字来自旧色板那一层「宣纸」（那时候 `--paper` 是浅色 `#e8e0cd`）。
+     UI 重做把这一层换成「深青蓝玻璃」之后，**名字没跟着换，含义反了**。
+
+     后果很具体，而且是一整族：`color: var(--paper)` 从"浅字压深底"
+     变成"深字压深底"。实机抓到的那条提示条只有 **1.31:1**——
+     「序章还在播 · 按空格接着念」完全读不出来。
+
+     所以规矩是：
+     · **浅色的字一律用 `--ink` / `--ink-soft` / `--ink-faint`**；
+     · **`--paper` 只能出现在 `background` 里**；
+     · `src/index.css` 的 `:root` 那一套同名但**含义相反**（浅色纸），
+       已经改名成 `--paper-legacy`，别再混用。
+
+     `verify_ui_text_contrast` 守着这一条：`.g-root` 里出现
+     `color: var(--paper)` 就红。
+     */
   --ink: #ece6d6;
   --ink-soft: #a7b6c0;
   --ink-faint: #7b8e9b;
@@ -1402,14 +1423,28 @@
   padding: 0.15em 0.4em;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  color: var(--ink-soft);
+  /* 键帽是**凹**进去的：底比药丸本体再深一档。
+   * 原来它只有一道 1px 描边、与药丸同底色，层次全靠那条线撑着；
+   * 而它旁边那颗没底的字反而是屏上唯一看得清的东西——层次反了。 */
+  background: rgba(8, 14, 20, 0.55);
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 
 .g-root .g-prompt-t {
   font-size: 0.78em;
-  color: var(--ink-soft);
-  text-shadow: 0 0.1rem 0.3rem rgba(4, 9, 14, 0.8);
+  /* ★ 动作名**自己要有底**，而且字要够亮。
+   *
+   * 它原来只有一道 text-shadow，底下是**3D 场景**——
+   * 实机截图里「进入小铺」一半泡在浅色路面上、一半压着黑车架，
+   * 而键帽 `Space` 有自己的框所以清楚：**最该看清的词最看不清**。
+   *
+   * 底板要**半透**：不透明会把车身几何挡掉一块，而这一行就压在车把上。
+   * 0.72 叠在白场景上还有 5.99:1（`--ink` 在 `rgb(16,24,30)` 上是 13.6:1）。 */
+  color: var(--ink);
+  background: rgba(16, 24, 30, 0.72);
+  padding: 0.15em 0.55em;
+  border-radius: 999px;
 }
 
 /* ---- Tab 转盘 ----
@@ -1612,8 +1647,16 @@
   margin: 5.2rem 0 0 -7rem;
   text-align: center;
   font-size: 0.88em;
-  color: var(--paper);
-  text-shadow: 0 1px 2px rgba(20, 17, 12, 0.85);
+  /* ★ 字是**浅色**（`--ink`），不是 `--paper`。
+   *
+   * `--paper` 在 `.g-root` 里是**深色底板**（rgb(28,46,60)），
+   * 拿它当字色就是深字压深底——这一行一度只有 1.33:1，实机几乎读不出。
+   *
+   * 而这一行压在 3D 场景上（草地、路面、墙），底是**不定**的，
+   * 所以浅字必须配一道够厚的暗影：落在亮处（浅色路面）也要读得出。
+   * 只靠 1px 的暗影不够——实机截图里"空格"两个字压在浅色地面上就散了。 */
+  color: var(--ink);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.92), 0 0 6px rgba(0, 0, 0, 0.55);
   pointer-events: none;
 }
 
@@ -1716,7 +1759,11 @@
 .g-root .g-toast {
   padding: 0.35em 0.9em;
   font-size: 0.88em;
-  color: var(--paper);
+  /* ★ 浅字（`--ink`）。`--paper` 是深色底板，拿它当字色就是深字压深底：
+   * 这一条一度只有 1.31:1 —— 实机抓到的那条「序章还在播 · 按空格接着念」
+   * 就是**完全读不出来**的，而它恰好是游戏唯一的临时反馈通道。
+   * 按空格没有回音时，玩家只会得出一个结论：游戏坏了。 */
+  color: var(--ink);
   background: rgba(24, 20, 15, 0.88);
   border-radius: var(--radius);
   text-align: center;
@@ -2415,8 +2462,17 @@
   padding: 0;
   font-size: 0.92em;
   line-height: 1.3;
-  color: var(--paper);
-  background: rgba(24, 20, 15, 0.45);
+  /* ★ 浅字 + 够厚的底。
+   *
+   * 这一颗的图标是内联 SVG（`currentColor`），所以**字色就是图标色**。
+   * 原来写的是 `color: var(--paper)`（深色底板当字色）→ 深青压近黑，
+   * 实测 1.33:1，触屏上等于没有这颗按钮。
+   *
+   * 底色从 0.45 提到 0.72：半透的底板要托住浅字，就必须够厚——
+   * 0.45 叠在亮场景上只有 3.19:1（WCAG AA 要 4.5）。
+   * 0.72 叠在**最亮的白**上也还有 5.99:1。 */
+  color: var(--ink);
+  background: rgba(24, 20, 15, 0.72);
   border: 1px solid rgba(236, 227, 206, 0.5);
 }
 
@@ -2438,16 +2494,19 @@
   padding: 0.7rem 1.1rem;
   border-radius: 999px;
   font-size: 0.88em;
-  color: var(--paper);
-  background: rgba(24, 20, 15, 0.5);
+  /* 同 `.g-touch-check`：浅字 + 0.72 的底（0.5 叠在白场景上只有 3.4:1）。 */
+  color: var(--ink);
+  background: rgba(24, 20, 15, 0.72);
   border: 1px solid rgba(236, 227, 206, 0.42);
 }
-.g-root .g-touch-act:active { background: rgba(157, 58, 47, 0.82); }
+.g-root .g-touch-act:active { background: rgba(157, 58, 47, 0.92); }
 
 /* 够得着了：实心 + 印泥红边。没到范围时它是半透明的一颗灰圆，
-   玩家扫一眼就知道"现在按下去没反应"，而不必去按一次验证。 */
+   玩家扫一眼就知道"现在按下去没反应"，而不必去按一次验证。
+   0.82 → 0.92：白字压在 0.82 的红上，最坏情况（叠在纯白场景上）只有 4.32:1，
+   差一点点够不到 4.5。0.92 是 5.39:1。 */
 .g-root .g-touch-check.is-live {
-  background: rgba(157, 58, 47, 0.82);
+  background: rgba(157, 58, 47, 0.92);
   border-color: rgba(236, 227, 206, 0.9);
   color: #fff6ee;
 }
@@ -2467,8 +2526,11 @@
   padding: 0;
   font-size: 0.8em;
   line-height: 1.2;
-  color: var(--paper);
-  background: rgba(24, 20, 15, 0.45);
+  /* ★ 浅字 + 0.72 的底。同族里最要命的是这一颗：
+   * 它是**暂停与音量**，是触屏玩家唯一的退出手段，
+   * 而它原来深青压近黑（1.33:1）——手机上等于没有这个按钮。 */
+  color: var(--ink);
+  background: rgba(24, 20, 15, 0.72);
   border-color: rgba(236, 227, 206, 0.45);
 }
 
@@ -2754,7 +2816,10 @@
 }
 .g-lakeside-hint {
   font-size: 15px;
-  color: var(--paper, #f2ede2);
+  /* 浅字。`var(--paper, #f2ede2)` 那个兜底值是浅色的——作者写它的时候
+   * `--paper` 还是浅纸；色板换成深青蓝之后 `--paper` 有了值，兜底就再也轮不上了，
+   * 而这一行就变成了深青字压深青底（湖边那一屏的底是 `rgba(12,23,25,.86)`）。 */
+  color: var(--ink);
   text-shadow: 0 1px 3px rgba(0,0,0,.55);
 }
 /* 咬钩那一瞬是这一屏唯一「必须马上反应」的一帧，所以它跳。 */
@@ -2813,7 +2878,7 @@
 }
 
 /* v1.0.2: lower corners belong to thumbs; reading stays above them. */
-.g-root .g-touch-vehicle { position:absolute; right:var(--g-safe-x); bottom:calc(var(--g-safe-b) + 7.4rem); min-width:5.6rem; min-height:44px; pointer-events:auto; color:var(--paper); background:rgba(24,20,15,.72); }
+.g-root .g-touch-vehicle { position:absolute; right:var(--g-safe-x); bottom:calc(var(--g-safe-b) + 7.4rem); min-width:5.6rem; min-height:44px; pointer-events:auto; color:var(--ink); background:rgba(24,20,15,.72); }
 .g-root[data-touch='on'] .g-minimap { top:calc(env(safe-area-inset-top, 0px) + 5.4rem); right:var(--g-safe-x); left:auto; bottom:auto; transform:none; pointer-events:none; }
 .g-root[data-touch='on'] .g-minimap-c { width:100px !important; height:100px !important; }
 .g-root[data-touch='on'] .g-top { padding-left:var(--g-safe-x); padding-right:calc(var(--g-safe-x) + 7rem); padding-top:max(.45em, env(safe-area-inset-top, 0px)); }
@@ -2838,9 +2903,9 @@
 .g-root .g-business-card .g-note { color:var(--ink-soft); }
 .g-clock-field { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:8px 0; }
 .g-clock-field input, .g-clock-field select { width:110px; min-height:44px; font:inherit; }
-.g-lakeside-capability { font-size:.85em; color:var(--paper); max-width:32em; text-shadow:0 1px 3px #111; }
+.g-lakeside-capability { font-size:.85em; color:var(--ink); max-width:32em; text-shadow:0 1px 3px #111; }
 .g-lakeside { background:linear-gradient(transparent, rgba(12,23,25,.86)); }
-.g-root .g-lakeside-exit, .g-root .g-lakeside-vr { color:var(--paper); border-color:rgba(242,237,226,.6); }
+.g-root .g-lakeside-exit, .g-root .g-lakeside-vr { color:var(--ink); border-color:rgba(242,237,226,.6); }
 @media (orientation:landscape) and (max-height:520px) {
   .g-root[data-touch='on'] .g-stick { width:112px; height:112px; }
   .g-root[data-touch='on'] .g-touch-check { width:72px; height:72px; }
@@ -2849,6 +2914,19 @@
   .g-root[data-touch='on'] .g-minimap { top:calc(env(safe-area-inset-top, 0px) + 3.8rem); }
   .g-root[data-touch='on'] .g-lakeside { left:50%; right:auto; bottom:calc(var(--g-safe-b) + 1rem); transform:translateX(-50%); width:calc(100vw - 300px); max-width:38rem; border-radius:12px; padding:12px; background:rgba(12,23,25,.8); }
   .g-root[data-touch='on'] .g-itembar { bottom:calc(var(--g-safe-b) + 5.5rem); }
+  /* 叙事卡在矮屏上会占掉 3/4 的画面，而它压的是**正在骑的车**：
+     玩家在读字的时候看不见自己要去哪，读完再找路要多花好几秒。
+     所以矮屏下卡片收窄、字小一档。
+     **不挪位置**：这些卡是「世界里的东西」（刻在石头上），
+     挪到角上会破坏「它浮在路面上」这件事。
+     高度上限只给**可关闭**的那些（它们 pointer-events:auto，能滚）；
+     关不掉的那张（路边那块碑文）只缩字号，不截断——截了就读不到了。 */
+  .g-root .g-cards { top:10%; width:min(62vw, 460px); gap:6px; }
+  .g-root[data-touch='on'] .g-cards { width:min(62vw, 460px); }
+  .g-root .g-card-line { padding:9px 14px; }
+  .g-root .g-card-line.is-dismissible { max-height:38vh; overflow-y:auto; }
+  .g-root .g-card-t { margin-bottom:5px; }
+  .g-root .g-card-b { font-size:14px; line-height:1.6; }
 }
 @media (orientation:portrait) {
   .g-root[data-touch='on']:not([data-portrait-allowed='yes']) .g-rotate { display:flex; position:fixed; inset:0; z-index:200; background:rgba(20,27,25,.96); color:#fff4dc; align-items:center; justify-content:center; flex-direction:column; gap:16px; padding:32px; pointer-events:auto; }

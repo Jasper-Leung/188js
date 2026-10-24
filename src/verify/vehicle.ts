@@ -27,7 +27,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROAD, ECON, SHOPS, I18N } from '../data/raw';
 import { BoxGeometry, CylinderGeometry, BufferGeometry, Mesh, MeshStandardMaterial, Object3D, Color, Vector3, Group, AnimationClip, KeyframeTrack } from 'three';
-import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';import { interactAt, STATION_REACH } from '../game/phase';
+import { verticalFovForAspect, horizontalFromVertical, FOV_MIN_HORIZONTAL } from '../core/fov';import { interactAt, demoShouldCheckIn, STATION_REACH } from '../game/phase';
 import { camParams } from '../world/ride';
 import { Vehicle, FOOT_LATERAL_OFFSET, collectClips, BICYCLE_YAW, MOTORCYCLE_YAW, CHAR_FACING_YAW, MODEL_HEADS, MODEL_AXES, facingDir, motoLeanAt, bicycleScale, localUnion, measureDriveBasis, standFoldAt, STAND_FOLD_ANGLE, BIKE_STEER_MAX, BIKE_GEAR_RATIO, SUBJECT_LIFT, liftSubjectMaterials, type RideMode } from '../world/vehicle';
 import { assertRide, assertDemoDrive, assertSpawnHeading, assertJunctionMoment } from './ride';
@@ -500,6 +500,136 @@ export function registerVehicleChecks(check: CheckFn): void {
   check('verify_demo_drive', () => {
     const r = assertDemoDrive();
     return { ok: r.ok, detail: r.detail, asserts: r.asserts };
+  });
+
+  /**
+   * 演示模式**会打卡**。
+   *
+   * ## 这条治的是哪一个病
+   *
+   * 标题页第二颗按钮「演示 · 90 秒」是**评委成本最低的入口**——
+   * 大部分评委不会自己从头玩 20–30 分钟，他们会先点那颗。
+   * 而原来的演示只让车自己往前骑：实机抓 149 秒（53 帧），
+   * 碎片恒为 0、到访恒为 `[0,0,0,0,0]`、旅币没花过、天数没动，
+   * 而圈上那句「空格 · 在此完成乐事」**全程亮着**。
+   *
+   * 界面在喊"按空格"，演示永远不按。
+   * 评审看到的是这个游戏的**风景**，不是这个游戏——
+   * **一个不会兑现的按钮比没有按钮更糟**。
+   *
+   * ## 为什么这一条能证
+   *
+   * 判定是 `phase.ts` 的 `demoShouldCheckIn()`（纯函数，无头可跑）；
+   * 宿主那侧（`main.ts` 的 `demoMaybeCheckIn()`）量的是**接线**——
+   * 判定对了而没接上，症状和没写一模一样。
+   *
+   * 两条都断过的地方：① 演示从不调用 `tryCheckIn()`；② 演示进了碎片驿站
+   * 会真的开一局小游戏，而**没有人按键**，于是演示卡在乐事那一屏直到预算耗尽。
+   */
+  check('verify_demo_checks_in', () => {
+    const probs: string[] = [];
+    let asserts = 0;
+
+    /** 一组"站在碎片驿站前、什么都没有挡着"的事实。 */
+    type DemoArgs = Parameters<typeof demoShouldCheckIn>[0];
+    const base: DemoArgs = {
+      active: true,
+      phase: 'roaming',
+      storyBusy: false,
+      busy: false,
+      kind: 'checkin',
+      distance: 10,
+      reach: STATION_REACH,
+      demoT: 20,
+      endAt: ECON.DEMO_END_AT_SEC,
+    };
+
+    asserts++;
+    if (!demoShouldCheckIn(base)) {
+      probs.push('站在碎片驿站前时演示不打卡——评审点开「演示 · 90 秒」看不到任何进度');
+    }
+
+    // ---- 每一道闸门都要真的挡得住 ----
+    const blocked: [string, Partial<DemoArgs>][] = [
+      ['演示没在进行', { active: false }],
+      ['相位不是 roaming', { phase: 'paused' }],
+      ['叙事段落占着屏', { storyBusy: true }],
+      ['打卡过场进行中', { busy: true }],
+      ['面前是铺子（开着没人关）', { kind: 'shop' }],
+      ['面前是家', { kind: 'home' }],
+      ['面前什么也没有', { kind: 'none' }],
+      ['离站太远', { distance: STATION_REACH + 1 }],
+      ['已经过了收尾时间', { demoT: ECON.DEMO_END_AT_SEC }],
+    ];
+    for (const [why, patch] of blocked) {
+      asserts++;
+      if (demoShouldCheckIn({ ...base, ...patch })) {
+        probs.push(`${why}时演示仍然打卡`);
+      }
+    }
+
+    // ---- 接线：判定对了而没接上，症状和没写一模一样 ----
+    const mainSrc = readFileSync(join(process.cwd(), 'src', 'main.ts'), 'utf8');
+    asserts++;
+    if (!/demoMaybeCheckIn\(\)/.test(mainSrc)) {
+      probs.push('main.ts 里没有 demoMaybeCheckIn()——演示不会替玩家打卡');
+    }
+    asserts++;
+    if (!/demoShouldCheckIn\(/.test(mainSrc)) {
+      probs.push('main.ts 没有调用 demoShouldCheckIn()——判定写了却没接上');
+    }
+    asserts++;
+    if (!/private demoMaybeCheckIn\(\)/.test(mainSrc)) {
+      probs.push('main.ts 里没有 demoMaybeCheckIn() 这个方法');
+    }
+    // 打卡之后要闩住这一站：不闩住的话相位回到 roaming、车还站在原地，
+    // 演示会在同一座驿站前无限打卡。
+    asserts++;
+    if (!/demoCheckedStation/.test(mainSrc)) {
+      probs.push('main.ts 没有记住"这一站已经打过卡"——演示会在原地无限打卡');
+    }
+    // 序章那七张是**定时卡**：没人替玩家推进的话，它们要占 60 多秒，
+    // 而演示的预算只有 90 秒——实机就是这样：120 秒里碎片恒为 0。
+    asserts++;
+    if (!/advanceStoryCard\(\)/.test(mainSrc)) {
+      probs.push('main.ts 的演示路径没有推进叙事卡——序章那七张定时卡会占满整个预算');
+    }
+
+    // ---- 演示里绝不能开一局等人来玩的小游戏 ----
+    asserts++;
+    const at = mainSrc.indexOf('private async runMiniGame');
+    if (at < 0) {
+      probs.push('main.ts 里找不到 runMiniGame()');
+    } else {
+      const mg = mainSrc.slice(at);
+      const waitAt = mg.indexOf('await this.ui.whenDialogueIdle()');
+      asserts++;
+      if (waitAt < 0) {
+        probs.push('runMiniGame() 里找不到 `await this.ui.whenDialogueIdle()`——判据自己失效了');
+      } else {
+        const skip = mg.slice(0, waitAt);
+        asserts++;
+        if (!/if \(this\.demoActive\)/.test(skip)) {
+          probs.push(
+            'runMiniGame() 里的演示分支不再是"无条件跳过"——' +
+              '演示会开一局没有人按键的小游戏，然后卡在那一屏直到预算耗尽',
+          );
+        }
+        asserts++;
+        if (/demoActive\s*&&\s*this\.demoT\s*>/.test(skip)) {
+          probs.push(
+            '演示只在小游戏这一段里"才"跳过——它得先走进 runMiniGame()，' +
+              '而那正是卡住的地方（原来那条分支永远走不到）',
+          );
+        }
+      }
+    }
+
+    return expect(
+      probs.length === 0,
+      probs.join('；') || '演示会替玩家打卡：站在碎片驿站前就按那一下空格，不开等人来玩的小游戏',
+      asserts,
+    );
   });
 
   /**

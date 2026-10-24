@@ -25,9 +25,9 @@
 | 键 | 含义 | 值 |
 |---|---|---|
 | `version` | 版本 | `1.0.2` |
-| `checks` | 回归条数 | `145` |
-| `asserts` | 断言条数 | `4437` |
-| `entry_lines` | `src/verify/entry.ts` 行数 | `9582` |
+| `checks` | 回归条数 | `147` |
+| `asserts` | 断言条数 | `4488` |
+| `entry_lines` | `src/verify/entry.ts` 行数 | `9590` |
 | `i18n_keys` | 文案键数（每种语言） | `649` |
 | `js_raw_kb` | JS 原始体积（KB） | `1136` |
 | `js_gzip_kb` | JS gzip 体积（KB） | `345` |

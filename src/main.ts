@@ -48,7 +48,7 @@ import { DebugPanel } from './debug/panel';
 import { probeAt, buildingTable } from './debug/probe';
 import { buildInputFromState, endingFromGameState, exportFileName, exportPostcardPng, seededBackText, type EndingId } from './game/postcard';
 
-import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, demoAim, demoInput, unwrapArc, silentSpaceReply, SCENERY_SAY_M, STATION_REACH, type Phase, type SettleOutcome } from './game/phase';
+import { afterCheckInRoute, canRide as canRideNow, confirmAction, interactAt, demoAim, demoInput, demoShouldCheckIn, unwrapArc, silentSpaceReply, SCENERY_SAY_M, STATION_REACH, type Phase, type SettleOutcome } from './game/phase';
 import { createLiveApi, type LiveApiHost } from './game/api';
 import type { AiObservation } from './game/api';
 import type { BeatEvent } from './game/beat';
@@ -613,6 +613,24 @@ class App {
   /** `?arc=` / `?yaw=` 传送优先于存档位置。 */
   private arcOverride = false;
   private demoT = 0;
+  /**
+   * 演示里已经替玩家打过卡的驿站（-1 = 还没有）。
+   *
+   * **它是必需的**：打卡结束相位会回到 `roaming`，
+   * 而车还站在原地——不闩住这一下，演示会在同一座驿站前**无限打卡**。
+   * 离开那一站（`nearby.index` 变了或出了圈）才复位。
+   */
+  private demoCheckedStation = -1;
+  /**
+   * 演示替玩家按键的冷却（秒）。
+   *
+   * 推进叙事卡那一下**每帧都该有机会按**（卡是定时的，
+   * 站着不动它自己也会走），但**不能每帧都按**——
+   * 那会让序章那七张卡在两秒内全部闪过，
+   * 而卡上的字是这一段唯一的内容。
+   * 1.2 秒一张：读得到，又不至于把 60 秒的序章占满整个 90 秒预算。
+   */
+  private demoPressCd = 0;
   /**
    * 序章那七张叙事段落正在排队或正在演。
    *
@@ -2120,11 +2138,87 @@ private onConfirm() {
    */
   private demoTick(dt: number): void {
     this.demoT += dt;
+    if (this.demoPressCd > 0) this.demoPressCd -= dt;
+    // 替玩家按那一下空格。**在预算检查之前**：
+    // 打卡要几秒才走完，而那几秒属于演示的内容。
+    this.demoMaybeCheckIn();
     if (this.demoT >= ECON.DEMO_BUDGET_SEC) {
       this.demoT = ECON.DEMO_BUDGET_SEC;
       this.ui.showToast(t('demo_card_notice'), 3200);
       this.finishRun();
     }
+  }
+
+  /**
+   * 演示里替玩家打卡。
+   *
+   * ## 为什么演示要会打卡
+   *
+   * 标题页第二颗按钮「演示 · 90 秒」是**评委成本最低的入口**——
+   * 大部分评委不会自己从头玩 20–30 分钟，他们会先点那颗。
+   * 而它原来只让车自己往前骑：149 秒里碎片恒为 0、到访恒为 0、
+   * 钱没花过、天数没动，而圈上那句「空格 · 在此完成乐事」**全程亮着**。
+   * 界面在喊"按空格"，演示永远不按。
+   *
+   * 评审看到的是这个游戏的**风景**，不是这个游戏。
+   *
+   * ## 它按的是哪一种
+   *
+   * 只有碎片驿站（`interactAt()` 的 `checkin` 那一族）。
+   * 铺子不开：它是一屏货架，开着就得有人关，而演示里没有人按键。
+   *
+   * 判定在 `phase.ts` 的 `demoShouldCheckIn()`（纯函数，无头可验），
+   * 这里只负责把宿主的事实喂给它，并把那一下按下去。
+   */
+  private demoMaybeCheckIn(): void {
+    if (!this.demoActive) return;
+    const nb = this.world.nearby;
+
+    // ---- 叙事段落占着屏：替玩家推进它 ----
+    //
+    // 序章那七张是**定时卡**，自己会走完，但走完要 60 多秒——
+    // 而演示的预算只有 90 秒。于是卡一直占着屏，
+    // 而「叙事占屏时不打卡」那条规则又把它挡死：演示一整趟都在读序章。
+    //
+    // 实机就是这个症状：120 秒里碎片恒为 0、到访恒为 0。
+    //
+    // 所以演示要**替玩家按键**：推进那张卡（按一下就走）。
+    // 每 1.2 秒按一次——再快就成快进了，而卡上的字是这一段唯一的内容。
+    if (this.ui.storyBusy) {
+      if (this.demoPressCd <= 0) {
+        this.demoPressCd = 1.2;
+        this.ui.advanceStoryCard();
+      }
+      return;
+    }
+
+    // 离开刚打过卡的那一站才复位：不闩住的话，
+    // 打卡结束相位回到 `roaming`、车还站在原地 —— 原地无限打卡。
+    if (
+      this.demoCheckedStation >= 0 &&
+      (nb.index !== this.demoCheckedStation || nb.distance > STATION_REACH)
+    ) {
+      this.demoCheckedStation = -1;
+    }
+    if (
+      !demoShouldCheckIn({
+        active: this.demoActive,
+        phase: this.phase,
+        storyBusy: this.ui.storyBusy,
+        busy: this.world.checkInStage !== 'none',
+        kind: this.interactKind(),
+        distance: nb.distance,
+        reach: STATION_REACH,
+        demoT: this.demoT,
+        endAt: ECON.DEMO_END_AT_SEC,
+      })
+    ) {
+      return;
+    }
+    // 按之前记住相位：只有真的动了（进了打卡相位）才闩住这一站。
+    const before = this.phase;
+    this.tryCheckIn();
+    if (this.phase !== before) this.demoCheckedStation = nb.index;
   }
 
   private finishRun() {
@@ -2652,7 +2746,16 @@ private onConfirm() {
     // 而 `DEMO_END_AT_SEC = 62` 之后本来就该开始收尾。
     // 跳过不是作弊：评审要看的是世界与流程，不是手速。
     // 顺带这一句也用掉了 `DEMO_END_AT_SEC`——否则它是数据表里两个没人读的数之一。
-    if (this.demoActive && this.demoT > ECON.DEMO_END_AT_SEC) {
+    //
+    // ⚠ **原来这条是 `demoT > DEMO_END_AT_SEC`**（只在收尾阶段才跳过）。
+    //   那是"演示不打卡"时代的写法：演示里没人按键，而**演示本来就不打卡**，
+    //   所以这条分支永远走不到。
+    //   现在演示会打卡了（见 `demoMaybeCheckIn()`），它就真的走到了——
+    //   而在小游戏里等一个不会来的玩家，就是**演示卡在乐事那一屏直到预算耗尽**。
+    //   所以现在**演示里一律跳过**：有没有手是同一件事，
+    //   不该因为发生在前 62 秒还是后 28 秒而变成两种行为。
+    //   `DEMO_END_AT_SEC` 挪去管"从这一秒起不再打卡"（同一族的两处收尾）。
+    if (this.demoActive) {
       game.checkIn(stationIdx);
       // **不给「失败」**。演示里没有人按键，这一局必然是跳过去的，
       // 而屏幕上弹出「失败」是在告诉评审"这个游戏做不出来"。
