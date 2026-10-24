@@ -384,7 +384,8 @@ private demoDrive(): Input {
   | `.cache/eval/final.mjs` | 对比度实测（桌面 + 触屏两轮） |
   | `.cache/eval/toast2.mjs` | 序章闸门逐次空格 + toast 抓取 |
   | `.cache/eval/toast3.mjs` | toast 放大 4 倍取证 |
-  | `.cache/eval/accept.mjs` | 修完之后的实机复测（对比度 + 演示） |
+  | `.cache/eval/accept.mjs` | 修完之后的实机复测（对比度 + 演示打卡） |
+  | `.cache/eval/demoend.mjs` | 演示收尾：它到底会不会走到明信片结算页 |
   | `.cache/eval/toast-zoom.png` | **§3.1 的头号证据图** |
   | `.cache/eval/toast-bad.png` | 同一条 toast 的原尺寸截图 |
   | `.cache/eval/crop-prompt.png` | §3.3 提示药丸特写 |
@@ -398,6 +399,7 @@ private demoDrive(): Input {
   node .cache/eval/toast2.mjs               # 序章闸门 + toast 抓取
   node .cache/eval/toast3.mjs               # toast 放大取证
   node .cache/eval/accept.mjs               # 修完之后的复测
+  node .cache/eval/demoend.mjs              # 演示收尾（到明信片结算页）
   ```
   （这些脚本需要本机 Chrome 与 `playwright-core`。）
 
